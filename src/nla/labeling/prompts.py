@@ -177,6 +177,31 @@ def build_position_prompt(inp: PositionLabelInput) -> tuple[str, str]:
     return _POSITION_SYSTEM, user
 
 
+_STRICT_EXTRA = (
+    "\nAdditional rules (strict):\n"
+    "- Both 'scene' and 'target' bullets are REQUIRED in every response. "
+    "If no clear target object is visible at this position (especially for "
+    "image_patch tokens that fall on background pixels), write exactly: "
+    "'- target: none in this patch.'\n"
+    "- Use ONLY these bullet categories: "
+    f"{', '.join(BULLET_CATEGORIES)}. Do not invent new categories "
+    "(no 'tool', 'object', 'secondary_target', etc.).\n"
+)
+
+_STRICT_POSITION_SYSTEM = _POSITION_SYSTEM + _STRICT_EXTRA
+
+
+def build_strict_position_prompt(inp: PositionLabelInput) -> tuple[str, str]:
+    """Like ``build_position_prompt`` but enforces required bullets and category set.
+
+    Used for re-labeling rows that were missing ``scene:`` / ``target:`` bullets
+    or that invented non-canonical categories. The user prompt is unchanged; the
+    system prompt has two extra rules appended.
+    """
+    _, user = build_position_prompt(inp)
+    return _STRICT_POSITION_SYSTEM, user
+
+
 # ---------------------------------------------------------------------------
 # Per-step prompt (legacy / scene-level baseline, kept for completeness)
 # ---------------------------------------------------------------------------

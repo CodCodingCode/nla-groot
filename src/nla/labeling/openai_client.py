@@ -198,6 +198,28 @@ async def _label_one_async(client, inp, model: str, sem: asyncio.Semaphore,
     )
 
 
+def _position_resume_key_from_row(obj: dict) -> tuple[str, int, str] | None:
+    """Match (source_example_id, position_index, position_type) for position labels."""
+    if obj.get("kind") != "position":
+        return None
+    m = obj.get("meta") or {}
+    sid = m.get("source_example_id")
+    pidx = m.get("position_index")
+    pt = m.get("position_type")
+    if sid is None or pidx is None or pt is None:
+        return None
+    return (str(sid), int(pidx), str(pt))
+
+
+def _position_resume_key_from_input(inp) -> tuple[str, int, str] | None:
+    if not isinstance(inp, PositionLabelInput):
+        return None
+    sid = inp.extra.get("source_example_id")
+    if sid is None:
+        return None
+    return (str(sid), int(inp.position_index), str(inp.position_type))
+
+
 async def label_many_async(
     inputs: Iterable,
     output_jsonl: str | Path,
@@ -210,15 +232,18 @@ async def label_many_async(
     base_backoff: float = 1.0,
     progress_every: int = 25,
 ) -> int:
-    """Run labeling concurrently, streaming JSONL with resume on example_id.
+    """Run labeling concurrently, streaming JSONL with resume.
 
-    Returns the number of *new* results appended (not counting resumed ones).
+    Resume skips when either ``example_id`` was already written successfully *or*
+    the canonical position key ``(source_example_id, position_index, position_type)``
+    is present (prevents duplicate / conflicting rows if ``example_id`` drifted).
     """
     _, AsyncOpenAI = _get_openai()
     output_jsonl = Path(output_jsonl)
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
     done_ids: set[str] = set()
+    done_pos_keys: set[tuple[str, int, str]] = set()
     if resume and output_jsonl.exists():
         with output_jsonl.open() as f:
             for line in f:
@@ -231,11 +256,21 @@ async def label_many_async(
                     continue
                 if obj.get("description") and not obj.get("error"):
                     done_ids.add(obj["example_id"])
+                    pk = _position_resume_key_from_row(obj)
+                    if pk is not None:
+                        done_pos_keys.add(pk)
 
-    todo = [i for i in inputs if i.example_id not in done_ids]
+    todo = []
+    for i in inputs:
+        if i.example_id in done_ids:
+            continue
+        pk = _position_resume_key_from_input(i)
+        if pk is not None and pk in done_pos_keys:
+            continue
+        todo.append(i)
     logger.info(
-        "Labeling: %d new, %d previously done -> %s",
-        len(todo), len(done_ids), output_jsonl,
+        "Labeling: %d new, %d example_ids done, %d position keys done -> %s",
+        len(todo), len(done_ids), len(done_pos_keys), output_jsonl,
     )
 
     if not todo:

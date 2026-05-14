@@ -47,6 +47,7 @@ def _split_episode_aware(
     held_out: bool,
     split_by: SplitBy = "episode",
     label_for_logs: str = "indices",
+    allow_row_fallback: bool = True,
 ) -> list[int]:
     """Return a train- or val-side subset of ``indices`` after a deterministic split.
 
@@ -58,6 +59,10 @@ def _split_episode_aware(
       - the chosen mode is "row", or
       - episode_index is None for every record, or
       - there are fewer than 2 distinct episodes (no valid episode-level split).
+
+    Set ``allow_row_fallback=False`` to make those "cannot do episode split"
+    cases raise ``RuntimeError`` instead of silently degrading to row split
+    (recommended for paper / generalization runs).
     """
     if held_out_fraction <= 0.0:
         return indices if not held_out else []
@@ -77,13 +82,20 @@ def _split_episode_aware(
         n_ep = len(by_ep)
         sentinel_only = list(by_ep.keys()) == [SENTINEL]
         if n_ep < 2 or sentinel_only:
-            logger.warning(
-                "[%s] episode split requested but only %d distinct episode_index "
-                "values present (sentinel_only=%s); falling back to row-level split. "
+            msg = (
+                f"[{label_for_logs}] episode split requested but only {n_ep} "
+                f"distinct episode_index values present (sentinel_only={sentinel_only}). "
                 "Episode-stratified holdout is required for memorization-vs-generalization "
-                "analysis; check that the extraction wrote episode_index.",
-                label_for_logs, n_ep, sentinel_only,
+                "analysis; check that the extraction wrote episode_index."
             )
+            if not allow_row_fallback:
+                raise RuntimeError(
+                    msg
+                    + " Refusing to silently fall back to a row split. "
+                    "Fix the extraction metadata, pass split_by='row' explicitly, "
+                    "or set allow_episode_split_row_fallback=True."
+                )
+            logger.warning("%s Falling back to row-level split.", msg)
         else:
             ep_keys = sorted(by_ep.keys(), key=lambda k: (k == SENTINEL, str(k)))
             shuffled = list(ep_keys)
@@ -218,6 +230,7 @@ class LabeledPositionDataset(Dataset):
         held_out=False,
         max_items=None,
         split_by: SplitBy = "episode",
+        allow_episode_split_row_fallback: bool = True,
     ):
         self.reader = ActivationShardReader(activations_root)
         self._index_by_id = {rec.example_id: i for i, rec in enumerate(self.reader.records)}
@@ -253,6 +266,7 @@ class LabeledPositionDataset(Dataset):
                 held_out=held_out,
                 split_by=split_by,
                 label_for_logs=f"LabeledPositionDataset({'val' if held_out else 'train'})",
+                allow_row_fallback=allow_episode_split_row_fallback,
             )
             valid = [valid[i] for i in kept]
         else:
@@ -333,6 +347,7 @@ class SampledPositionDataset(Dataset):
         held_out_fraction=0.0,
         held_out=False,
         split_by: SplitBy = "episode",
+        allow_episode_split_row_fallback: bool = True,
     ):
         self.reader = ActivationShardReader(activations_root)
         self.sampler = TokenPositionSampler(position_mix=position_mix, seed=seed)
@@ -346,6 +361,7 @@ class SampledPositionDataset(Dataset):
                 held_out=held_out,
                 split_by=split_by,
                 label_for_logs=f"SampledPositionDataset({'val' if held_out else 'train'})",
+                allow_row_fallback=allow_episode_split_row_fallback,
             )
         else:
             rng = random.Random(seed)

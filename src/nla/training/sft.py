@@ -103,6 +103,13 @@ class SFTConfig:
     # memorization-vs-generalization metric).  "row" = legacy random row split.
     split_by: str = "episode"
 
+    # When ``split_by == "episode"`` but the dump doesn't support it (no
+    # ``episode_index`` or only one distinct episode), the dataset normally
+    # logs a warning and falls back to a row split.  Set this to ``False`` for
+    # paper / generalization runs to make that case raise ``RuntimeError``
+    # instead of silently degrading.
+    allow_episode_split_row_fallback: bool = True
+
 
 def _setup_outputs(out_dir: Path) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -138,6 +145,7 @@ def _make_dataloaders(cfg: SFTConfig):
         held_out=False,
         max_items=cfg.max_train_items,
         split_by=cfg.split_by,
+        allow_episode_split_row_fallback=cfg.allow_episode_split_row_fallback,
     )
     val_ds = LabeledPositionDataset(
         cfg.activations_root, cfg.labels_jsonl,
@@ -146,6 +154,7 @@ def _make_dataloaders(cfg: SFTConfig):
         held_out=True,
         max_items=cfg.max_val_items,
         split_by=cfg.split_by,
+        allow_episode_split_row_fallback=cfg.allow_episode_split_row_fallback,
     )
     logger.info("Train labels: %d  Val labels: %d", len(train_ds), len(val_ds))
     train_loader = DataLoader(

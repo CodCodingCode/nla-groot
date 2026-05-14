@@ -6,7 +6,11 @@ from a mixture:
 
     40%  last_text   - last non-pad, non-image token
     40%  image_patch - uniform random over image-token positions
-    20%  anchor      - the EOS / sequence-final position
+    20%  anchor      - the **last valid (non-pad) sequence token**, which may
+                       be an image-patch token if the sequence ends in vision.
+                       This matches ``nla.extraction.sampler._anchor_index`` so
+                       labeled positions, training samples, and stratified FVE
+                       all refer to the same token role.
 
 This module operates on already-extracted activations from disk. Each example
 has shape `[T, H]` with `attention_mask[T]` and `image_mask[T]` companions.
@@ -19,6 +23,7 @@ from dataclasses import dataclass
 
 import torch
 
+from nla.extraction.sampler import _anchor_index
 from nla.layer_spec import POSITION_MIX
 
 
@@ -78,8 +83,10 @@ class TokenPositionSampler:
             return "image_patch", self._rng.choice(image_positions)
         if ptype == "last_text" and text_positions:
             return "last_text", text_positions[-1]
-        if ptype == "anchor" and text_positions:
-            return "anchor", text_positions[-1]
+        if ptype == "anchor":
+            anchor_idx = _anchor_index(attention_mask)
+            if anchor_idx is not None:
+                return "anchor", anchor_idx
         # Fallbacks
         if text_positions:
             return "last_text", text_positions[-1]
