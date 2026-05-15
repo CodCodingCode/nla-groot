@@ -37,6 +37,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--positions-per-example", type=int, default=1,
                    help="How many distinct positions to sample per activation example. "
                         "1 = the original behavior; 4-8 is a good sweet spot for SFT.")
+    p.add_argument("--guarantee-strata", action="store_true",
+                   help="When --positions-per-example >= 2, always reserve one slot "
+                        "for last_text and one for anchor (when present). Avoids the "
+                        "image_patch-dominated ~75/16/8 mix produced by pure "
+                        "POSITION_MIX draws against image-heavy sequences. See "
+                        "docs/sft_plan/01_data_audit.md.")
     p.add_argument("--no-resume", action="store_true",
                    help="Disable JSONL resume (re-label everything).")
     p.add_argument("--log-level", default="INFO")
@@ -66,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         state_name=args.state_name,
         max_examples=args.max_examples,
         positions_per_example=args.positions_per_example,
+        guarantee_strata=args.guarantee_strata,
         resume=not args.no_resume,
     )
     logging.info("Labeled %d new examples.", n_new)

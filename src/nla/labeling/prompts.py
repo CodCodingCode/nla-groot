@@ -109,6 +109,36 @@ class PositionLabelInput:
     extra: dict = field(default_factory=dict)
 
 
+# Rules that apply when the highlighted token is an IMAGE-PATCH token.
+#
+# We have observed (see ``docs/sft_plan/01_data_audit.md`` §3.2 "Confabulated
+# image_region content") that labelers will guess a quadrant or screen
+# location from the ``(k, n)`` patch index alone — e.g. "lower-left of the
+# image patch" derived purely from k=89/256.  The labeler is NOT shown which
+# patch is k; only the full camera frame(s).  Treating those guesses as gold
+# trains the AV to confidently invent spatial layout.
+#
+# These rules forbid that pattern.  They are appended to ``_POSITION_SYSTEM``
+# so they are inherited by ``_STRICT_POSITION_SYSTEM`` (and any future
+# variant) without duplication; they only "kick in" when the user prompt
+# marks the highlighted position as IMAGE-PATCH.
+_IMAGE_PATCH_RULES = (
+    "\nRules for IMAGE-PATCH positions:\n"
+    "- The patch index '(k of n)' is metadata about the model's token layout. "
+    "Do NOT use it to guess screen quadrant, side, or pixel coordinates "
+    "(no 'upper-left', 'lower-right', 'top quadrant', etc. inferred from k).\n"
+    "- Spatial language is allowed only when it is directly visible in the "
+    "attached camera frame(s) and refers to objects/regions in the frame — "
+    "not to the patch grid.\n"
+    "- If you cannot ground the patch's content in a specific visible region, "
+    "the 'image_region' bullet should describe what is visibly present in the "
+    "frame at large, e.g. "
+    "\"image_region: visible features include the bowl rim and gripper; "
+    "exact patch location within the frame is not specified.\"\n"
+    "- If no clear target object is visible at all, prefer "
+    "'- target: none in this patch.' over inventing one.\n"
+)
+
 _POSITION_SYSTEM = f"""You are an interpretability annotator for the GR00T N1.7 \
 vision-language-action robot model.
 
@@ -123,9 +153,10 @@ Crucially, the LAST bullet must specifically describe what the highlighted \
 position encodes — i.e., what the model is committing to *at that moment* — \
 not just the overall scene.  Examples of last-bullet content by position type:
 - last_text: "language: instruction has been read; goal is to grasp the blue cube."
-- image_patch: "image_region: focusing on the bowl rim in the upper-right of the table."
+- image_patch: "image_region: visible features include the bowl rim and the \
+gripper above the table; exact patch location within the frame is not specified."
 - anchor: "plan: ready to begin reaching toward the target."
-"""
+{_IMAGE_PATCH_RULES}"""
 
 
 def _format_state(state: list[float] | None, name: str | None) -> str:

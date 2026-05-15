@@ -1,5 +1,7 @@
 # 05 — Architecture audit: AV / AR / injection vs. the NLA paper
 
+> **Training vs semantics:** Injection math here is orthogonal to the **V2** issue (high reconstruction, **generic captions**). Closing that gap is training/eval, not projector depth — **`06_v2_postmortem_v3_rerun.md`**.
+
 Audit of `src/nla/models/{av.py, ar.py, templates.py}` against
 Fraser-Taliente et al., *Natural Language Autoencoders Produce Unsupervised
 Explanations of LLM Activations* (Transformer Circuits, 2026), specialized

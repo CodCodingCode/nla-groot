@@ -111,6 +111,21 @@ class SFTConfig:
     closed_loop_temperatures: tuple[float, ...] = (0.0,)
     closed_loop_max_batches: int | None = None
 
+    # ---- Scheduled sampling: feed AR its own AV-generated captions some of
+    # the time (closes the SFT/eval distribution gap, makes the contrastive
+    # NCE loss actually see template collapse and penalize it).
+    #
+    # Per-batch coin flip with prob ``p_av = ar_av_mix_max * ramp(step)``;
+    # ramp is 0 until ``ar_av_mix_warmup_frac * total_steps`` then linear up
+    # to 1 at total_steps.  ``ar_av_mix_max = 0.0`` (default) disables the
+    # feature entirely.  AV's own CE loss always uses gold tokens.
+    ar_av_mix_max: float = 0.0
+    ar_av_mix_warmup_frac: float = 0.5
+    ar_av_mix_max_new_tokens: int = 96
+    ar_av_mix_do_sample: bool = False
+    # For diagnostic logging only.
+    ar_av_mix_log_text_every: int = 200
+
     # If labels are very few (e.g. smoke tests), allow the same item to repeat
     # without erroring.
     drop_last: bool = False
@@ -129,6 +144,12 @@ class SFTConfig:
     # paper / generalization runs to make that case raise ``RuntimeError``
     # instead of silently degrading.
     allow_episode_split_row_fallback: bool = True
+
+    # Validate ``position_index < seq_len`` for every kept label at dataset
+    # init time. Raises ``ValueError`` listing offenders if any row would
+    # otherwise raise ``IndexError`` mid-training. Disable only for ablations
+    # where you intentionally feed mismatched labels/activations.
+    strict_position_check: bool = True
 
 
 def _setup_outputs(out_dir: Path) -> dict[str, Path]:
@@ -207,6 +228,7 @@ def _make_dataloaders(cfg: SFTConfig):
     train_ds = LabeledPositionDataset(
         cfg.activations_root, cfg.labels_jsonl,
         seed=cfg.seed,
+        strict_position_check=cfg.strict_position_check,
         held_out_fraction=cfg.held_out_fraction,
         held_out=False,
         max_items=cfg.max_train_items,
@@ -217,6 +239,7 @@ def _make_dataloaders(cfg: SFTConfig):
     val_ds = LabeledPositionDataset(
         cfg.activations_root, cfg.labels_jsonl,
         seed=cfg.seed,
+        strict_position_check=cfg.strict_position_check,
         held_out_fraction=cfg.held_out_fraction,
         held_out=True,
         max_items=cfg.max_val_items,
@@ -269,6 +292,22 @@ def _lr_schedule(step: int, cfg: SFTConfig) -> float:
         return cfg.learning_rate * (step + 1) / max(1, cfg.warmup_steps)
     prog = (step - cfg.warmup_steps) / max(1, cfg.total_steps - cfg.warmup_steps)
     return 0.5 * cfg.learning_rate * (1.0 + math.cos(math.pi * min(1.0, prog)))
+
+
+def _ar_av_mix_p(step: int, cfg: SFTConfig) -> float:
+    """Probability of swapping in AV-generated captions for AR's loss this step.
+
+    Stays at 0 until ``ar_av_mix_warmup_frac * total_steps`` then ramps linearly
+    up to ``ar_av_mix_max`` by ``total_steps``.  Clamped to [0, 1].
+    """
+    if cfg.ar_av_mix_max <= 0.0:
+        return 0.0
+    warmup_end = int(cfg.ar_av_mix_warmup_frac * cfg.total_steps)
+    if step < warmup_end:
+        return 0.0
+    span = max(1, cfg.total_steps - warmup_end)
+    prog = min(1.0, (step - warmup_end) / span)
+    return max(0.0, min(1.0, prog * cfg.ar_av_mix_max))
 
 
 def _write_jsonl_row(path: Path, row: dict) -> None:
@@ -416,11 +455,39 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
             )
             ce = av_out.loss
 
+            # Scheduled sampling: with probability p_av use AV's own generated
+            # text as AR's input (and as the contrastive batch).  AV's CE loss
+            # above is unchanged -- it always trains on gold.
+            p_av = _ar_av_mix_p(step, cfg)
+            ar_input_src = "gold"
+            ar_input_text = descs
+            if p_av > 0.0 and torch.rand((), device="cpu").item() < p_av:
+                av.eval()
+                with torch.no_grad():
+                    gen_out = av.generate(
+                        activations=acts,
+                        position_types=ptypes,
+                        max_new_tokens=cfg.ar_av_mix_max_new_tokens,
+                        do_sample=bool(cfg.ar_av_mix_do_sample),
+                        temperature=0.7 if cfg.ar_av_mix_do_sample else 1.0,
+                    )
+                av.train()
+                ar_input_text = [t.strip() or "(empty)" for t in gen_out["text"]]
+                ar_input_src = "av"
+                if (
+                    cfg.ar_av_mix_log_text_every > 0
+                    and step % cfg.ar_av_mix_log_text_every == 0
+                ):
+                    sample = ar_input_text[0][:240].replace("\n", " ")
+                    logger.info("[step %d] p_av=%.2f mix sample: %s", step, p_av, sample)
+
             if cfg.ar_contrastive_weight > 0.0:
-                ar_mse, ar_nce, _pred_scaled = ar.forward_sft(descs, acts, return_nce=True)
+                ar_mse, ar_nce, _pred_scaled = ar.forward_sft(
+                    ar_input_text, acts, return_nce=True,
+                )
                 ar_term = ar_mse + cfg.ar_contrastive_weight * ar_nce
             else:
-                ar_mse, _pred_scaled = ar.forward_sft(descs, acts)
+                ar_mse, _pred_scaled = ar.forward_sft(ar_input_text, acts)
                 ar_nce = torch.zeros((), device=acts.device)
                 ar_term = ar_mse
 
@@ -450,6 +517,8 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                     "loss": float(loss.detach().item()),
                     "lr": optim.param_groups[0]["lr"],
                     "elapsed_s": time.time() - start,
+                    "p_av": float(p_av),
+                    "ar_mix_used": 1 if ar_input_src == "av" else 0,
                 }
                 _write_jsonl_row(paths["metrics"], row)
                 if tb is not None:
@@ -459,6 +528,8 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                     tb.add_scalar("train/qw_mean", row["qw_mean"], step)
                     tb.add_scalar("train/loss", row["loss"], step)
                     tb.add_scalar("train/lr", row["lr"], step)
+                    tb.add_scalar("train/p_av", row["p_av"], step)
+                    tb.add_scalar("train/ar_mix_used", row["ar_mix_used"], step)
 
             if step > 0 and step % cfg.eval_every == 0:
                 metrics = _evaluate(

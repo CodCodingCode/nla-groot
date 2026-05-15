@@ -7,6 +7,9 @@
 > Reference: Fraser-Taliente et al., *Natural Language Autoencoders Produce
 > Unsupervised Explanations of LLM Activations*, Transformer Circuits 2026.
 
+
+> **Post–V2 (droid_100ep):** High FVE — especially **teacher-forced** — can hide **shorthand templates** that fail **scene grounding**. Run **`scripts/eval/llm_judge_av_captions.py`** (axes **B/C**) on serious checkpoints; enable **`--eval-closed-loop`** on SFT. Rationale: **`06_v2_postmortem_v3_rerun.md`**.
+
 ---
 
 ## 0. TL;DR — must-have vs nice-to-have
@@ -15,23 +18,24 @@
 
 | # | Metric | What it answers | Where it lives |
 |---|---|---|---|
-| 1 | **Closed-loop FVE** (`h → AV → ŷ → AR → ĥ`) stratified by `position_type`, on val | "Did the autoencoder learn anything?" | new `nla.eval.recon.closed_loop_fve` (refactor of `grpo._evaluate_fve`) |
-| 2 | **Teacher-forced FVE** (`description → AR → ĥ` against `h`) on val | "Is AR sane / are labels self-consistent?" | already in `sft._evaluate` — **rename keys** |
-| 3 | **CE on val** (token-level NLL of gold description given `h`) | "Did the AV head fit at all?" | already in `sft._evaluate` |
-| 4 | **Train vs val FVE/CE gap** | Memorization signal (overall + per-episode-stratum) | new — add `train_fve_subsample` to `_evaluate` |
-| 5 | **Greedy vs sampled FVE gap** (T ∈ {0.0, 0.7, 1.0}) | Entropy / memorization signal at the generative head | already exists in `grpo._evaluate_fve(temperatures=…)`; **port to SFT** |
-| 6 | **Stratified FVE by `position_type`** (`image_patch` / `last_text` / `anchor`) | "Does it work where it matters (image patches)?" | already in `StratifiedFve` |
-| 7 | **Generation samples dump** (~32 rollouts, gold + AV greedy + 1 sample, per `position_type`) | Eyeball regression check | new `samples.jsonl` written every `eval_every` |
+| 1 | **Closed-loop FVE** (`h → AV → ŷ → AR → ĥ`), stratified | Headline **numerical** autoencoder quality; same path as inference | `sft._evaluate` + **`--eval-closed-loop`** → `closed_greedy/*`, `closed_t<temp>/*` (logic shared with `grpo._evaluate_fve`) |
+| 2 | **Teacher-forced FVE** (`gold description → AR → ĥ`) | AR + labels sanity **only**; **not sufficient** for “good model” | `sft._evaluate` → `fve`, `mse`, `cosine` (consider mentally prefixing `tf/` — rename in code TBD) |
+| 3 | **CE on val** | AV fit to **gold** token targets | `sft._evaluate` → `ce` |
+| 4 | **LLM judge vs frames** (`gold` + `av_pred`, **B** grounding / **C** appropriateness) | **Scene-specific** language vs camera — **must-run** for interpretability claims | **`scripts/eval/llm_judge_av_captions.py`** |
+| 5 | **Train vs val FVE/CE gap** | Memorization | future / `train_fve_subsample` |
+| 6 | **Greedy vs sampled closed-loop** (e.g. 0.0 vs 0.7) | Collapse / entropy at AV | `closed_loop_temperatures` on SFT; GRPO eval |
+| 7 | **Stratified FVE** by `position_type` | image_patch vs text vs anchor | `StratifiedFve` |
+| 8 | **Samples dump** | Cheap eyeball | **`scripts/eval/dump_av_samples.py`** (ad hoc; not auto every `eval_every` yet) |
 
 ### Nice-to-have for run #1 (cheap, ship if time permits)
 
 | # | Metric | Notes |
 |---|---|---|
-| 8 | **Behavioral probe: target object MCQ** | Re-uses gold image + a small object pool from the dataset; ~20 lines of code on top of the existing `grader.py` |
-| 9 | **Behavioral probe: gripper open/closed** | Boolean classification from the AV caption; tiny grader prompt or regex on the `gripper:` bullet |
-| 10 | **Behavioral probe: next action class (reach / grasp / lift / place)** | 4-way classification from `plan:` / `motion:` bullets |
-| 11 | **Confabulation spot-check** (re-use `grader.GPT51Grader` on N=30 AV outputs) | Same pass/fail axes (B grounding, C appropriateness) as labeling QA — drop-in |
-| 12 | **Paraphrase-FVE drop** (lite) | Round-trip AV output through a paraphraser, recompute FVE, compare; one number, big interpretability signal |
+| 9 | **Behavioral probe: target object MCQ** | Re-uses gold image + a small object pool from the dataset |
+| 10 | **Behavioral probe: gripper open/closed** | Regex or tiny judge on `gripper:` bullet |
+| 11 | **Behavioral probe: next action class** | From `plan:` / `motion:` bullets |
+| 12 | **Interp panel** (counterfactual `h` edits) | `build_eval_cases.py` → `run_interp_panel.py` — **faithfulness under edits**, not the same as scene B |
+| 13 | **Paraphrase-FVE drop** (lite) | Paraphrase AV text → AR → compare FVE |
 
 ### Defer (v2+)
 
@@ -88,15 +92,13 @@ quality, but the headline NLA metric is **closed-loop**: `h → AV → text → 
 → ĥ`. The two numbers are very different. The teacher-forced one can stay high
 even if the AV is talking to itself.
 
-Three concrete changes:
+**Status (2026-05+):** (2) and (3) are satisfied for SFT via **`--eval-closed-loop`** and **`closed_loop_temperatures`** (metrics prefixed `closed_greedy/`, `closed_t…/`). Shared refactor into `nla.eval.recon` may still happen. (1) rename to `tf/*` in logs is **not** done — mentally treat default `fve`/`cosine` as teacher-forced. **Additionally:** run **`llm_judge_av_captions.py`** — reconstruction alone is not enough (**`06_v2_postmortem_v3_rerun.md`**).
 
-1. **Rename teacher-forced metrics** with a `tf/` prefix (`tf/fve`,
-   `tf/mse`, `tf/cosine`, `tf/fve/position=...`) so they don't shadow the
-   closed-loop metric we're about to add.
-2. **Add closed-loop FVE** as the headline metric. Port `grpo._evaluate_fve`
-   into a shared module so both SFT and GRPO call the same code.
-3. **Sweep temperatures** (`{0.0, 0.7, 1.0}`) on the closed-loop pass so we get
-   the greedy/sampled gap "for free."
+Legacy three-item list for history:
+
+1. **Rename teacher-forced metrics** with a `tf/` prefix (`tf/fve`, …) — TBD.
+2. **Closed-loop FVE** — implemented on SFT behind **`--eval-closed-loop`**.
+3. **Temperature sweep on closed-loop** — use **`--closed-loop-temps`** with SFT.
 
 Concrete refactor:
 

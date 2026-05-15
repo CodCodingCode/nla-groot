@@ -1,5 +1,7 @@
 # 02 — SFT hyperparameters for the first real `droid_100ep` warm-start
 
+> **Success is not val FVE alone.** Use **`--eval-closed-loop`**, **`--ar-contrastive-weight`** when batch allows, and post-run **`scripts/eval/llm_judge_av_captions.py`** (axis **B** = scene-specific). Full rationale and V2 postmortem: **`06_v2_postmortem_v3_rerun.md`**.
+
 Audience: anyone about to launch the first proper joint AV+AR warm-start on
 `data/activations/droid_100ep` + `data/labels/droid_100ep/labels.jsonl`. Goal:
 produce a paste-ready recipe, justify each knob against (a) the Anthropic NLA
@@ -75,6 +77,13 @@ Observations:
 Implication: the current defaults work. The real-run upgrade is mostly:
 fix AR depth (10 → 16), modestly extend total_steps, raise warmup, and
 trim eval cost so cycles aren't wasted on full val passes.
+
+> **Note on defaults vs recipe.** The numbers in this document are
+> _recommendations_, not the script defaults. `scripts/training/run_sft.py`
+> still ships with its smaller smoke-test defaults (e.g. `warmup_steps`,
+> `total_steps`, `learning_rate`); pass the recipe values explicitly on the
+> CLI (or via a config JSON) when running a real experiment. The full
+> command in §4 below already does this.
 
 ---
 

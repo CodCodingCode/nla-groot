@@ -9,6 +9,7 @@ touching the 4B base model.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -289,3 +290,70 @@ def test_run_sft_end_to_end_tiny(tmp_path: Path, monkeypatch):
     train_rows = [r for r in rows if r["phase"] == "train"]
     assert len(train_rows) >= 1
     assert all(torch.isfinite(torch.tensor(r["loss"])) for r in train_rows)
+
+
+def test_run_sft_logs_ar_mix_and_nce(tmp_path: Path, monkeypatch):
+    """Tiny run with AR-AV mixing + contrastive loss logs expected keys/values."""
+    _write_synthetic_dump(tmp_path / "act", n_examples=8)
+    _write_synthetic_labels(
+        tmp_path / "labels.jsonl",
+        [(f"traj0_step{i:04d}", i + 1, f"- scene: s{i}\n- target: t{i}") for i in range(8)],
+    )
+
+    av_template, ar_template = _make_tiny_models(alpha=5.0)
+
+    def _fake_build_models(_cfg):
+        return av_template, ar_template
+
+    monkeypatch.setattr("nla.training.sft._build_models", _fake_build_models)
+
+    cfg = SFTConfig(
+        activations_root=str(tmp_path / "act"),
+        labels_jsonl=str(tmp_path / "labels.jsonl"),
+        output_dir=str(tmp_path / "sft_out_mix"),
+        av_cfg=AVConfig(activation_dim=TINY_ACTIVATION_DIM, alpha=5.0, dtype="float32"),
+        ar_cfg=ARConfig(
+            activation_dim=TINY_ACTIVATION_DIM,
+            alpha=5.0,
+            dtype="float32",
+            truncate_to_n_layers=1,
+        ),
+        device="cpu",
+        seed=0,
+        batch_size=2,
+        total_steps=24,
+        warmup_steps=1,
+        eval_every=1000,            # train rows only for this test
+        save_every=10_000,
+        log_every=1,
+        held_out_fraction=0.25,
+        gradient_checkpointing=False,
+        ar_contrastive_weight=0.5,
+        ar_av_mix_max=1.0,
+        ar_av_mix_warmup_frac=0.0,
+        ar_av_mix_max_new_tokens=24,
+        ar_av_mix_do_sample=False,
+    )
+
+    run_sft(cfg)
+
+    metrics_jsonl = tmp_path / "sft_out_mix" / "metrics.jsonl"
+    rows = [json.loads(l) for l in metrics_jsonl.read_text().splitlines() if l.strip()]
+    train_rows = [r for r in rows if r.get("phase") == "train"]
+    assert train_rows, "expected train rows in metrics.jsonl"
+
+    # Schema contract for the new tracking keys.
+    for r in train_rows:
+        assert "p_av" in r
+        assert "ar_mix_used" in r
+        assert "ar_nce" in r
+        assert math.isfinite(float(r["ar_nce"]))
+
+    # With warmup_frac=0 and enough steps, p_av should become positive.
+    assert max(float(r["p_av"]) for r in train_rows) > 0.0
+    # Deterministic seed + many steps should hit at least one AV-mixed step.
+    assert sum(int(r["ar_mix_used"]) for r in train_rows) > 0
+
+    # Dead NCE baseline at B=2 is ln(2); final row should be comfortably below.
+    final_ar_nce = float(train_rows[-1]["ar_nce"])
+    assert final_ar_nce < (math.log(cfg.batch_size) - 0.01)

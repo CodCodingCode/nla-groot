@@ -2,6 +2,19 @@
 
 Concise reference distilled from project code and the Anthropic NLA paper (Transformer Circuits, 2026). Use this so other agents don’t re-derive basics.
 
+> **Project reality (post–droid_100ep V2):** Val **FVE** (teacher-forced or even **closed-loop**) can look **good** while **`llm_judge_av_captions.py` axis B (grounding)** tanks — **shorthand template collapse**. Full write-up + rerun checklist: **`docs/sft_plan/06_v2_postmortem_v3_rerun.md`**. Older bullets below remain true for **mechanics**; **`06`** is the agreed “what went wrong / what to run” layer.
+
+---
+
+## Repo & doc map (this codebase)
+
+- **Root overview:** `README.md` — layout, quick start, V2 pointers.
+- **SFT runbook:** `docs/sft_plan/00_PLAN.md` (checklist); **`06_v2_postmortem_v3_rerun.md`** (V2/V3 narrative + flags).
+- **V2 detail / GRPO A/B:** `docs/sft_plan/04_v2_lessons_learned.md` and **`docs/evals/v2_lessons_learned.md`** (overlapping depth; evals copy weights **interp + GRPO cookbook**).
+- **Library code:** `src/nla/` (`models`, `training`, `extraction`, `labeling`, `steering`, …).
+- **Entrypoints:** `scripts/training/run_sft.py`, `run_grpo.py`; `scripts/eval/*.py`.
+- **Artifacts:** `data/`, `runs/`, `logs/` are typically **gitignored**; paths in docs assume NFS/local mirrors.
+
 ---
 
 ## What we’re building
@@ -43,8 +56,10 @@ Concise reference distilled from project code and the Anthropic NLA paper (Trans
 
 - **Both AV and AR** updated **in the same steps** on **same batches** (not “week of AV only”).
 - **AV loss:** **cross-entropy** on `description` tokens with **`h` injected** (teacher forcing).
-- **AR loss:** **MSE** in **`h/α`** space from `description` → `ĥ`.
+- **AR loss:** **MSE** in **`h/α`** space from `description` → `ĥ` (optional **InfoNCE** — **AR only**, not AV).
 - **Not GRPO** — pure supervised gradients until RL phase.
+
+**Distribution gap:** AR default trains on **gold** text; at inference **AV** feeds AR — use **`--ar-av-mix-max`** (scheduled AR-on-AV text in `run_sft.py`) and/or **GRPO** / grounding-aware losses. See **`06_v2_postmortem_v3_rerun.md`**.
 
 ---
 
@@ -83,6 +98,39 @@ Concise reference distilled from project code and the Anthropic NLA paper (Trans
 ## Metrics
 
 - **Primary reconstruction:** **FVE / MSE** (and codebase adds **cosine** as auxiliary). NLA paper emphasizes **FVE/MSE**, not cosine as headline.
+
+### What “good” means here (don’t skip)
+
+| Signal | What it catches | Caveat |
+|--------|------------------|--------|
+| **Teacher-forced** `fve` / `cosine` in `sft._evaluate` | AR can invert **gold** captions | **Not** inference path |
+| **Closed-loop** `closed_greedy/*`, `closed_t*/*` (`--eval-closed-loop`) | `h → AV.generate → AR → ĥ` | Still **not** “matches camera”; shortcuts can score |
+| **`llm_judge_av_captions.py`** axis **B** (specific) / **C** (appropriate) | Caption vs **cached frames** | Needs `OPENAI_API_KEY`; **this** is the human-facing bar |
+| **GRPO** `_evaluate_fve` (multi-temp) | Policy + collapse | After RL |
+
+**Rule:** Never claim “interpretability works” from **FVE alone**. Compare **`av_pred`** judge B to **`gold`** judge B on the same rows.
+
+### Scripts (quick index)
+
+| Script | Role |
+|--------|------|
+| `scripts/eval/llm_judge_av_captions.py` | Gold + AV vs frames (B/C) |
+| `scripts/eval/dump_av_samples.py` | Gold vs greedy/sampled + per-row TF vs closed-loop |
+| `scripts/eval/build_eval_cases.py` → `run_interp_panel.py` | Counterfactual **h** edits (different question than B) |
+| `scripts/eval/overlay_av_video.py` | MP4 with AV text overlay (demo) |
+| `scripts/eval/nla_steer_overlay_video.py` | MP4: frames + **baseline vs backbone-steer** action deltas (needs GR00T + Cosmos HF access) |
+| `scripts/eval/nla_steer_groot_action.py` | Prints numeric **baseline vs steer** `get_action` diff (same deps) |
+| `scripts/eval/nla_steer_ar_smoke.py` | AR→ĥ + hook on toy backbone only (**no** GR00T) |
+
+### Local CI-style contract (no GitHub Action required)
+
+- **Gate script:** `scripts/ci/check_sft_metrics.py` reads `metrics.jsonl` and fails on:
+  - dead NCE (`ar_nce` tail near `ln(B)` when contrastive is on),
+  - missing closed-loop metrics (if requested),
+  - excessive `fve - closed_greedy/fve` gap (if threshold supplied).
+- **Smoke test:** `tests/test_sft_smoke.py` includes a tiny-run check that logs
+  `p_av`, `ar_mix_used`, and finite `ar_nce` under `ar_av_mix_*` + contrastive.
+- Use this pair to keep “is this implemented?” answers consistent across chats.
 
 ---
 

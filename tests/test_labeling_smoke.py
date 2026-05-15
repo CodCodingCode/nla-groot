@@ -24,6 +24,7 @@ from nla.extraction import (
     RunManifest,
 )
 from nla.labeling.context import (
+    _draw_positions_for_example,
     decode_text_context,
     image_patch_meta,
     sample_one_position_per_example,
@@ -36,6 +37,7 @@ from nla.labeling.prompts import (
     PositionLabelInput,
     build_position_prompt,
     build_step_prompt,
+    build_strict_position_prompt,
 )
 from nla.layer_spec import BACKBONE_EMBEDDING_DIM
 
@@ -78,6 +80,52 @@ def test_position_prompt_handles_missing_instruction():
     _, user_p = build_position_prompt(inp)
     assert "(no instruction provided)" in user_p
     assert "ANCHOR" in user_p
+
+
+def test_position_prompt_image_patch_forbids_index_layout_inference():
+    """The per-position prompt must explicitly forbid guessing screen
+    quadrant / pixel coordinates from the (k, n) patch index, and must not
+    model that failure mode in its own example bullets.
+
+    Background: see ``docs/sft_plan/01_data_audit.md`` §3.2 (confabulated
+    image_region content).  The labeler is shown ``image patch k of n`` as
+    metadata but never told *which* patch is k, so any "upper-left" /
+    "lower-right" claim derived from k alone is teacher hallucination.
+    """
+    inp = PositionLabelInput(
+        example_id="ex0@p042_image_patch",
+        instruction="Pick up the red cube and place it in the bowl.",
+        decoded_text_context="<image: 248 patches>",
+        position_index=42,
+        position_type="image_patch",
+        sequence_length=277,
+        image_paths=["/tmp/fake.jpg"],
+        image_patch_meta=(42, 248),
+    )
+    sys_p, _ = build_position_prompt(inp)
+    assert "Rules for IMAGE-PATCH positions" in sys_p
+    assert "Do NOT use it to guess" in sys_p
+    assert "(k of n)" in sys_p
+    assert "upper-left" in sys_p
+    assert "upper-right of the table" not in sys_p
+
+
+def test_strict_position_prompt_inherits_image_patch_rules():
+    """Strict relabel prompt must also carry the anti-hallucination rules
+    so re-labeled rows do not regress to confident layout claims."""
+    inp = PositionLabelInput(
+        example_id="ex_strict@p7_image_patch",
+        instruction="Test",
+        decoded_text_context="ctx",
+        position_index=7,
+        position_type="image_patch",
+        sequence_length=100,
+        image_paths=[],
+        image_patch_meta=(7, 256),
+    )
+    sys_p, _ = build_strict_position_prompt(inp)
+    assert "Rules for IMAGE-PATCH positions" in sys_p
+    assert "Additional rules (strict):" in sys_p
 
 
 def test_step_prompt_keeps_backcompat():
@@ -219,6 +267,48 @@ def test_sample_n_positions_per_example_yields_n_per_example(tmp_path: Path):
         by_example.setdefault(s.record.example_id, []).append(s.position_index)
     for ex, positions in by_example.items():
         assert len(positions) == len(set(positions)), f"Duplicate positions for {ex}: {positions}"
+
+
+def test_draw_positions_default_matches_sample_positions():
+    """Without ``guarantee_strata`` the helper must reproduce the legacy
+    ``sample_positions`` behavior bit-for-bit so existing label runs are
+    unchanged."""
+    from nla.extraction.sampler import sample_positions
+
+    T = 16
+    attn = torch.ones(T, dtype=torch.bool)
+    img = torch.zeros(T, dtype=torch.bool)
+    img[:8] = True
+
+    sps_default = _draw_positions_for_example(
+        attn, img, n=3, rng=np.random.default_rng(123), guarantee_strata=False,
+    )
+    sps_baseline = sample_positions(attn, img, n=3, rng=np.random.default_rng(123))
+    assert [sp.index for sp in sps_default] == [sp.index for sp in sps_baseline]
+    assert [sp.type for sp in sps_default] == [sp.type for sp in sps_baseline]
+
+
+def test_draw_positions_guarantees_last_text_and_anchor():
+    """When ``guarantee_strata`` is set and last_text/anchor are distinct
+    indices, both must appear in the returned slots regardless of the
+    POSITION_MIX draw."""
+    T = 20
+    attn = torch.ones(T, dtype=torch.bool)
+    img = torch.zeros(T, dtype=torch.bool)
+    img[:10] = True
+    img[18:] = True
+
+    sps = _draw_positions_for_example(
+        attn, img, n=4, rng=np.random.default_rng(0), guarantee_strata=True,
+    )
+    assert len(sps) == 4
+    indices = [sp.index for sp in sps]
+    assert len(set(indices)) == 4, f"Expected distinct indices, got {indices}"
+    assert 19 in indices  # anchor (final non-pad token, here an image token)
+    assert 17 in indices  # last_text (last non-image, non-pad token)
+    types = {sp.type.value for sp in sps}
+    assert "anchor" in types
+    assert "last_text" in types
 
 
 def test_sample_skips_examples_without_input_ids(tmp_path: Path):

@@ -66,6 +66,14 @@ class ARConfig:
     # scale, but outliers in std are well above that). ``None`` disables; e.g.
     # 5.0 clamps to ±5 in α-scaled space. Does NOT affect inference / predict.
     clip_target_scaled: float | None = None
+    # Temperature for the InfoNCE contrastive term in ``forward_sft``.  Lower
+    # temperature = sharper softmax = stronger contrastive gradient.  The
+    # similarity matrix uses cosine (in [-1, 1]); dividing by 0.1 maps that to
+    # [-10, 10] before softmax, which gives well-scaled gradients even when AR
+    # predictions are nearly identical across rows (the failure mode that
+    # produced mode collapse with the legacy negative-L2 sims at α-scaled
+    # magnitudes ~1e-3).
+    nce_temperature: float = 0.1
 
 
 class ActivationReconstructor(nn.Module):
@@ -205,8 +213,22 @@ class ActivationReconstructor(nn.Module):
 
         B = pred_scaled.shape[0]
         if B > 1:
-            diffs = pred_scaled.unsqueeze(1) - target_scaled.unsqueeze(0)  # (B, B, H)
-            sims = -(diffs ** 2).mean(dim=-1)                              # (B, B)
+            # Cosine similarity with temperature.  Cosine lives in [-1, 1]
+            # regardless of the tiny per-dim magnitudes of α-scaled
+            # activations (~0.03 RMS), which is critical: the legacy
+            # ``sims = -(diffs**2).mean(-1)`` implementation produced sims of
+            # magnitude ~1e-3 on this dataset, so softmax over the 4-way
+            # diagonal-vs-off-diagonal contrast was numerically uniform and
+            # the InfoNCE term collapsed to ``ln(B)`` with zero gradient.
+            # Cosine + temperature 0.1 puts sims in [-10, 10], giving a real
+            # contrastive signal even at batch size 4.
+            sims = nn.functional.cosine_similarity(
+                pred_scaled.unsqueeze(1),                 # (B, 1, H)
+                target_scaled.unsqueeze(0),               # (1, B, H)
+                dim=-1,
+            )                                             # (B, B), in [-1, 1]
+            temp = max(1e-6, float(self.cfg.nce_temperature))
+            sims = sims / temp
             labels = torch.arange(B, device=pred_scaled.device)
             nce = nn.functional.cross_entropy(sims.float(), labels)
         else:

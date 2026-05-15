@@ -256,6 +256,8 @@ class LabeledPositionDataset(Dataset):
         split_by: SplitBy = "episode",
         allow_episode_split_row_fallback: bool = True,
         min_bullet_lines: int | None = None,
+        strict_position_check: bool = True,
+        strict_position_check_max_examples: int = 10,
     ):
         self.reader = ActivationShardReader(activations_root)
         self._index_by_id = {rec.example_id: i for i, rec in enumerate(self.reader.records)}
@@ -270,6 +272,25 @@ class LabeledPositionDataset(Dataset):
             valid.append(entry)
         if n_missing:
             logger.warning("Discarded %d labels with no matching activation.", n_missing)
+
+        if strict_position_check and valid:
+            # Fail fast on out-of-bounds position_index using the cheap index
+            # metadata (no tensor loads). Catches mismatched labels/activations
+            # at init time instead of throwing IndexError mid-training.
+            bad: list[tuple[str, int, int]] = []
+            for entry in valid:
+                rec = self.reader.records[self._index_by_id[entry.source_example_id]]
+                if entry.position_index >= int(rec.seq_len):
+                    bad.append((entry.source_example_id, entry.position_index, int(rec.seq_len)))
+            if bad:
+                sample = ", ".join(
+                    f"{sid}@{pidx} (seq_len={sl})"
+                    for sid, pidx, sl in bad[:strict_position_check_max_examples]
+                )
+                raise ValueError(
+                    f"{len(bad)} label rows have position_index >= activation seq_len. "
+                    f"First {min(len(bad), strict_position_check_max_examples)}: {sample}"
+                )
 
         valid.sort(key=lambda e: e.raw.get("example_id", e.source_example_id))
 

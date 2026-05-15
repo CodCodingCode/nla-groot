@@ -1,5 +1,7 @@
 # 04 — Layer selection and α calibration audit
 
+> **Interpretability warning:** Correct α and layer choice do **not** guarantee **scene-accurate** AV text. See **`06_v2_postmortem_v3_rerun.md`** (shorthand collapse vs FVE).
+
 **Reference paper.** Fraser-Taliente et al., *Natural Language Autoencoders Produce
 Unsupervised Explanations of LLM Activations*, Transformer Circuits, 2026.
 

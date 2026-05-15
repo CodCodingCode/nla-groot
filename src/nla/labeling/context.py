@@ -28,7 +28,14 @@ from typing import Iterator, Iterable
 import numpy as np
 import torch
 
-from nla.extraction.sampler import sample_position, sample_positions
+from nla.extraction.sampler import (
+    PositionType as _SamplerPositionType,
+    SampledPosition,
+    _anchor_index,
+    _last_text_index,
+    sample_position,
+    sample_positions,
+)
 from nla.extraction.storage import ActivationShardReader, ExampleRecord
 from nla.labeling.frames import EpisodeFrameLoader, save_jpeg
 from nla.labeling.prompts import PositionLabelInput, PositionType
@@ -240,6 +247,60 @@ def sample_one_position_per_example(
     )
 
 
+def _draw_positions_for_example(
+    attention_mask: torch.Tensor,
+    image_mask: torch.Tensor,
+    n: int,
+    *,
+    rng: np.random.Generator,
+    guarantee_strata: bool,
+) -> list[SampledPosition]:
+    """Pick ``n`` distinct positions for one example.
+
+    Default behavior mirrors ``sample_positions``: every slot is drawn from
+    ``POSITION_MIX``.  When ``guarantee_strata`` is set (and ``n >= 2``) the
+    first slots are reserved for ``last_text`` and ``anchor`` whenever those
+    indices exist, and the remainder are filled from ``POSITION_MIX``
+    excluding indices already chosen.  This avoids the
+    ``image_patch``-dominated mix that ``sample_positions`` produces when
+    ``n=4`` against sequences with ~256 image-patch tokens but only one
+    ``last_text`` and one ``anchor`` (see ``docs/sft_plan/01_data_audit.md``).
+    """
+    if not guarantee_strata or n < 2:
+        return sample_positions(attention_mask, image_mask, n=n, rng=rng)
+
+    chosen: list[SampledPosition] = []
+    used: set[int] = set()
+
+    last_idx = _last_text_index(attention_mask, image_mask)
+    if last_idx is not None and last_idx not in used:
+        chosen.append(SampledPosition(last_idx, _SamplerPositionType.LAST_TEXT))
+        used.add(last_idx)
+
+    anchor_idx = _anchor_index(attention_mask)
+    if anchor_idx is not None and anchor_idx not in used:
+        chosen.append(SampledPosition(anchor_idx, _SamplerPositionType.ANCHOR))
+        used.add(anchor_idx)
+
+    remaining = n - len(chosen)
+    if remaining <= 0:
+        return chosen[:n]
+
+    max_tries = max(8, 2 * remaining)
+    for _ in range(remaining):
+        for _attempt in range(max_tries):
+            sp = sample_position(attention_mask, image_mask, rng=rng)
+            if sp.index not in used:
+                chosen.append(sp)
+                used.add(sp.index)
+                break
+        else:
+            sp = sample_position(attention_mask, image_mask, rng=rng)
+            chosen.append(sp)
+            used.add(sp.index)
+    return chosen
+
+
 def sample_positions_per_example(
     reader: ActivationShardReader,
     tokenizer,
@@ -248,6 +309,7 @@ def sample_positions_per_example(
     seed: int = 0,
     require_input_ids: bool = True,
     record_filter=None,
+    guarantee_strata: bool = False,
 ) -> Iterator[SampledExample]:
     """Iterate (example, sampled-position) pairs; ``n_per_example`` per example.
 
@@ -255,6 +317,13 @@ def sample_positions_per_example(
     distinct positions drawn from ``POSITION_MIX`` (no replacement within the
     example).  Set ``n_per_example=1`` to recover the original one-per-example
     behavior.
+
+    When ``guarantee_strata=True`` and ``n_per_example >= 2``, the sampler
+    always allocates one slot to ``last_text`` and one to ``anchor`` (when
+    those indices exist for the example), then fills the remaining slots with
+    the usual ``POSITION_MIX`` draw.  Use this when relabeling or running new
+    label campaigns that want a more even strata distribution than the natural
+    ~75% ``image_patch`` mix.
     """
     rng = np.random.default_rng(seed)
     for item in reader.iter_examples(record_filter=record_filter):
@@ -273,7 +342,9 @@ def sample_positions_per_example(
             if ids is not None
             else "(input_ids unavailable; text context not rendered)"
         )
-        sps = sample_positions(attn, img, n=n_per_example, rng=rng)
+        sps = _draw_positions_for_example(
+            attn, img, n_per_example, rng=rng, guarantee_strata=guarantee_strata,
+        )
         for sp in sps:
             meta = image_patch_meta(img, sp.index)
             yield SampledExample(

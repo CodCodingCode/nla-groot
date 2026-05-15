@@ -1,5 +1,7 @@
 # 01 – Warm-start label data audit (pre-SFT)
 
+> **Context:** Label statistics here do **not** guarantee AV outputs match cameras after SFT. For the **V2 failure mode** (high reconstruction but **generic templates**), grounding checks, and rerun checklist, see **`06_v2_postmortem_v3_rerun.md`**.
+
 Audit run: 2026-05-14, against the three on-disk `labels.jsonl` files and
 their matching `data/activations/<run>/index.jsonl`. All numbers come from
 direct file reads; the audit script lives at `/tmp/audit_labels.py` and the
@@ -19,13 +21,19 @@ The reference target distribution is the repo's
 |--------------|-----------:|--------------:|--------------:|-----------------:|--------:|
 | droid_smoke  |          4 |             4 |          1.00 |                4 |       0 |
 | droid_ep1    |      1,064 |           266 |          4.00 |            1,064 |       0 |
-| droid_100ep  |     99,968 |        25,084 |          3.99 |          100,336 |   −368  |
+| droid_100ep  |     99,967 |        25,084 |          3.99 |          100,336 |   −369  |
 
 - `droid_100ep` ran with `positions_per_example=4` against 25,084 source
-  examples; manifest says 100,336 planned, 100,336 completed, but the live
-  `labels.jsonl` is **368 rows short** (0.37% gap). Likely lost during a
-  rerun: `labels.jsonl.bak` (May 12) and the current `labels.jsonl` (May 14)
-  have different sizes, so part of the file was rewritten.
+  examples; the manifest's `n_planned=100,336` reflects the original sampling
+  target. The live `labels.jsonl` is **369 rows short** because:
+  the original sampler returned `<4` unique `(position_index, position_type)`
+  pairs for ~368 examples (collisions on `last_text` / `anchor`),
+  `scripts/labeling/dedupe_labels.py` removed 367 conflicting duplicate
+  rows, and one row that still lacked a `target:` bullet after strict
+  re-labeling was dropped manually. The file's full provenance is recorded
+  in `data/labels/droid_100ep/manifest.json::extra.provenance`. To bring
+  thin examples back up to 4 positions, run
+  `scripts/labeling/backfill_label_gaps.py --mode force-fill`.
 - `droid_ep1` has `4.00` labels per example (266 ex × 4 positions = 1,064 rows).
   3 rows are exact duplicates of an existing `(source_example_id,
   position_index, position_type)` key — minor noise, not blocking.
@@ -43,8 +51,23 @@ For every row, `meta.source_example_id` was checked against the activations
 | droid_ep1    |                                  0 |                  0 |
 | droid_100ep  |                                  0 |                  0 |
 
-Every label is recoverable. The dataset code (`LabeledPositionDataset` in
-`src/nla/training/dataset.py`) will not silently drop rows.
+For this dump every label has a matching activation, so no rows are lost
+in the join. In general, `LabeledPositionDataset` in
+`src/nla/training/dataset.py` will:
+
+- skip rows whose JSON fails to parse, whose `error` is truthy, whose
+  `description` is empty, or which are missing any of `meta.source_example_id`,
+  `meta.position_index`, `meta.position_type` — counted into a single
+  `Loaded N labels (M skipped)` log line by `load_labels_jsonl`,
+- drop labels whose `source_example_id` is missing from the activation
+  `index.jsonl` with a single `Discarded N labels with no matching activation`
+  warning,
+- raise `ValueError` at init time if any kept label has
+  `position_index >= seq_len` (controlled by `strict_position_check=True`,
+  the default; flip to `False` only for ablations).
+
+Mid-training `__getitem__` will additionally raise `IndexError` if a tensor
+is shorter than its index metadata claims.
 
 ### 1.3 Errors / empties
 

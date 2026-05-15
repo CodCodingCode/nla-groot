@@ -36,6 +36,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ar-clip-target-scaled", type=float, default=None,
                    help="If set, clamp the α-scaled AR target to ±value during "
                         "forward_sft (e.g. 5.0). Tames heavy tails; no effect on inference.")
+    p.add_argument("--ar-nce-temperature", type=float, default=0.1,
+                   help="Temperature for AR's InfoNCE contrastive sims. Lower = sharper "
+                        "softmax = stronger contrast. 0.1 is a standard contrastive "
+                        "default and works at batch 4.")
     p.add_argument("--lora-rank", type=int, default=32)
     p.add_argument("--dtype", default="bfloat16")
     p.add_argument("--batch-size", type=int, default=4)
@@ -71,6 +75,36 @@ def _build_parser() -> argparse.ArgumentParser:
                         "0.0 == greedy (do_sample=False).")
     p.add_argument("--closed-loop-max-batches", type=int, default=None,
                    help="Cap the number of val batches used per closed-loop eval pass.")
+    p.add_argument(
+        "--ar-av-mix-max",
+        type=float,
+        default=0.0,
+        help="Scheduled sampling for AR only: after warmup, per-batch probability ramps "
+             "linearly up to this value (0 disables). AV CE always uses gold captions.",
+    )
+    p.add_argument(
+        "--ar-av-mix-warmup-frac",
+        type=float,
+        default=0.5,
+        help="Fraction of total_steps with p=0 before ramping to --ar-av-mix-max.",
+    )
+    p.add_argument(
+        "--ar-av-mix-max-new-tokens",
+        type=int,
+        default=96,
+        help="Max new tokens for AV.generate when feeding AR under mixing.",
+    )
+    p.add_argument(
+        "--ar-av-mix-sample",
+        action="store_true",
+        help="Sample from AV during mixing (temperature 0.7); default is greedy.",
+    )
+    p.add_argument(
+        "--ar-av-mix-log-text-every",
+        type=int,
+        default=200,
+        help="Log one truncated AV-mix caption every N steps when mixing fires (0=off).",
+    )
     p.add_argument("--no-episode-split-fallback", action="store_true",
                    help="When --split-by=episode but the dump has <2 distinct "
                         "episode_index values, fail with RuntimeError instead of "
@@ -126,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         lora_alpha=args.lora_rank * 2,
         dtype=args.dtype,
         clip_target_scaled=args.ar_clip_target_scaled,
+        nce_temperature=args.ar_nce_temperature,
     )
     cfg = SFTConfig(
         activations_root=args.activations_root,
@@ -158,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
         eval_closed_loop=args.eval_closed_loop,
         closed_loop_temperatures=tuple(args.closed_loop_temps),
         closed_loop_max_batches=args.closed_loop_max_batches,
+        ar_av_mix_max=args.ar_av_mix_max,
+        ar_av_mix_warmup_frac=args.ar_av_mix_warmup_frac,
+        ar_av_mix_max_new_tokens=args.ar_av_mix_max_new_tokens,
+        ar_av_mix_do_sample=args.ar_av_mix_sample,
+        ar_av_mix_log_text_every=args.ar_av_mix_log_text_every,
     )
     summary = run_sft(cfg)
     logging.info("SFT done. %s", summary)

@@ -2,6 +2,8 @@
 
 This document merges `docs/sft_plan/01–05.md` into one actionable checklist. The parallel subagents did not write files; this folder was populated manually from codebase + NFS data (May 2026).
 
+> **Read first (post–droid_100ep V2):** **`06_v2_postmortem_v3_rerun.md`** — shorthand/template collapse vs high FVE, why **teacher-forced metrics aren’t enough**, **LLM judge (axis B)** as the semantic gate, overnight rerun checklist, **GRPO / AR co-train** next steps, and **steering + temporal refresh** basics. The older docs below are still valid for data/hparams/architecture; **`06`** is the project’s agreed “don’t confuse the next run” overlay.
+
 ---
 
 ## Preconditions (tick before GPU time)
@@ -70,6 +72,7 @@ Full paste-ready command: see **`02_hyperparams.md` §5**.
 
 | Risk | Mitigation |
 |------|------------|
+| **FVE looks good, captions don’t match cameras (V2)** | Run **`llm_judge_av_captions.py`**; read **`06_v2_postmortem_v3_rerun.md`**. Don’t ship on reconstruction alone. |
 | Labels ~75% **image_patch** | Monitor per-type CE/FVE; pass `--balance-position-mix` to draw closer to `POSITION_MIX` (40/40/20) |
 | AV is **Qwen3-4B**, not Cosmos | Accepted for v1; largest architectural gap vs paper |
 | AR `--ar-layers` was 10 | Default is now **16** (matches `SELECT_LAYER`) |
@@ -95,5 +98,6 @@ Full paste-ready command: see **`02_hyperparams.md` §5**.
 | `03_eval_harness.md` | Metrics + robotics probes |
 | `04_layer_alpha.md` | Hook layer, α math, GRPO reward |
 | `05_arch_injection.md` | Qwen vs Cosmos, AR depth, templates |
+| `06_v2_postmortem_v3_rerun.md` | **V2 lessons, overnight rerun checklist, steerability / time** |
 
-See also repo-wide **`docs/NLA_AGENT_KNOWLEDGE.md`**.
+See also repo-wide **`docs/NLA_AGENT_KNOWLEDGE.md`** and root **`README.md`** (layout + quick start).

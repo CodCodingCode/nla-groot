@@ -64,6 +64,7 @@ async def run_labeling(
     state_name: str | None = None,
     max_examples: int | None = None,
     positions_per_example: int = 1,
+    guarantee_strata: bool = False,
     api_key: str | None = None,
     resume: bool = True,
 ) -> int:
@@ -87,11 +88,15 @@ async def run_labeling(
     tokenizer = load_qwen3_vl_tokenizer(tokenizer_repo)
 
     logger.info(
-        "Sampling %d position(s) per example (seed=%d)", positions_per_example, seed,
+        "Sampling %d position(s) per example (seed=%d, guarantee_strata=%s)",
+        positions_per_example, seed, guarantee_strata,
     )
     sampled = list(
         sample_positions_per_example(
-            reader, tokenizer, n_per_example=positions_per_example, seed=seed,
+            reader, tokenizer,
+            n_per_example=positions_per_example,
+            seed=seed,
+            guarantee_strata=guarantee_strata,
         )
     )
     if max_examples is not None:
@@ -135,6 +140,10 @@ async def run_labeling(
         state_name=state_name,
         n_planned=len(inputs),
         n_completed=_count_completed(out_jsonl),
+        extra={
+            "positions_per_example": positions_per_example,
+            "guarantee_strata": guarantee_strata,
+        },
     )
     manifest.save(labels_dir / "manifest.json")
     logger.info(
