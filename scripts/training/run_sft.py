@@ -23,8 +23,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--labels-jsonl", required=True)
     p.add_argument("--output-dir", required=True)
     p.add_argument("--base-model", default="Qwen/Qwen3-4B-Instruct-2507")
-    p.add_argument("--alpha", type=float, default=196.15)
-    p.add_argument("--ar-layers", type=int, default=10)
+    p.add_argument("--alpha", type=float, default=197.44,
+                   help="Activation L2-norm scaling factor (P75 ‖h‖₂). Overridden by "
+                        "--stats-json when that is provided.")
+    p.add_argument("--stats-json", default=None,
+                   help="Path to a Phase-1 extraction stats.json. When set, α is read "
+                        "from its p75_norm and overrides --alpha for both AV and AR.")
+    p.add_argument("--ar-layers", type=int, default=16,
+                   help="Number of decoder layers AR keeps after truncation. Default 16 "
+                        "matches GR00T's SELECT_LAYER so AR depth mirrors the activation's "
+                        "training layer.")
+    p.add_argument("--ar-clip-target-scaled", type=float, default=None,
+                   help="If set, clamp the α-scaled AR target to ±value during "
+                        "forward_sft (e.g. 5.0). Tames heavy tails; no effect on inference.")
     p.add_argument("--lora-rank", type=int, default=32)
     p.add_argument("--dtype", default="bfloat16")
     p.add_argument("--batch-size", type=int, default=4)
@@ -44,6 +55,27 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Train/val split granularity.  Default 'episode' (needed for "
                         "memorization-vs-generalization measurement); use 'row' only "
                         "as a legacy ablation.")
+    p.add_argument("--balance-position-mix", action="store_true",
+                   help="Draw training rows with a WeightedRandomSampler so per-batch "
+                        "position_type frequencies approximate layer_spec.POSITION_MIX "
+                        "(40/40/20). Use when the labels file is skewed.")
+    p.add_argument("--min-bullets", type=int, default=None,
+                   help="Drop labels whose description has fewer than this many '-' "
+                        "bullet lines. Use to filter degenerate captions.")
+    p.add_argument("--eval-closed-loop", action="store_true",
+                   help="Run an extra closed-loop validation pass per eval: "
+                        "h -> AV.generate -> AR -> ĥ, stratified by position_type. "
+                        "Slow; consider combining with --closed-loop-max-batches.")
+    p.add_argument("--closed-loop-temps", type=float, nargs="+", default=(0.0,),
+                   help="Sampling temperatures for closed-loop AV generation. "
+                        "0.0 == greedy (do_sample=False).")
+    p.add_argument("--closed-loop-max-batches", type=int, default=None,
+                   help="Cap the number of val batches used per closed-loop eval pass.")
+    p.add_argument("--no-episode-split-fallback", action="store_true",
+                   help="When --split-by=episode but the dump has <2 distinct "
+                        "episode_index values, fail with RuntimeError instead of "
+                        "silently falling back to a row split. Use for paper / "
+                        "generalization runs where the val split must be honest.")
     p.add_argument("--eval-every", type=int, default=50)
     p.add_argument("--save-every", type=int, default=200)
     p.add_argument("--log-every", type=int, default=5)
@@ -67,10 +99,20 @@ def main(argv: list[str] | None = None) -> int:
     from nla.models import ARConfig, AVConfig
     from nla.training.sft import SFTConfig, run_sft
 
+    alpha = args.alpha
+    if args.stats_json:
+        from nla.extraction.stats import load_stats
+        stats = load_stats(args.stats_json)
+        alpha = float(stats.p75_norm)
+        logging.info(
+            "Loaded α=%.6f from %s (p75_norm; overrides --alpha=%.6f).",
+            alpha, args.stats_json, args.alpha,
+        )
+
     av_cfg = AVConfig(
         base_model=args.base_model,
         activation_dim=2048,
-        alpha=args.alpha,
+        alpha=alpha,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_rank * 2,
         dtype=args.dtype,
@@ -78,11 +120,12 @@ def main(argv: list[str] | None = None) -> int:
     ar_cfg = ARConfig(
         base_model=args.base_model,
         activation_dim=2048,
-        alpha=args.alpha,
+        alpha=alpha,
         truncate_to_n_layers=args.ar_layers,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_rank * 2,
         dtype=args.dtype,
+        clip_target_scaled=args.ar_clip_target_scaled,
     )
     cfg = SFTConfig(
         activations_root=args.activations_root,
@@ -102,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
         ar_contrastive_weight=args.ar_contrastive_weight,
         use_quality_weights=args.use_quality_weights,
         split_by=args.split_by,
+        allow_episode_split_row_fallback=not args.no_episode_split_fallback,
         eval_every=args.eval_every,
         save_every=args.save_every,
         log_every=args.log_every,
@@ -109,6 +153,11 @@ def main(argv: list[str] | None = None) -> int:
         max_train_items=args.max_train_items,
         max_val_items=args.max_val_items,
         gradient_checkpointing=not args.no_gradient_checkpointing,
+        balance_position_mix=args.balance_position_mix,
+        min_bullet_lines=args.min_bullets,
+        eval_closed_loop=args.eval_closed_loop,
+        closed_loop_temperatures=tuple(args.closed_loop_temps),
+        closed_loop_max_batches=args.closed_loop_max_batches,
     )
     summary = run_sft(cfg)
     logging.info("SFT done. %s", summary)

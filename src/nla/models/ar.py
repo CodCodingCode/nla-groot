@@ -1,9 +1,11 @@
 """Activation Reconstructor (AR).
 
-A LoRA fine-tune of a *truncated* causal LM (default first 10 layers of
-``Qwen/Qwen3-4B-Instruct``) that ingests an English explanation, runs it
-through the truncated transformer, and predicts the original activation
-via a learned affine head on the last non-pad hidden state.
+A LoRA fine-tune of a *truncated* causal LM (default first 16 layers of
+``Qwen/Qwen3-4B-Instruct``, matching GR00T's ``SELECT_LAYER`` so AR depth
+mirrors where the activation lives in the language model) that ingests an
+English explanation, runs it through the truncated transformer, and predicts
+the original activation via a learned affine head on the last non-pad hidden
+state.
 
 Template (verbatim from the plan / paper)::
 
@@ -51,14 +53,19 @@ DEFAULT_LORA_TARGETS: tuple[str, ...] = (
 class ARConfig:
     base_model: str = "Qwen/Qwen3-4B-Instruct-2507"
     activation_dim: int = 2048
-    alpha: float = 196.15
-    truncate_to_n_layers: int = 10
+    alpha: float = 197.44
+    truncate_to_n_layers: int = 16
     lora_rank: int = 32
     lora_alpha: int = 64
     lora_dropout: float = 0.05
     lora_targets: tuple[str, ...] = DEFAULT_LORA_TARGETS
     dtype: str = "bfloat16"
     max_length: int = 1024
+    # Optional symmetric clamp on the α-scaled target tensor inside
+    # ``forward_sft`` to tame heavy tails (a P75-normalized activation has unit
+    # scale, but outliers in std are well above that). ``None`` disables; e.g.
+    # 5.0 clamps to ±5 in α-scaled space. Does NOT affect inference / predict.
+    clip_target_scaled: float | None = None
 
 
 class ActivationReconstructor(nn.Module):
@@ -189,6 +196,9 @@ class ActivationReconstructor(nn.Module):
         """
         pred_scaled = self.forward(explanations, device=target_activations.device)
         target_scaled = (target_activations / self.cfg.alpha).to(pred_scaled.dtype)
+        if self.cfg.clip_target_scaled is not None:
+            clip = float(self.cfg.clip_target_scaled)
+            target_scaled = target_scaled.clamp(-clip, clip)
         mse = nn.functional.mse_loss(pred_scaled, target_scaled)
         if not return_nce:
             return mse, pred_scaled

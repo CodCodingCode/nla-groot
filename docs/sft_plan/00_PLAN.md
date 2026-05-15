@@ -13,21 +13,35 @@ This document merges `docs/sft_plan/01–05.md` into one actionable checklist. T
 
 ---
 
-## Hyperparameters (non-negotiables)
+## Hyperparameters (non-negotiables — v1)
+
+These match the recipe table in `02_hyperparams.md` §4 and are now also the
+code defaults after the audit fixes (`--alpha 197.44`, `--ar-layers 16`).
 
 | Knob | Value |
 |------|-------|
-| `--alpha` | **197.4447** |
-| `--ar-layers` | **16** (was default 10 — update for backbone-depth parity) |
-| `--learning-rate` | **1e-5** (paper-ish; not 1e-4 default) |
+| `--alpha` | **197.44** (or pass `--stats-json data/activations/droid_100ep/stats.json` to read α=197.4447 from `p75_norm`) |
+| `--ar-layers` | **16** (now the default) |
+| `--learning-rate` | **1e-4** (LoRA-rank-32 anchor from `droid_100ep_dirty`; v2 ablation: 3e-5 / 5e-5 vs paper's 1e-5) |
 | `--batch-size` | **4** (raise if VRAM allows) |
-| `--grad-accum-steps` | **16** (effective batch ≈ 64) |
-| `--total-steps` | **4000** (adjust after first plateau) |
+| `--grad-accum-steps` | **1** (effective batch 4; bump to 2 only if CE noise warrants) |
+| `--total-steps` | **3000** (prior run was still improving at 2000) |
+| `--warmup-steps` | **200** |
 | `--split-by` | **episode** |
 | `--held-out-fraction` | **0.05** |
+| `--eval-every` | **250** (with `--max-val-items 1000`) |
+| `--save-every` | **500** |
 | `ar-contrastive-weight` | **0** first run; enable if AR cheats generic recon |
 
-Full command: see **`02_hyperparams.md`**.
+Optional v1 audit flags (see §"Audit-fix flags" below):
+
+- `--stats-json PATH` — load α from a Phase-1 extraction `stats.json` (overrides `--alpha`).
+- `--balance-position-mix` — rebalance training draws toward `layer_spec.POSITION_MIX` (40/40/20).
+- `--min-bullets N` — drop labels with fewer than `N` markdown bullet lines.
+- `--eval-closed-loop` (+ `--closed-loop-temps`, `--closed-loop-max-batches`) — add `h → AV.generate → AR → ĥ` metrics alongside the teacher-forced eval.
+- `--ar-clip-target-scaled V` — clamp the α-scaled AR target to ±V during `forward_sft` (e.g. 5.0).
+
+Full paste-ready command: see **`02_hyperparams.md` §5**.
 
 ---
 
@@ -56,10 +70,11 @@ Full command: see **`02_hyperparams.md`**.
 
 | Risk | Mitigation |
 |------|------------|
-| Labels ~75% **image_patch** | Monitor per-type CE/FVE; optional rebalance or top-up labeling |
+| Labels ~75% **image_patch** | Monitor per-type CE/FVE; pass `--balance-position-mix` to draw closer to `POSITION_MIX` (40/40/20) |
 | AV is **Qwen3-4B**, not Cosmos | Accepted for v1; largest architectural gap vs paper |
-| AR `--ar-layers` was 10 | **Fix to 16** this run |
-| Label skew vs `POSITION_MIX` | SFT sees file distribution; GRPO later uses sampler |
+| AR `--ar-layers` was 10 | Default is now **16** (matches `SELECT_LAYER`) |
+| Teacher-forced eval hides AV→AR pipeline regressions | Add `--eval-closed-loop` to log `h → AV.generate → AR → ĥ` stratified FVE/cosine |
+| α drifts from `stats.json` | Pass `--stats-json` so AV/AR α come from the same Phase-1 dump |
 
 ---
 

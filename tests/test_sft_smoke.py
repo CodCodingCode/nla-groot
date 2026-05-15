@@ -169,6 +169,24 @@ def test_collate_labeled_positions(tmp_path: Path):
     assert batch["position_type"] == ["anchor", "anchor", "anchor"]
 
 
+def test_strict_episode_split_raises_when_one_episode(tmp_path: Path):
+    """With only one episode, strict mode must refuse to silently row-split."""
+    import pytest
+
+    _write_synthetic_dump(tmp_path / "act", n_examples=6)
+    _write_synthetic_labels(
+        tmp_path / "labels.jsonl",
+        [(f"traj0_step{i:04d}", i + 1, f"d{i}") for i in range(6)],
+    )
+    with pytest.raises(RuntimeError, match="episode"):
+        LabeledPositionDataset(
+            tmp_path / "act", tmp_path / "labels.jsonl",
+            seed=0, held_out_fraction=0.2, held_out=False,
+            split_by="episode",
+            allow_episode_split_row_fallback=False,
+        )
+
+
 def test_held_out_split_is_deterministic(tmp_path: Path):
     _write_synthetic_dump(tmp_path / "act", n_examples=10)
     _write_synthetic_labels(
@@ -178,10 +196,12 @@ def test_held_out_split_is_deterministic(tmp_path: Path):
     train = LabeledPositionDataset(
         tmp_path / "act", tmp_path / "labels.jsonl",
         seed=0, held_out_fraction=0.2, held_out=False,
+        allow_episode_split_row_fallback=True,
     )
     val = LabeledPositionDataset(
         tmp_path / "act", tmp_path / "labels.jsonl",
         seed=0, held_out_fraction=0.2, held_out=True,
+        allow_episode_split_row_fallback=True,
     )
     assert len(train) + len(val) == 10
     train_ids = {ds.label_example_id for ds in (train[i] for i in range(len(train)))}

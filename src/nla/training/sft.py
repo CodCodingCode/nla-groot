@@ -37,6 +37,7 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
+from nla.layer_spec import POSITION_MIX
 from nla.models import (
     ActivationReconstructor,
     ActivationVerbalizer,
@@ -91,6 +92,25 @@ class SFTConfig:
 
     gradient_checkpointing: bool = True
 
+    # If True, draw training rows with a ``WeightedRandomSampler`` so per-batch
+    # position_type frequencies approximate ``layer_spec.POSITION_MIX`` (40%
+    # last_text / 40% image_patch / 20% anchor).  Off by default: the SFT split
+    # is normally trained on whatever the labels file gave us.  Turn on when
+    # the empirical histogram diverges materially from POSITION_MIX.
+    balance_position_mix: bool = False
+
+    # Drop labels whose ``description`` has fewer than this many markdown bullet
+    # lines (lines starting with ``-``).  ``None`` disables the filter (legacy
+    # behavior).  Used to cull degenerate captions before the split.
+    min_bullet_lines: int | None = None
+
+    # Closed-loop eval (h -> AV.generate -> AR -> ĥ) alongside the existing
+    # teacher-forced eval.  Off by default for backwards compat and because
+    # generation is expensive.  Temperatures of 0.0 are greedy; >0 are sampled.
+    eval_closed_loop: bool = False
+    closed_loop_temperatures: tuple[float, ...] = (0.0,)
+    closed_loop_max_batches: int | None = None
+
     # If labels are very few (e.g. smoke tests), allow the same item to repeat
     # without erroring.
     drop_last: bool = False
@@ -137,6 +157,52 @@ def _serialize_config(cfg: SFTConfig) -> dict[str, Any]:
     return raw
 
 
+def _position_mix_sampler(labels, *, seed: int):
+    """Build a ``WeightedRandomSampler`` that rebalances ``labels`` toward
+    :data:`nla.layer_spec.POSITION_MIX`.
+
+    Per-row weight ``w_i = POSITION_MIX[type_i] / (count[type_i] / N)``;
+    rows whose ``position_type`` is not in ``POSITION_MIX`` get weight 0 (a
+    safer choice than letting unrecognized types dominate).  Sampling is with
+    replacement so a small minority class can fill its target share.
+    """
+    from torch.utils.data import WeightedRandomSampler
+
+    n = len(labels)
+    counts: dict[str, int] = {}
+    for e in labels:
+        counts[e.position_type] = counts.get(e.position_type, 0) + 1
+
+    weights = torch.zeros(n, dtype=torch.double)
+    for i, e in enumerate(labels):
+        target = POSITION_MIX.get(e.position_type)
+        if target is None:
+            continue
+        empirical = counts[e.position_type] / max(1, n)
+        weights[i] = target / max(1e-12, empirical)
+
+    if float(weights.sum()) <= 0.0:
+        raise RuntimeError(
+            "balance_position_mix=True but no label rows had a position_type "
+            f"in POSITION_MIX ({sorted(POSITION_MIX)}); found types "
+            f"{sorted(counts)}."
+        )
+
+    empirical_pct = {k: v / max(1, n) for k, v in counts.items()}
+    logger.info(
+        "position_mix rebalance: empirical=%s target=%s (excluded types: %s)",
+        {k: round(v, 3) for k, v in empirical_pct.items()},
+        {k: round(v, 3) for k, v in POSITION_MIX.items()},
+        sorted(set(counts) - set(POSITION_MIX)) or "none",
+    )
+
+    g = torch.Generator()
+    g.manual_seed(int(seed))
+    return WeightedRandomSampler(
+        weights=weights, num_samples=n, replacement=True, generator=g,
+    )
+
+
 def _make_dataloaders(cfg: SFTConfig):
     train_ds = LabeledPositionDataset(
         cfg.activations_root, cfg.labels_jsonl,
@@ -146,6 +212,7 @@ def _make_dataloaders(cfg: SFTConfig):
         max_items=cfg.max_train_items,
         split_by=cfg.split_by,
         allow_episode_split_row_fallback=cfg.allow_episode_split_row_fallback,
+        min_bullet_lines=cfg.min_bullet_lines,
     )
     val_ds = LabeledPositionDataset(
         cfg.activations_root, cfg.labels_jsonl,
@@ -155,13 +222,23 @@ def _make_dataloaders(cfg: SFTConfig):
         max_items=cfg.max_val_items,
         split_by=cfg.split_by,
         allow_episode_split_row_fallback=cfg.allow_episode_split_row_fallback,
+        min_bullet_lines=cfg.min_bullet_lines,
     )
     logger.info("Train labels: %d  Val labels: %d", len(train_ds), len(val_ds))
-    train_loader = DataLoader(
-        train_ds, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=0, collate_fn=collate_labeled_positions,
-        drop_last=cfg.drop_last,
-    )
+
+    if cfg.balance_position_mix:
+        sampler = _position_mix_sampler(train_ds.labels, seed=cfg.seed)
+        train_loader = DataLoader(
+            train_ds, batch_size=cfg.batch_size, sampler=sampler,
+            num_workers=0, collate_fn=collate_labeled_positions,
+            drop_last=cfg.drop_last,
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds, batch_size=cfg.batch_size, shuffle=True,
+            num_workers=0, collate_fn=collate_labeled_positions,
+            drop_last=cfg.drop_last,
+        )
     val_loader = DataLoader(
         val_ds, batch_size=cfg.batch_size, shuffle=False,
         num_workers=0, collate_fn=collate_labeled_positions,
@@ -199,8 +276,54 @@ def _write_jsonl_row(path: Path, row: dict) -> None:
         f.write(json.dumps(row) + "\n")
 
 
+def _closed_loop_eval(
+    av,
+    ar,
+    val_loader,
+    device,
+    *,
+    temperature: float,
+    max_batches: int | None,
+) -> dict[str, float]:
+    """Run h -> AV.generate -> AR -> ĥ and return stratified FVE/MSE/cosine.
+
+    ``temperature == 0`` switches to greedy (``do_sample=False``).
+    """
+    fve_acc = StratifiedFve(group_name="position")
+    n_seen = 0
+    do_sample = temperature > 0.0
+    temp_arg = float(temperature) if do_sample else 1.0
+    for i, batch in enumerate(val_loader):
+        if max_batches is not None and i >= max_batches:
+            break
+        acts = batch["activations"].to(device)
+        gen_out = av.generate(
+            activations=acts,
+            position_types=batch["position_type"],
+            do_sample=do_sample,
+            temperature=temp_arg,
+        )
+        texts = gen_out["text"]
+        pred_scaled = ar(texts, device=device)
+        pred_unscaled = pred_scaled.detach().float() * ar.cfg.alpha
+        fve_acc.update(acts.float(), pred_unscaled, batch["position_type"])
+        n_seen += acts.shape[0]
+    out = fve_acc.compute()
+    out["_n_rows"] = float(n_seen)
+    return out
+
+
 @torch.no_grad()
-def _evaluate(av, ar, val_loader, device, alpha: float) -> dict[str, float]:
+def _evaluate(
+    av,
+    ar,
+    val_loader,
+    device,
+    alpha: float,
+    *,
+    closed_loop_temperatures: tuple[float, ...] = (),
+    closed_loop_max_batches: int | None = None,
+) -> dict[str, float]:
     if val_loader is None or len(val_loader) == 0:
         return {}
     av.eval()
@@ -222,6 +345,17 @@ def _evaluate(av, ar, val_loader, device, alpha: float) -> dict[str, float]:
         fve_acc.update(acts.float(), pred_unscaled, batch["position_type"])
     metrics = fve_acc.compute()
     metrics["ce"] = ce_sum / max(1, ce_n)
+
+    for temperature in closed_loop_temperatures:
+        tag = "greedy" if temperature <= 0.0 else f"t{temperature:g}"
+        cl = _closed_loop_eval(
+            av, ar, val_loader, device,
+            temperature=float(temperature),
+            max_batches=closed_loop_max_batches,
+        )
+        for k, v in cl.items():
+            metrics[f"closed_{tag}/{k}"] = v
+
     av.train()
     ar.train()
     return metrics
@@ -327,7 +461,13 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                     tb.add_scalar("train/lr", row["lr"], step)
 
             if step > 0 and step % cfg.eval_every == 0:
-                metrics = _evaluate(av, ar, val_loader, cfg.device, cfg.av_cfg.alpha)
+                metrics = _evaluate(
+                    av, ar, val_loader, cfg.device, cfg.av_cfg.alpha,
+                    closed_loop_temperatures=(
+                        cfg.closed_loop_temperatures if cfg.eval_closed_loop else ()
+                    ),
+                    closed_loop_max_batches=cfg.closed_loop_max_batches,
+                )
                 if metrics:
                     row = {"step": step, "phase": "val", **metrics, "elapsed_s": time.time() - start}
                     _write_jsonl_row(paths["metrics"], row)
@@ -344,7 +484,13 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
             step += 1
 
     # Final eval + save.
-    metrics = _evaluate(av, ar, val_loader, cfg.device, cfg.av_cfg.alpha)
+    metrics = _evaluate(
+        av, ar, val_loader, cfg.device, cfg.av_cfg.alpha,
+        closed_loop_temperatures=(
+            cfg.closed_loop_temperatures if cfg.eval_closed_loop else ()
+        ),
+        closed_loop_max_batches=cfg.closed_loop_max_batches,
+    )
     if metrics:
         row = {"step": step, "phase": "final", **metrics, "elapsed_s": time.time() - start}
         _write_jsonl_row(paths["metrics"], row)

@@ -108,6 +108,11 @@ class GRPOConfig:
     # memorization-vs-generalization metric).  "row" = legacy random row split.
     split_by: str = "episode"
 
+    # When ``split_by == "episode"`` but the dump only has one episode (or
+    # missing ``episode_index``), normally we warn and fall back to row split.
+    # Set to ``False`` for paper / generalization runs to fail loudly instead.
+    allow_episode_split_row_fallback: bool = True
+
     # Evaluation: list of temperatures to sample rollouts at during val. The
     # gap between greedy (0.0) and sampled FVE is itself a memorization
     # diagnostic -- memorized AVs have very low entropy.
@@ -411,6 +416,7 @@ def _build_dataloaders(cfg: GRPOConfig):
         held_out_fraction=cfg.held_out_fraction,
         held_out=False,
         split_by=cfg.split_by,
+        allow_episode_split_row_fallback=cfg.allow_episode_split_row_fallback,
     )
     val_ds = SampledPositionDataset(
         cfg.activations_root,
@@ -419,6 +425,7 @@ def _build_dataloaders(cfg: GRPOConfig):
         held_out_fraction=cfg.held_out_fraction,
         held_out=True,
         split_by=cfg.split_by,
+        allow_episode_split_row_fallback=cfg.allow_episode_split_row_fallback,
     )
     logger.info("Train pool: %d  Val pool: %d", len(train_ds), len(val_ds))
     train_loader = DataLoader(

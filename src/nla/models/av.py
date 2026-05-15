@@ -69,7 +69,7 @@ class AVConfig:
 
     base_model: str = "Qwen/Qwen3-4B-Instruct-2507"
     activation_dim: int = 2048              # GR00T backbone hidden size (Phase 1 confirmed)
-    alpha: float = 196.15                   # 75th-percentile activation norm from Phase 1
+    alpha: float = 197.44                   # P75 ‖h‖₂ from data/activations/droid_100ep/stats.json
     lora_rank: int = 32
     lora_alpha: int = 64                    # 2 * rank
     lora_dropout: float = 0.05

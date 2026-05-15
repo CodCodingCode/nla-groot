@@ -158,10 +158,25 @@ def _extract_quality_weight(obj: dict) -> float:
     return 1.0
 
 
-def load_labels_jsonl(path):
-    """Parse a labels.jsonl produced by the labeling pipeline."""
+def _count_bullet_lines(text: str) -> int:
+    """Count markdown bullet lines (lines whose stripped form starts with '-')."""
+    n = 0
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("- ") or s == "-":
+            n += 1
+    return n
+
+
+def load_labels_jsonl(path, *, min_bullet_lines: int | None = None):
+    """Parse a labels.jsonl produced by the labeling pipeline.
+
+    When ``min_bullet_lines`` is set, rows whose description has fewer than
+    that many ``-`` bullet lines are dropped (counted in the skipped tally).
+    """
     entries = []
     n_skipped = 0
+    n_skipped_bullets = 0
     with Path(path).open() as f:
         for line in f:
             line = line.strip()
@@ -179,6 +194,10 @@ def load_labels_jsonl(path):
             if not desc:
                 n_skipped += 1
                 continue
+            if min_bullet_lines is not None and _count_bullet_lines(desc) < min_bullet_lines:
+                n_skipped += 1
+                n_skipped_bullets += 1
+                continue
             meta = obj.get("meta") or {}
             source_id = meta.get("source_example_id")
             pos_idx = meta.get("position_index")
@@ -194,6 +213,11 @@ def load_labels_jsonl(path):
                 quality_weight=_extract_quality_weight(obj),
                 raw=obj,
             ))
+    if min_bullet_lines is not None and n_skipped_bullets:
+        logger.info(
+            "Dropped %d labels for fewer than %d bullet lines.",
+            n_skipped_bullets, min_bullet_lines,
+        )
     logger.info("Loaded %d labels from %s (%d skipped)", len(entries), path, n_skipped)
     return entries
 
@@ -231,11 +255,12 @@ class LabeledPositionDataset(Dataset):
         max_items=None,
         split_by: SplitBy = "episode",
         allow_episode_split_row_fallback: bool = True,
+        min_bullet_lines: int | None = None,
     ):
         self.reader = ActivationShardReader(activations_root)
         self._index_by_id = {rec.example_id: i for i, rec in enumerate(self.reader.records)}
 
-        all_labels = load_labels_jsonl(labels_jsonl)
+        all_labels = load_labels_jsonl(labels_jsonl, min_bullet_lines=min_bullet_lines)
         valid = []
         n_missing = 0
         for entry in all_labels:

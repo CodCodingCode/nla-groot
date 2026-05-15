@@ -231,7 +231,7 @@ Plan for ~3.5 h on a single H100; budget 4 h to be safe.
 | Loss  | av_weight | 1.0 |
 | Loss  | ar_weight | 1.0 |
 | Loss  | ar_contrastive_weight | 0.0 |
-| α     | alpha | **197.44** *(P75 ‖h‖, droid_100ep)* |
+| α     | alpha | **197.44** *(P75 ‖h‖, droid_100ep; pass `--stats-json` to read it directly)* |
 | Data  | split_by | episode |
 | Data  | held_out_fraction | 0.05 |
 | Data  | max_val_items | 1000 |
@@ -254,7 +254,7 @@ PYTHONPATH=src python scripts/training/run_sft.py \
   --labels-jsonl     data/labels/droid_100ep/labels.jsonl \
   --output-dir       data/sft/droid_100ep_v1 \
   --base-model       Qwen/Qwen3-4B-Instruct-2507 \
-  --alpha            197.44 \
+  --stats-json       data/activations/droid_100ep/stats.json \
   --ar-layers        16 \
   --lora-rank        32 \
   --dtype            bfloat16 \
@@ -280,6 +280,22 @@ PYTHONPATH=src python scripts/training/run_sft.py \
 
 (Optional: prepend `nohup` and append `&` to detach. Memory-safety wrapper:
 `CUDA_VISIBLE_DEVICES=0` if other jobs share the box.)
+
+Audit-fix knobs added in May 2026 (all optional, all default-off so the
+recipe above is paper-faithful by default):
+
+- `--stats-json data/activations/droid_100ep/stats.json` — read α from the
+  Phase-1 dump (`p75_norm`); overrides `--alpha` for both AV and AR.
+- `--balance-position-mix` — draw training rows with a `WeightedRandomSampler`
+  so per-batch frequencies approximate `POSITION_MIX` (40/40/20). Use when
+  the labels file is skewed (today: ~75% `image_patch`).
+- `--min-bullets N` — drop labels whose description has fewer than `N`
+  bullet (`-`-prefixed) lines. Use to cull degenerate captions.
+- `--eval-closed-loop --closed-loop-temps 0.0 [0.7] [--closed-loop-max-batches 64]`
+  — log `h → AV.generate → AR → ĥ` stratified FVE/cosine alongside the
+  default teacher-forced eval. Slow; cap batches on large val sets.
+- `--ar-clip-target-scaled 5.0` — clamp the α-scaled AR target inside
+  `forward_sft` to tame heavy tails; inference path is unaffected.
 
 After it finishes, the deliverables to look at first:
 

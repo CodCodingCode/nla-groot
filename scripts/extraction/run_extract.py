@@ -317,8 +317,20 @@ def main(argv: list[str] | None = None) -> int:
                 input_ids = None
                 if args.store_input_ids:
                     raw_ids = backbone_inputs.get("input_ids")
-                    if raw_ids is not None:
-                        input_ids = raw_ids[0].detach().cpu().to(torch.int64).contiguous()
+                    if raw_ids is None:
+                        raise RuntimeError(
+                            "--store-input-ids was set but backbone_inputs has no "
+                            "'input_ids' key for this step. Refusing to silently "
+                            "write shards without IDs (labels and per-token views "
+                            "would drift from activations)."
+                        )
+                    input_ids = raw_ids[0].detach().cpu().to(torch.int64).contiguous()
+                    if input_ids.shape[0] != features.shape[0]:
+                        raise RuntimeError(
+                            f"input_ids length {input_ids.shape[0]} does not match "
+                            f"features T={features.shape[0]} for traj {traj_id} "
+                            f"step {step_idx}; tokenizer / backbone output disagree."
+                        )
 
                 example_id = f"traj{traj_id:06d}_step{step_idx:06d}"
                 task_text = traj["task"].iloc[step_idx] if "task" in traj.columns else None

@@ -65,6 +65,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Train/val split granularity.  Default 'episode' (needed for "
                         "memorization-vs-generalization measurement); use 'row' only "
                         "as a legacy ablation.")
+    p.add_argument("--no-episode-split-fallback", action="store_true",
+                   help="When --split-by=episode but the dump has <2 distinct "
+                        "episode_index values, fail with RuntimeError instead of "
+                        "silently falling back to a row split. Use for paper / "
+                        "generalization runs where the val split must be honest.")
     p.add_argument("--eval-temperatures", default="0.0,0.7,1.0",
                    help="Comma-separated rollout temperatures for evaluation.  The "
                         "gap between greedy (0.0) and sampled FVE is itself a "
@@ -117,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         gradient_checkpointing=args.gradient_checkpointing,
         held_out_fraction=args.held_out_fraction,
         split_by=args.split_by,
+        allow_episode_split_row_fallback=not args.no_episode_split_fallback,
         eval_temperatures=eval_temps,
     )
     summary = run_grpo(cfg)
