@@ -14,7 +14,7 @@ script to make its own ``.bak3`` copy first.
 Example::
 
     python scripts/labeling/fix_label_punctuation.py \\
-        --labels data/labels/droid_100ep/labels.jsonl
+        --labels data/labels/libero_goal_pilot/labels.jsonl
 """
 
 from __future__ import annotations

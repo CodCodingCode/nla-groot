@@ -1,0 +1,6 @@
+- scene: tabletop kitchen with a flat stove on the left, a black bowl in the middle, and an overhead robot gripper.
+- target: the flat stove cook region is the destination surface.
+- distractor: a plate and wine bottle remain on the table but are not the goal.
+- gripper: open and approaching the bowl from above, intending to lift it to the stove.
+- spatial: stove on the back-left, bowl in the middle of the workspace, plate in front of the bowl.
+- task: pick up the bowl and place it on the stove.

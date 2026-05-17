@@ -11,9 +11,9 @@ This is the human-readable companion to the numerical metrics — it tells you
 Usage::
 
     PYTHONPATH=src python scripts/eval/dump_av_samples.py \
-        --ckpt-dir         data/sft/droid_100ep_v1 \
-        --activations-root data/activations/droid_100ep \
-        --labels-jsonl     data/labels/droid_100ep/labels.jsonl \
+        --ckpt-dir         data/sft/libero_goal_pilot_v3 \
+        --activations-root data/activations/libero_goal_pilot \
+        --labels-jsonl     data/labels/libero_goal_pilot/labels.jsonl \
         --per-position     6
 """
 

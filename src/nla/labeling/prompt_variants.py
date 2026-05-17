@@ -86,12 +86,13 @@ def list_variants() -> list[str]:
 # ---------------------------------------------------------------------------
 
 _LAST_BULLET_GUIDANCE = (
-    "Crucially, the LAST bullet must specifically describe what the highlighted "
-    "position encodes -- i.e., what the model is committing to at that moment -- "
-    "not just the overall scene.  Examples of last-bullet content by position type:\n"
-    "- last_text: \"language: instruction has been read; goal is to grasp the blue cube.\"\n"
-    "- image_patch: \"image_region: focusing on the bowl rim in the upper-right of the table.\"\n"
-    "- anchor: \"plan: ready to begin reaching toward the target.\""
+    "Crucially, the LAST bullet must specifically describe what feature this "
+    "token position carries forward into the action head -- the perceptual, "
+    "spatial, or plan-level content tied to this slot -- not just the overall "
+    "scene.  Examples of last-bullet content by position type:\n"
+    "- last_text: \"plan: pick-and-place phase active; reach over the bowl, then place on the plate.\"\n"
+    "- image_patch: \"target: bowl rim and gripper visible at this position; the specific patch within the frame is not localized.\"\n"
+    "- anchor: \"plan: arm staged at the start of the reaching trajectory.\""
 )
 
 
@@ -145,15 +146,15 @@ Task instruction: "Put the blue block in the green bowl"
 - target: small blue cube resting on the wooden tray near the bowl.
 - spatial: blue cube is right of and slightly behind the green bowl; both within reach of the gripper.
 - distractor: yellow banana toy and orange ring sit on the same tray, closer to the camera.
-- language: instruction has been read; goal is to grasp the blue cube before transporting it into the green bowl."""
+- plan: pick-and-place phase active; reach over the blue cube, then transport into the green bowl."""
 
 _FEWSHOT_IMAGE_PATCH = """Example -- position_type = image_patch
 Task instruction: "Wipe the spill near the cup"
 - scene: bright kitchen counter with a white paper towel folded near a red ceramic cup.
-- target: dark wet spill spreading on the counter just to the left of the cup base.
+- distractor: the red ceramic cup is right of the spill; it should not be displaced.
 - spatial: spill is directly under the camera and slightly left of the cup; cup remains upright.
 - motion: end-effector is mid-air above the towel, descending toward the wet patch.
-- image_region: focusing on the wet patch near the cup base; this patch encodes the spill boundary and counter color."""
+- target: dark wet spill at this position; this slot tracks the spill boundary against the white counter."""
 
 _FEWSHOT_ANCHOR = """Example -- position_type = anchor
 Task instruction: "Stack the red block on top of the green block"

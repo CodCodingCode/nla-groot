@@ -113,7 +113,7 @@ mkdir -p "$EVAL_DIR"
 
 ```bash
 python scripts/eval/build_eval_cases.py \
-  --activations-root data/activations/droid_100ep \
+  --activations-root data/activations/libero_goal_pilot \
   --out "$EVAL_DIR/eval_cases.jsonl" \
   --n-cases 16 \
   --seed 0
@@ -128,7 +128,7 @@ result.
 ```bash
 python scripts/eval/run_interp_panel.py \
   --cases "$EVAL_DIR/eval_cases.jsonl" \
-  --activations-root data/activations/droid_100ep \
+  --activations-root data/activations/libero_goal_pilot \
   --av-dir runs/sft/groot_av_v1/av \
   --ar-dir runs/sft/groot_av_v1/ar \
   --out "$EVAL_DIR/panel_rows.jsonl" \

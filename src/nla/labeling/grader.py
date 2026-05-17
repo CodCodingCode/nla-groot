@@ -4,10 +4,18 @@ Two graders ship here:
 
 1. ``GPT51Grader``: programmatic grader that calls ``gpt-5.1`` (full model, not
    mini) with the same image(s) the labeler saw, plus the candidate label, and
-   asks two pass/fail questions per the plan's operational definitions:
+   asks three pass/fail questions per the plan's operational definitions:
 
-   (b) grounding:        Specific vs Generic       (axis b -- LLM half)
-   (c) appropriateness:  Appropriate vs Inappropriate  (axis c -- LLM half)
+   (b) grounding:                 Specific vs Generic           (axis b -- LLM half)
+   (c) appropriateness:           Appropriate vs Inappropriate  (axis c -- LLM half)
+   (d) template_distinguishable:  Specific vs Template          (axis d -- anti-collapse)
+
+   Axis (d) is a stricter, V2-collapse-specific version of axis (b). Axis (b)
+   asks "could this describe a different scene?" and is satisfied by any
+   minimally grounded language. Axis (d) asks "would this same caption,
+   verbatim, be a good label for many different but similar manipulation
+   scenes?" — a Yes flags the template-collapse failure mode where V2 emitted
+   reusable boilerplate that happened to mention the correct workspace.
 
    Structured JSON output is enforced via ``response_format={"type": "json_object"}``
    so we can parse without regex hacks. ``gpt-5.1`` supports the json_object mode
@@ -59,8 +67,8 @@ anchor, fallback).
 - A candidate label: 4-5 bullets describing what the model is internally \
 tracking at that token position.
 
-You must grade the label on exactly two axes and return a single JSON object \
-with the keys described below. Be terse and decisive.
+You must grade the label on exactly three axes and return a single JSON \
+object with the keys described below. Be terse and decisive.
 
 Axis B -- GROUNDING: does this label describe THIS scene specifically, or \
 could it plausibly describe a *different* manipulation scene without changes? \
@@ -76,10 +84,23 @@ content -- WITHOUT inventing precise numeric measurements, ascribing affect \
 commands (joint angles, force percentages, torque, motor commands)? \
 Pass = "appropriate". Fail = "inappropriate".
 
+Axis D -- TEMPLATE_DISTINGUISHABLE (anti-collapse, stricter than B): would \
+this exact same label, verbatim, also be a reasonable description for many \
+*different but similar* manipulation scenes (e.g. another LIBERO task with a \
+different target object on the same workspace)? \
+Pass = "specific" (the label commits to scene-fingerprinting details -- a \
+named target object/colour, a specific distractor, a one-of-a-kind spatial \
+relation -- that would NOT generalise to a different similar scene). \
+Fail = "template" (the label is reusable boilerplate that happens to mention \
+the workspace; swap one object name and it would describe a different task \
+just as well, or the bullets follow a fixed schema rather than describing \
+unique features of *this* frame).
+
 Return strictly valid JSON of the form:
 {
   "grounding": {"verdict": "specific" | "generic", "reason": "<one short sentence>"},
-  "appropriateness": {"verdict": "appropriate" | "inappropriate", "reason": "<one short sentence>"}
+  "appropriateness": {"verdict": "appropriate" | "inappropriate", "reason": "<one short sentence>"},
+  "template_distinguishable": {"verdict": "specific" | "template", "reason": "<one short sentence>"}
 }
 
 No preamble, no markdown fences, no extra keys.
@@ -109,6 +130,9 @@ class GradeResult:
     usage: dict = field(default_factory=dict)
     error: str | None = None
     raw_response: str | None = None
+    # Optional 3rd axis added for the V3 anti-template-collapse eval. Older
+    # grade JSONL rows pre-V3 lack this field and load with ``None``.
+    template_distinguishable: AxisGrade | None = None
 
     @property
     def passes_b_llm(self) -> bool:
@@ -117,6 +141,13 @@ class GradeResult:
     @property
     def passes_c_llm(self) -> bool:
         return self.appropriateness is not None and self.appropriateness.passed
+
+    @property
+    def passes_d_llm(self) -> bool:
+        return (
+            self.template_distinguishable is not None
+            and self.template_distinguishable.passed
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -148,11 +179,15 @@ def _get_openai():
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
-def _parse_grade(text: str) -> tuple[AxisGrade | None, AxisGrade | None, str | None]:
+def _parse_grade(
+    text: str,
+) -> tuple[AxisGrade | None, AxisGrade | None, AxisGrade | None, str | None]:
     """Try to parse a grade JSON object out of model output. Returns
-    ``(grounding, appropriateness, error_or_None)``.
+    ``(grounding, appropriateness, template_distinguishable, error_or_None)``.
 
     Tolerant of stray markdown fences but rejects ill-typed JSON.
+    The 3rd axis is optional: if absent in the JSON it parses as ``None``
+    rather than as an error (backward compatibility with B/C-only graders).
     """
     s = text.strip()
     if s.startswith("```"):
@@ -168,14 +203,17 @@ def _parse_grade(text: str) -> tuple[AxisGrade | None, AxisGrade | None, str | N
             try:
                 obj = json.loads(m.group(0))
             except Exception as e2:
-                return None, None, f"json_parse: {e2}"
+                return None, None, None, f"json_parse: {e2}"
         else:
-            return None, None, "no_json_object"
+            return None, None, None, "no_json_object"
     if not isinstance(obj, dict):
-        return None, None, "json_not_object"
+        return None, None, None, "json_not_object"
+
+    assert obj is not None
+    obj_dict = obj  # narrow type for closure below
 
     def _axis(key: str, pos: str, neg: str) -> tuple[AxisGrade | None, str | None]:
-        v = obj.get(key)
+        v = obj_dict.get(key)
         if not isinstance(v, dict):
             return None, f"missing:{key}"
         verdict = (v.get("verdict") or "").strip().lower()
@@ -186,8 +224,14 @@ def _parse_grade(text: str) -> tuple[AxisGrade | None, AxisGrade | None, str | N
 
     g, e1 = _axis("grounding", "specific", "generic")
     a, e2 = _axis("appropriateness", "appropriate", "inappropriate")
-    err = e1 or e2
-    return g, a, err
+    # Axis D is optional for backward compatibility: legacy graders return
+    # only B/C; we treat its absence as ``None`` (i.e. "not graded on this
+    # axis") rather than as an error.
+    d, e3 = (None, None)
+    if "template_distinguishable" in obj:
+        d, e3 = _axis("template_distinguishable", "specific", "template")
+    err = e1 or e2 or e3
+    return g, a, d, err
 
 
 # ---------------------------------------------------------------------------
@@ -217,8 +261,9 @@ def _build_grade_messages(inp: GradeInput) -> list[dict]:
         f"{pos_clause}\n\n"
         "Candidate label (4-5 bullets):\n"
         f"<label>\n{inp.description.strip()}\n</label>\n\n"
-        "Grade the label on (B) grounding and (C) appropriateness per the system "
-        "instructions, and return the JSON object."
+        "Grade the label on (B) grounding, (C) appropriateness, and "
+        "(D) template_distinguishable per the system instructions, and return "
+        "the JSON object."
     )
     content: list[dict] = [{"type": "text", "text": user_text}]
     for p in inp.image_paths:
@@ -255,11 +300,12 @@ async def _grade_one_async(
                 )
                 text = (resp.choices[0].message.content or "").strip()
                 usage = resp.usage.model_dump() if getattr(resp, "usage", None) else {}
-                g, a, parse_err = _parse_grade(text)
+                g, a, d, parse_err = _parse_grade(text)
                 return GradeResult(
                     example_id=inp.example_id, variant_id=inp.variant_id,
                     grader="gpt-5.1", model=model,
                     grounding=g, appropriateness=a,
+                    template_distinguishable=d,
                     elapsed_ms=(time.time() - t0) * 1000, usage=usage,
                     error=parse_err, raw_response=text,
                 )
@@ -307,7 +353,17 @@ async def grade_many_async(
                     obj = json.loads(line)
                 except Exception:
                     continue
-                if obj.get("grounding") and obj.get("appropriateness") and not obj.get("error"):
+                # Resume policy: a row is "done" if all axes we currently
+                # grade are present and the row didn't error out. Legacy
+                # B/C-only rows pre-V3 are *not* re-graded (we treat axis D
+                # as absent rather than failing), to preserve historical
+                # judge outputs; if you want to upgrade them, delete the
+                # JSONL and rerun.
+                if (
+                    obj.get("grounding")
+                    and obj.get("appropriateness")
+                    and not obj.get("error")
+                ):
                     done_keys.add((obj["variant_id"], obj["example_id"]))
 
     todo = [
@@ -352,6 +408,11 @@ def _grade_to_row(res: GradeResult) -> dict:
         "model": res.model,
         "grounding": asdict(res.grounding) if res.grounding else None,
         "appropriateness": asdict(res.appropriateness) if res.appropriateness else None,
+        "template_distinguishable": (
+            asdict(res.template_distinguishable)
+            if res.template_distinguishable
+            else None
+        ),
         "elapsed_ms": res.elapsed_ms,
         "usage": res.usage,
         "error": res.error,
@@ -377,6 +438,11 @@ class LLMVariantRollup:
     pass_rate_c_llm: float
     top_b_failures: list[tuple[str, int]]
     top_c_failures: list[tuple[str, int]]
+    # Axis D was added for V3 anti-template-collapse eval; older rollups
+    # produced before V3 carry zero counts here.
+    pass_rate_d_llm: float = 0.0
+    n_graded_d: int = 0
+    top_d_failures: list[tuple[str, int]] = field(default_factory=list)
 
 
 def aggregate_llm_grades(
@@ -391,21 +457,32 @@ def aggregate_llm_grades(
     n = len(grades)
     n_b = sum(g.passes_b_llm for g in grades)
     n_c = sum(g.passes_c_llm for g in grades)
+    # Axis D pass-rate is computed only over rows that actually have axis D
+    # populated, so legacy B/C-only grades don't artificially deflate it.
+    d_grades = [g for g in grades if g.template_distinguishable is not None]
+    n_d_total = len(d_grades)
+    n_d = sum(g.passes_d_llm for g in d_grades)
     b_reasons: Counter = Counter()
     c_reasons: Counter = Counter()
+    d_reasons: Counter = Counter()
     for g in grades:
         if not g.passes_b_llm and g.grounding is not None:
             b_reasons[g.grounding.reason[:80] or "no_reason"] += 1
         if not g.passes_c_llm and g.appropriateness is not None:
             c_reasons[g.appropriateness.reason[:80] or "no_reason"] += 1
+        if g.template_distinguishable is not None and not g.passes_d_llm:
+            d_reasons[g.template_distinguishable.reason[:80] or "no_reason"] += 1
     return LLMVariantRollup(
         variant_id=variant_id,
         grader=grader,
         n_graded=n,
         pass_rate_b_llm=(n_b / n) if n else 0.0,
         pass_rate_c_llm=(n_c / n) if n else 0.0,
+        pass_rate_d_llm=(n_d / n_d_total) if n_d_total else 0.0,
+        n_graded_d=n_d_total,
         top_b_failures=b_reasons.most_common(top_k),
         top_c_failures=c_reasons.most_common(top_k),
+        top_d_failures=d_reasons.most_common(top_k),
     )
 
 

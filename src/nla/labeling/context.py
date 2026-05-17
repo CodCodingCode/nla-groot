@@ -364,11 +364,16 @@ def build_position_inputs(
     video_keys: list[str] | None = None,
     state_name: str | None = None,
     pool: FrameLoaderPool | None = None,
+    suite: str | None = None,
 ) -> Iterator[PositionLabelInput]:
     """Convert sampled positions into PositionLabelInput objects with images.
 
     Frames are extracted from the LeRobot dataset and saved as JPEGs under
     ``frame_cache_dir``; their paths are attached to the returned input.
+
+    ``suite`` is stamped onto each constructed :class:`PositionLabelInput` so
+    the V4 prompt builder can dispatch to suite-specific addenda without
+    relying on example-id prefixes.  ``None`` is a no-op (V3 default).
     """
     dataset_root = Path(dataset_root)
     frame_cache_dir = Path(frame_cache_dir)
@@ -413,6 +418,9 @@ def build_position_inputs(
         if not instruction and rec.episode_index is not None:
             instruction = di.episode_to_task.get(int(rec.episode_index), "")
 
+        extra: dict = {"source_example_id": rec.example_id}
+        if suite is not None:
+            extra["suite"] = suite
         yield PositionLabelInput(
             example_id=f"{rec.example_id}@p{s.position_index:03d}_{s.position_type}",
             instruction=instruction,
@@ -426,5 +434,6 @@ def build_position_inputs(
             state_name=state_name,
             episode_index=rec.episode_index,
             step_index=rec.step_index,
-            extra={"source_example_id": rec.example_id},
+            extra=extra,
+            suite=suite,
         )

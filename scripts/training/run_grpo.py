@@ -8,19 +8,31 @@ the reward model (AR), and trains the policy AV with::
 
 KL anchor to the frozen reference at coefficient ``--beta``.
 
-Example::
+Example (LIBERO, recon-only)::
 
     PYTHONPATH=src python scripts/training/run_grpo.py \\
-        --sft-dir          data/sft/droid_ep1_v1 \\
-        --activations-root data/activations/droid_ep1 \\
-        --output-dir       data/grpo/droid_ep1_b002 \\
+        --sft-dir          data/sft/libero_goal_pilot_v3 \\
+        --activations-root data/activations/libero_goal_pilot \\
+        --output-dir       data/grpo/libero_goal_pilot_b002 \\
         --beta 0.02 --total-steps 200 --rollouts-per-activation 4
+
+Example (LIBERO, recon + multimodal-judge blend)::
+
+    OPENAI_API_KEY=sk-... PYTHONPATH=src python scripts/training/run_grpo.py \\
+        --sft-dir          data/sft/libero_goal_pilot_v3 \\
+        --activations-root data/activations/libero_goal_pilot \\
+        --output-dir       data/grpo/libero_goal_pilot_b002_judge \\
+        --beta 0.02 --total-steps 200 --rollouts-per-activation 4 \\
+        --judge-reward-weight 0.5 \\
+        --frames-cache       data/labels/libero_goal_pilot/frames_cache \\
+        --judge-video-keys   image wrist_image
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 
@@ -75,6 +87,32 @@ def _build_parser() -> argparse.ArgumentParser:
                         "gap between greedy (0.0) and sampled FVE is itself a "
                         "memorization diagnostic.")
 
+    # Optional multimodal-judge reward term (off by default; weight=0 is
+    # byte-identical to the pure-reconstruction recipe).
+    p.add_argument("--judge-reward-weight", type=float, default=0.0,
+                   help="Blend coefficient for the GPT-5.1 multimodal judge reward "
+                        "(0 = pure reconstruction, 1 = pure judge). When > 0, "
+                        "--frames-cache is required and OPENAI_API_KEY must be set.")
+    p.add_argument("--judge-concurrency", type=int, default=8,
+                   help="Max concurrent judge API calls per GRPO step.")
+    p.add_argument("--judge-model", default=None,
+                   help="Override OPENAI_GRADER_MODEL (default: gpt-5.1).")
+    p.add_argument("--judge-cache-path", default=None,
+                   help="JSONL cache of judge verdicts keyed by sha1(source_id:text). "
+                        "Read on startup, appended to as new (source_id, rollout) "
+                        "pairs are scored.")
+    p.add_argument("--frames-cache", default=None,
+                   help="Directory of cached camera frames "
+                        "({source_id}__{video_key}.jpg), same convention as "
+                        "scripts/eval/llm_judge_av_captions.py. Populate via "
+                        "scripts/eval/extract_label_frames.py.")
+    p.add_argument("--judge-video-keys", nargs="+", default=None,
+                   help="Camera-key tokens used to construct per-row image "
+                        "filenames at {frames_cache}/{source_id}__{video_key}.jpg. "
+                        "Required when --judge-reward-weight > 0. For LIBERO "
+                        "pass 'image wrist_image'; the tokens must match what "
+                        "your labeling pipeline / extract_label_frames.py wrote.")
+
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--log-level", default="INFO")
@@ -93,6 +131,23 @@ def main(argv: list[str] | None = None) -> int:
     eval_temps = tuple(
         float(t.strip()) for t in args.eval_temperatures.split(",") if t.strip()
     )
+
+    if args.judge_reward_weight > 0.0:
+        if not args.frames_cache:
+            raise SystemExit(
+                "--judge-reward-weight > 0 requires --frames-cache "
+                "(directory of cached camera frames named "
+                "{source_id}__{video_key}.jpg)."
+            )
+        if not args.judge_video_keys:
+            raise SystemExit(
+                "--judge-reward-weight > 0 requires --judge-video-keys "
+                "(camera-key tokens, e.g. 'image wrist_image' for LIBERO)."
+            )
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise SystemExit(
+                "--judge-reward-weight > 0 requires OPENAI_API_KEY in the environment."
+            )
 
     cfg = GRPOConfig(
         sft_dir=args.sft_dir,
@@ -124,6 +179,12 @@ def main(argv: list[str] | None = None) -> int:
         split_by=args.split_by,
         allow_episode_split_row_fallback=not args.no_episode_split_fallback,
         eval_temperatures=eval_temps,
+        judge_reward_weight=args.judge_reward_weight,
+        judge_concurrency=args.judge_concurrency,
+        judge_model=args.judge_model,
+        judge_cache_path=args.judge_cache_path,
+        frames_cache=args.frames_cache,
+        judge_video_keys=list(args.judge_video_keys) if args.judge_video_keys else [],
     )
     summary = run_grpo(cfg)
     logging.info("GRPO done. %s", summary)

@@ -7,7 +7,7 @@ language→vector hook path without gated HF deps.
 ::
 
     PYTHONPATH=src .venv/bin/python scripts/eval/nla_steer_ar_smoke.py \\
-        --ar-dir data/sft/droid_100ep_v2_nce/ar
+        --ar-dir data/sft/libero_goal_pilot_v3/ar
 """
 
 from __future__ import annotations

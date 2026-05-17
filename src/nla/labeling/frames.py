@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DatasetInfo:
     fps: float
-    video_keys: list[str]                  # short keys like "exterior_1_left"
+    video_keys: list[str]                  # short keys like "image" / "wrist_image"
     video_path_template: str               # e.g. "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
     chunks_size: int
-    video_key_to_original: dict[str, str]  # short -> dataset video-key (e.g. "exterior_1_left" -> "observation.images.exterior_1_left")
+    video_key_to_original: dict[str, str]  # short -> dataset video-key (e.g. "image" -> "observation.images.image")
     episode_to_task: dict[int, str]        # episode_index -> task text (from meta/episodes.jsonl + tasks.jsonl)
 
     @classmethod

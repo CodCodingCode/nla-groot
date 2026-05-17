@@ -8,13 +8,13 @@ same activation slice.
 Example::
 
   python scripts/labeling/dedupe_labels.py \\
-      --in data/labels/droid_100ep/labels.jsonl \\
-      --out data/labels/droid_100ep/labels.dedup.jsonl \\
+      --in data/labels/libero_goal_pilot/labels.jsonl \\
+      --out data/labels/libero_goal_pilot/labels.dedup.jsonl \\
       --prefer last
 
   # Replace original (writes .bak first)
   python scripts/labeling/dedupe_labels.py \\
-      --in data/labels/droid_100ep/labels.jsonl \\
+      --in data/labels/libero_goal_pilot/labels.jsonl \\
       --prefer last --in-place
 """
 

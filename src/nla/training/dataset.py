@@ -233,6 +233,11 @@ class LabeledPositionSample:
     label_example_id: str
     episode_index: int | None
     quality_weight: float
+    # Optional list of hard-negative captions sampled for this anchor by the
+    # dataset's hard-negative miner. ``None`` (the default) means hard-neg
+    # mining is disabled and downstream code should keep its legacy in-batch
+    # InfoNCE behavior.
+    negative_descriptions: list[str] | None = None
 
 
 class LabeledPositionDataset(Dataset):
@@ -258,7 +263,34 @@ class LabeledPositionDataset(Dataset):
         min_bullet_lines: int | None = None,
         strict_position_check: bool = True,
         strict_position_check_max_examples: int = 10,
+        hard_negative_source: Literal[
+            "none", "same_episode", "same_position_type", "topk_cosine"
+        ] = "none",
+        hard_negatives_per_anchor: int = 4,
+        hard_negative_index_path: str | Path | None = None,
+        image_patch_pooling: Literal[
+            "pinned", "mean_pool_image", "strided_image", "center_image"
+        ] = "pinned",
+        image_patch_pooling_strided_k: int = 4,
     ):
+        # ``image_patch_pooling`` controls how the dataset materializes the
+        # activation for rows whose ``position_type == "image_patch"``. The
+        # default ``"pinned"`` preserves V3 behaviour exactly: return
+        # ``features[entry.position_index]`` (the single random patch the
+        # labeling pass committed to). The non-pinned strategies (added for
+        # V4 per ``docs/sft_plan/08_positive_steering_followon.md`` step 1)
+        # ignore ``position_index`` and pool over every valid image-patch
+        # token via ``nla.extraction.position_strategies.apply``. Non-image
+        # ptypes (``last_text``, ``anchor``) are untouched regardless.
+        self.image_patch_pooling = str(image_patch_pooling)
+        self.image_patch_pooling_strided_k = int(image_patch_pooling_strided_k)
+        if self.image_patch_pooling not in (
+            "pinned", "mean_pool_image", "strided_image", "center_image"
+        ):
+            raise ValueError(
+                f"image_patch_pooling must be one of pinned/mean_pool_image/"
+                f"strided_image/center_image, got {self.image_patch_pooling!r}"
+            )
         self.reader = ActivationShardReader(activations_root)
         self._index_by_id = {rec.example_id: i for i, rec in enumerate(self.reader.records)}
 
@@ -323,6 +355,216 @@ class LabeledPositionDataset(Dataset):
             valid = valid[: int(max_items)]
         self.labels = valid
 
+        # Hard-negative mining bookkeeping. We snapshot the per-label-row
+        # (episode_index, step_index, position_type) tuples and a precomputed
+        # list-of-candidate-row-indices keyed by anchor row. Built once at
+        # init time so __getitem__ is O(K_neg) per call.
+        self.hard_negative_source = str(hard_negative_source)
+        self.hard_negatives_per_anchor = int(hard_negatives_per_anchor)
+        self._hard_neg_seed = int(seed)
+        self._hard_neg_candidates: list[list[int]] | None = None
+        self.hard_negative_index_path = (
+            None if hard_negative_index_path is None else Path(hard_negative_index_path)
+        )
+        if self.hard_negative_source != "none":
+            self._build_hard_negative_index()
+
+    def _build_hard_negative_index(self) -> None:
+        """Precompute, for each kept label row, the list of label-row indices
+        that are admissible as hard negatives.
+
+        ``same_episode``: rows with the same ``episode_index`` and a
+        *different* ``step_index``. Excludes the anchor itself by construction.
+
+        ``same_position_type``: rows with the same ``position_type`` but a
+        *different* ``episode_index``. Excludes anchor-own-episode entirely
+        so the negative caption describes a genuinely different scene.
+
+        ``topk_cosine``: load a precomputed JSONL produced by
+        ``scripts/training/mine_hard_negatives.py``. Each row is keyed by
+        the anchor's label_example_id and lists the top-K most cosine-
+        similar label IDs in the same activation corpus. We re-resolve
+        label IDs to in-split row indices, dropping any neg that fell on
+        the wrong side of the held-out split or got dropped by
+        ``max_items``/``min_bullet_lines``. Anchors with no remaining
+        admissible negatives fall back to the anchor's own caption (the
+        same fallback as the heuristic modes).
+        """
+        n = len(self.labels)
+        cands: list[list[int]] = [[] for _ in range(n)]
+
+        if self.hard_negative_source == "topk_cosine":
+            if self.hard_negative_index_path is None:
+                raise ValueError(
+                    "hard_negative_source='topk_cosine' requires "
+                    "hard_negative_index_path to point at a mining JSONL "
+                    "produced by scripts/training/mine_hard_negatives.py."
+                )
+            cands = self._build_topk_cosine_index()
+        elif self.hard_negative_source == "same_episode":
+            meta = self._labels_episode_step_ptype()
+            by_ep: dict[int | None, list[int]] = {}
+            for j, (ep, _st, _pt) in enumerate(meta):
+                by_ep.setdefault(ep, []).append(j)
+            for i, (ep_i, st_i, _pt_i) in enumerate(meta):
+                pool = by_ep.get(ep_i, [])
+                cands[i] = [j for j in pool if j != i and meta[j][1] != st_i]
+        elif self.hard_negative_source == "same_position_type":
+            meta = self._labels_episode_step_ptype()
+            by_pt: dict[str, list[int]] = {}
+            for j, (_ep, _st, pt) in enumerate(meta):
+                by_pt.setdefault(pt, []).append(j)
+            for i, (ep_i, _st_i, pt_i) in enumerate(meta):
+                pool = by_pt.get(pt_i, [])
+                cands[i] = [j for j in pool if meta[j][0] != ep_i]
+        else:
+            raise ValueError(
+                f"Unknown hard_negative_source={self.hard_negative_source!r}; "
+                "expected one of {none, same_episode, same_position_type, topk_cosine}."
+            )
+
+        n_empty = sum(1 for c in cands if not c)
+        if n_empty:
+            logger.warning(
+                "[hard-neg %s] %d/%d anchors have no admissible negatives; "
+                "those rows will fall back to repeating the anchor's own caption.",
+                self.hard_negative_source, n_empty, n,
+            )
+        self._hard_neg_candidates = cands
+
+    def _labels_episode_step_ptype(self) -> list[tuple[int | None, int | None, str]]:
+        out: list[tuple[int | None, int | None, str]] = []
+        for entry in self.labels:
+            rec = self.reader.records[self._index_by_id[entry.source_example_id]]
+            ep = None if rec.episode_index is None else int(rec.episode_index)
+            st = None if rec.step_index is None else int(rec.step_index)
+            out.append((ep, st, entry.position_type))
+        return out
+
+    def _build_topk_cosine_index(self) -> list[list[int]]:
+        """Read the offline-mined JSONL into per-anchor row-index lists.
+
+        We resolve neg label IDs through ``self._label_id_to_row`` which is
+        keyed by the same canonical label_example_id the miner wrote
+        (``label.raw["example_id"]`` when present, else the synthetic
+        ``<sid>@p<NNN>_<ptype>`` fallback).  Negs that don't resolve (held
+        out, filtered by min_bullet_lines, etc.) are silently dropped per
+        anchor; anchors that drop to empty fall back to the "repeat self"
+        behavior in ``_sample_hard_negatives``.
+        """
+        path = self.hard_negative_index_path
+        assert path is not None
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"hard_negative_index_path={path} does not exist. Run "
+                "scripts/training/mine_hard_negatives.py on this activation "
+                "corpus first."
+            )
+        label_id_to_row = self._build_label_id_to_row()
+
+        n = len(self.labels)
+        cands: list[list[int]] = [[] for _ in range(n)]
+        n_rows_in_index = 0
+        n_anchors_matched = 0
+        n_negs_total = 0
+        n_negs_resolved = 0
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Malformed JSONL line in {path}: {exc}"
+                    ) from exc
+                n_rows_in_index += 1
+                anchor_id = row.get("anchor")
+                if anchor_id is None:
+                    continue
+                anchor_row = label_id_to_row.get(anchor_id)
+                if anchor_row is None:
+                    continue
+                neg_ids = row.get("negs") or []
+                n_anchors_matched += 1
+                n_negs_total += len(neg_ids)
+                resolved: list[int] = []
+                for nid in neg_ids:
+                    j = label_id_to_row.get(nid)
+                    if j is None or j == anchor_row:
+                        continue
+                    resolved.append(j)
+                n_negs_resolved += len(resolved)
+                cands[anchor_row] = resolved
+        coverage = 0.0 if n == 0 else n_anchors_matched / n
+        resolve_rate = 0.0 if n_negs_total == 0 else n_negs_resolved / n_negs_total
+        logger.info(
+            "[hard-neg topk_cosine] index_rows=%d  in-split_anchors_matched=%d/%d "
+            "(coverage=%.1f%%)  neg_resolve_rate=%.1f%%  path=%s",
+            n_rows_in_index, n_anchors_matched, n,
+            100 * coverage, 100 * resolve_rate, path,
+        )
+        if coverage < 0.5:
+            logger.warning(
+                "[hard-neg topk_cosine] only %.1f%% of in-split anchors were found "
+                "in the mining index. Did you re-mine after a labels or split change? "
+                "Stale index degrades to repeat-self fallback for unmatched rows.",
+                100 * coverage,
+            )
+        return cands
+
+    def _build_label_id_to_row(self) -> dict[str, int]:
+        """Return a map from canonical label_example_id -> row index in self.labels.
+
+        We register *both* the explicit ``label.raw["example_id"]`` (the
+        labeling-pipeline-assigned ID) and the synthetic
+        ``<source_example_id>@p<NNN>_<position_type>`` fallback. The miner
+        uses whichever is available, so we accept both shapes here.
+        """
+        out: dict[str, int] = {}
+        for i, entry in enumerate(self.labels):
+            raw_id = entry.raw.get("example_id")
+            synth_id = (
+                f"{entry.source_example_id}@p{entry.position_index:03d}_"
+                f"{entry.position_type}"
+            )
+            if raw_id is not None:
+                out[str(raw_id)] = i
+            out.setdefault(synth_id, i)
+        return out
+
+    def _sample_hard_negatives(self, anchor_i: int) -> list[str]:
+        """Return ``hard_negatives_per_anchor`` negative captions for anchor.
+
+        Sampling is *with replacement* whenever the candidate pool is smaller
+        than ``K_neg`` (so the dataloader always sees a rectangular shape);
+        without replacement otherwise. The RNG is per-call seeded with
+        ``(self._hard_neg_seed, anchor_i, n_seen)`` mixed into a Python
+        ``Random`` so repeated reads of the same index across epochs vary
+        but a single epoch is reproducible from the dataset seed.
+
+        The fallback when the pool is empty is to return the anchor's own
+        caption ``K_neg`` times. That degrades to a "self-collision" hard
+        negative which is still a valid (if mild) negative under the
+        contrastive objective.
+        """
+        K = self.hard_negatives_per_anchor
+        if K <= 0:
+            return []
+        cands = (self._hard_neg_candidates or [])[anchor_i]
+        # Mix seed and anchor index into a single int (Python 3.9+ deprecates
+        # hash-based seeding for non-int types, which is what bit us here).
+        rng = random.Random((self._hard_neg_seed * 0x9E3779B1) ^ int(anchor_i))
+        if not cands:
+            return [self.labels[anchor_i].description] * K
+        if len(cands) >= K:
+            picks = rng.sample(cands, K)
+        else:
+            picks = [rng.choice(cands) for _ in range(K)]
+        return [self.labels[j].description for j in picks]
+
     def __len__(self):
         return len(self.labels)
 
@@ -338,7 +580,48 @@ class LabeledPositionDataset(Dataset):
                 f"Label position {pos} >= seq_len {features.shape[0]} for "
                 f"example {entry.source_example_id}"
             )
-        vec = features[pos].contiguous().to(torch.float32)
+        if (
+            self.image_patch_pooling != "pinned"
+            and entry.position_type == "image_patch"
+        ):
+            # V4 pooled-strategy path. Re-uses the same read-time pooling
+            # functions the extraction A/B sweep validated. We do NOT
+            # apply pooling to ``last_text``/``anchor`` rows: their pinned
+            # token positions are the whole point of those ptypes.
+            try:
+                from nla.extraction.position_strategies import apply as _apply_strategy
+            except ImportError as e:
+                raise ImportError(
+                    "image_patch_pooling requires nla.extraction.position_strategies; "
+                    "got ImportError. Check sys.path / package install."
+                ) from e
+            image_mask = item.get("image_mask")
+            attention_mask = item.get("attention_mask")
+            if image_mask is None or attention_mask is None:
+                raise RuntimeError(
+                    f"image_patch_pooling={self.image_patch_pooling!r} requires "
+                    f"the activation shard to carry image_mask + attention_mask; "
+                    f"shard for {entry.source_example_id} is missing them. "
+                    "Re-extract with the current scripts/extraction/run_extract.py."
+                )
+            try:
+                vec = _apply_strategy(
+                    self.image_patch_pooling,
+                    features,
+                    image_mask,
+                    attention_mask,
+                    k=self.image_patch_pooling_strided_k,
+                ).contiguous().to(torch.float32)
+            except ValueError:
+                # Strategy raises if there are no image patches (shouldn't
+                # happen for a row whose ptype is image_patch, but be
+                # defensive); fall back to the pinned position.
+                vec = features[pos].contiguous().to(torch.float32)
+        else:
+            vec = features[pos].contiguous().to(torch.float32)
+        negs: list[str] | None = None
+        if self.hard_negative_source != "none":
+            negs = self._sample_hard_negatives(i)
         return LabeledPositionSample(
             activation=vec,
             position_type=entry.position_type,
@@ -349,11 +632,12 @@ class LabeledPositionDataset(Dataset):
             label_example_id=entry.raw.get("example_id") or entry.source_example_id,
             episode_index=rec.episode_index,
             quality_weight=float(entry.quality_weight),
+            negative_descriptions=negs,
         )
 
 
 def collate_labeled_positions(batch):
-    return {
+    out = {
         "activations": torch.stack([b.activation for b in batch], dim=0),
         "position_type": [b.position_type for b in batch],
         "position_index": torch.tensor([b.position_index for b in batch], dtype=torch.long),
@@ -366,6 +650,19 @@ def collate_labeled_positions(batch):
             [b.quality_weight for b in batch], dtype=torch.float32,
         ),
     }
+    if any(b.negative_descriptions is not None for b in batch):
+        # Carry only when *every* row provided negatives so downstream
+        # consumers can assume rectangular shape; falling back to skipping
+        # the field when partial would silently disable hard-negs for the
+        # whole batch on a single-row dataset misconfig.
+        if not all(b.negative_descriptions is not None for b in batch):
+            raise ValueError(
+                "collate_labeled_positions: some batch rows have "
+                "negative_descriptions and others don't. Mining must be on "
+                "for every row in a batch (configure the dataset uniformly)."
+            )
+        out["negative_descriptions"] = [list(b.negative_descriptions) for b in batch]
+    return out
 
 
 @dataclass

@@ -1,5 +1,19 @@
 # V2 postmortem: lessons learned (SFT on `droid_100ep`)
 
+> **[V3 LIBERO results superseding this doc]** This postmortem documents the
+> V2 DROID failure modes that motivated the V3 LIBERO 4-suite rerun.
+> Authoritative V3 PASS/WARN/FAIL verdict lives in
+> `data/sft/libero_4suite_v3/v3_scorecard.json`, written by
+> [`scripts/eval/build_v3_scorecard.py`](../../scripts/eval/build_v3_scorecard.py).
+> The V3 eval refactor (retrieval margin, 3-axis LLM judge incl.
+> anti-template, closed-loop LIBERO sim A/B + live AV captioning) auto-runs
+> as Phase 6 of the SFT watcher via
+> [`scripts/eval/run_post_sft_evals.sh`](../../scripts/eval/run_post_sft_evals.sh);
+> see [`v3_libero_eval_refactor.plan.md`](../../.cursor/plans/v3_libero_eval_refactor_c499993c.plan.md)
+> for the full plan. All V2 DROID artifacts referenced here now live under
+> `data/_archive_droid/` (see `MANIFEST.txt`), moved there by
+> [`scripts/migration/archive_droid.sh`](../../scripts/migration/archive_droid.sh).
+
 > **Canonical rerun checklist:** [`06_v2_postmortem_v3_rerun.md`](06_v2_postmortem_v3_rerun.md). **Expanded metrics + GRPO cookbook (evals folder):** [`docs/evals/v2_lessons_learned.md`](../evals/v2_lessons_learned.md). **Repo overview:** [`README.md`](../../README.md).
 
 This note captures what we learned from the **`droid_100ep_v2_nce`** joint AV+AR SFT run (~15k steps), why aggregate metrics misled us, what we changed in code afterward, and how to run a **short GRPO A/B** aimed at template / “bag-of-scenes” collapse.

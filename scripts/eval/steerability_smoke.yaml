@@ -1,0 +1,25 @@
+name: steerability_smoke
+output_dir: data/eval/steerability_smoke
+model_path: checkpoints/GR00T-N1.7-LIBERO/libero_goal
+embodiment_tag: LIBERO_PANDA
+envs: [libero_sim/put_the_bowl_on_the_plate]
+seeds: [0]
+n_action_steps: 8
+max_episode_steps: 80
+suppress_done: true
+steps_per_render: 1
+fps: 20
+
+tracked_bodies:
+  - akita_black_bowl_1_main
+  - plate_1_main
+  - wine_bottle_1_main
+
+conditions:
+  - name: baseline
+    ar_dir: null
+    steer: null
+    target_body: akita_black_bowl_1_main
+
+av_eval:
+  enabled: false

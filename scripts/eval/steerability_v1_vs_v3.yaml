@@ -1,0 +1,107 @@
+name: steerability_v1_vs_v3
+output_dir: data/eval/steerability_v1_vs_v3
+model_path: checkpoints/GR00T-N1.7-LIBERO/libero_goal
+embodiment_tag: LIBERO_PANDA
+patch_scorecard: data/sft/libero_4suite_v3/v3_scorecard.json
+
+envs:
+  - libero_sim/put_the_bowl_on_the_plate
+
+# Apples-to-apples with the v3 sim branch the user scoped to 3 seeds.
+seeds: [0, 1, 2]
+n_action_steps: 8
+max_episode_steps: 300
+suppress_done: true
+steps_per_render: 1
+fps: 20
+
+policy_host: 0.0.0.0
+policy_port: 5555
+
+tracked_bodies:
+  - akita_black_bowl_1_main
+  - plate_1_main
+  - wine_bottle_1_main
+  - cream_cheese_1_main
+  - wooden_cabinet_1_main
+  - flat_stove_1_main
+  - wine_rack_1_main
+
+conditions:
+  - name: baseline
+    ar_dir: null
+    steer: null
+    target_body: akita_black_bowl_1_main
+
+  - name: steer_bowl_plate
+    ar_dir: data/sft/libero_goal_pilot/ar
+    steer:
+      prompt_file: src/nla/eval/steerability/prompts/bowl_plate.txt
+      placement: image_patch_all
+      blend: 1.0
+    target_body: akita_black_bowl_1_main
+
+  - name: steer_wine_rack
+    ar_dir: data/sft/libero_goal_pilot/ar
+    steer:
+      prompt_file: src/nla/eval/steerability/prompts/wine_rack.txt
+      placement: image_patch_all
+      blend: 1.0
+    target_body: wine_bottle_1_main
+
+  - name: steer_bowl_stove
+    ar_dir: data/sft/libero_goal_pilot/ar
+    steer:
+      prompt_file: src/nla/eval/steerability/prompts/bowl_stove.txt
+      placement: image_patch_all
+      blend: 1.0
+    target_body: akita_black_bowl_1_main
+
+  # libero_4suite_v3 AR (same textual steer prompts).
+  - name: steer_bowl_plate_v3
+    ar_dir: data/sft/libero_4suite_v3/ar
+    steer:
+      prompt_file: src/nla/eval/steerability/prompts/bowl_plate.txt
+      placement: image_patch_all
+      blend: 1.0
+    target_body: akita_black_bowl_1_main
+
+  - name: steer_wine_rack_v3
+    ar_dir: data/sft/libero_4suite_v3/ar
+    steer:
+      prompt_file: src/nla/eval/steerability/prompts/wine_rack.txt
+      placement: image_patch_all
+      blend: 1.0
+    target_body: wine_bottle_1_main
+
+  - name: steer_bowl_stove_v3
+    ar_dir: data/sft/libero_4suite_v3/ar
+    steer:
+      prompt_file: src/nla/eval/steerability/prompts/bowl_stove.txt
+      placement: image_patch_all
+      blend: 1.0
+    target_body: akita_black_bowl_1_main
+
+av_eval:
+  enabled: true
+  ar_dirs:
+    - data/sft/libero_goal_pilot/ar
+    - data/sft/libero_4suite_v3/ar
+  video_keys: [image, wrist_image]
+  per_position: 4
+  held_out_fraction: 0.1
+  split_by: episode
+
+  datasets:
+    - name: libero_goal_holdout
+      activations_root: data/activations/libero_goal_pilot
+      labels_jsonl: data/labels/libero_goal_pilot/labels.jsonl
+      frames_cache: data/labels/libero_goal_pilot/frames_cache
+
+    # In-distribution for v3 judge rows (v1 AR graded here would be meaningless OOD).
+    - name: libero_4suite_holdout
+      activations_root: data/activations/libero_4suite_combined
+      labels_jsonl: data/labels/libero_4suite_combined/labels.jsonl
+      frames_cache: data/labels/libero_4suite_combined/frames_cache
+      ar_dirs: [data/sft/libero_4suite_v3/ar]
+      held_out_fraction: 0.05

@@ -1,13 +1,18 @@
-"""Fraction of Variance Explained — the central reconstruction metric.
+"""Fraction of Variance Explained -- the central reconstruction metric.
 
 We compute FVE per-position (each example is already a single token position
 in our setup, so per-example == per-position). The reference variance is the
-batch mean activation; FVE measures how much the AR reconstruction beats
-that baseline.
+per-dimension batch mean of ``target``; FVE measures how much the AR
+reconstruction beats that baseline.
 
-    FVE = 1 - sum((y - y_hat)^2) / sum((y - y_bar)^2)
+    FVE = 1 - sum((y - y_hat)^2) / sum((y - y_bar_d)^2)
 
-where y_bar is the per-dim mean over the batch.
+where ``y_bar_d`` is the per-dimension mean of ``target`` over the batch
+(broadcast back to the original shape). ``fve_per_token`` computes this
+directly on a single batch; ``_StreamingFve`` accumulates the same statistics
+across batches so the value of ``fve`` produced by ``compute()`` is identical
+(up to floating-point) to running ``fve_per_token`` once on the concatenated
+batch.
 
 We also report cosine similarity since FVE alone can hide direction errors
 when norms differ.
@@ -16,10 +21,22 @@ Stratified variants
 -------------------
 ``StratifiedFve`` wraps multiple ``_StreamingFve`` instances keyed by an
 arbitrary string (typically ``position_type`` -- ``last_text`` vs
-``image_patch`` vs ``anchor``).  This is the metric that distinguishes the
+``image_patch`` vs ``anchor``). This is the metric that distinguishes the
 backbone-image-position regime (where NLAs are uniquely valuable; SAE
 features have no native readout there) from the language-position regime
 (where the AV may degenerate into paraphrasing the instruction).
+
+History / metric-definition note
+--------------------------------
+Before 2026-05 ``_StreamingFve`` accumulated a single scalar grand-mean over
+all elements (batch x hidden) and used that as the baseline for ``ss_tot``.
+That denominator is algebraically always at least as large as the per-dim
+denominator above, so the logged ``fve`` was optimistically biased vs the
+docstring definition. Runs evaluated before the fix (e.g. the V3 SFT under
+``data/sft/libero_4suite_v3/``) used the global-mean baseline; their ``fve``
+numbers are therefore not directly comparable to runs evaluated after this
+file changes -- ``mse`` and ``cosine`` are unaffected. See
+``docs/sft_plan/v4_training_recon_audit.md`` section 4.1 for the derivation.
 """
 
 from __future__ import annotations
@@ -63,38 +80,73 @@ def fve_streaming_accumulator():
 
 
 class _StreamingFve:
+    """Online accumulator equivalent to ``fve_per_token`` on the concatenation.
+
+    Maintains per-dimension running ``sum`` and ``sum of squares`` of
+    ``target`` so the FVE baseline at ``compute()`` time is
+    ``y_bar_d = sum_per_dim / n_rows``, matching the module docstring's
+    per-dimension batch-mean definition. ``ss_res`` is accumulated element-wise
+    as before.
+    """
+
     def __init__(self):
-        self.n_elements = 0
-        self.n_rows = 0
-        self.sum = 0.0
-        self.sum_sq = 0.0
-        self.ss_res = 0.0
-        self.cos_sum = 0.0
+        self.n_rows: int = 0
+        self.n_elements: int = 0
+        self.ss_res: float = 0.0
+        self.cos_sum: float = 0.0
+        # Allocated lazily on first update so we don't pin a fixed H here.
+        self._sum_per_dim: torch.Tensor | None = None
+        self._sum_sq_per_dim: torch.Tensor | None = None
+
+    def _ensure_buffers(self, hidden: int) -> None:
+        if self._sum_per_dim is None:
+            self._sum_per_dim = torch.zeros(hidden, dtype=torch.float64)
+            self._sum_sq_per_dim = torch.zeros(hidden, dtype=torch.float64)
+        elif self._sum_per_dim.shape[0] != hidden:
+            raise ValueError(
+                f"_StreamingFve received target with hidden dim {hidden} but "
+                f"was previously updated with hidden dim {self._sum_per_dim.shape[0]}"
+            )
 
     def update(self, target: torch.Tensor, pred: torch.Tensor) -> None:
+        if target.shape != pred.shape:
+            raise ValueError(
+                f"_StreamingFve shape mismatch: target {tuple(target.shape)} vs pred {tuple(pred.shape)}"
+            )
+        if target.dim() != 2:
+            raise ValueError(
+                f"_StreamingFve expects [B, H] tensors; got {tuple(target.shape)}"
+            )
         target = target.detach().float().cpu()
         pred = pred.detach().float().cpu()
-        # Track element-wise sums (for FVE) and per-row cosine.
+        B, H = target.shape
+        self._ensure_buffers(H)
+        self.n_rows += B
         self.n_elements += target.numel()
-        self.n_rows += target.shape[0]
-        self.sum += target.sum().item()
-        self.sum_sq += (target ** 2).sum().item()
+        # fp64 buffers avoid catastrophic cancellation in ss_tot for large
+        # corpora; cast to float64 here so the running sums are exact-ish.
+        t64 = target.to(torch.float64)
+        self._sum_per_dim += t64.sum(dim=0)
+        self._sum_sq_per_dim += (t64 * t64).sum(dim=0)
         self.ss_res += ((target - pred) ** 2).sum().item()
         self.cos_sum += torch.nn.functional.cosine_similarity(
             target, pred, dim=-1
         ).sum().item()
 
     def compute(self) -> dict[str, float]:
-        if self.n_elements == 0:
+        if self.n_rows == 0 or self._sum_per_dim is None:
             return {"fve": float("nan"), "mse": float("nan"), "cosine": float("nan")}
-        mean = self.sum / self.n_elements
-        ss_tot = self.sum_sq - self.n_elements * mean * mean
         cosine = self.cos_sum / max(1, self.n_rows)
-        if ss_tot <= 0:
-            return {"fve": float("nan"), "mse": self.ss_res / self.n_elements, "cosine": cosine}
+        mse = self.ss_res / self.n_elements
+        # Per-dim variance summed over hidden dims:
+        #   ss_tot = sum_d ( sum_sq_d - sum_d^2 / n_rows )
+        ss_tot_per_dim = self._sum_sq_per_dim - (self._sum_per_dim ** 2) / float(self.n_rows)
+        ss_tot = float(ss_tot_per_dim.sum().item())
+        if ss_tot <= 0.0:
+            return {"fve": float("nan"), "mse": mse, "cosine": cosine}
         return {
             "fve": 1.0 - self.ss_res / ss_tot,
-            "mse": self.ss_res / self.n_elements,
+            "mse": mse,
             "cosine": cosine,
         }
 

@@ -347,7 +347,28 @@ After it finishes, the deliverables to look at first:
 
 ---
 
-## 7. v2 / v3 ablation candidates (don't run yet — capture for later)
+## 7. V3 defaults (May 2026 — Workstream D)
+
+Three cheap recipe lifts ship as **default-on** for V3 SFT (and for the
+next GRPO run). All three are CLI-overridable so legacy commands remain
+reproducible by passing the old values explicitly.
+
+| Knob | V2 default | V3 default | Code path | Rationale |
+|---|---|---|---|---|
+| `--ar-nce-hard-negative-source` | _flag did not exist_ | `none` (opt-in) | [`src/nla/training/dataset.py` `LabeledPositionDataset` hard-neg miner](../../src/nla/training/dataset.py) + [`src/nla/models/ar.py` `forward_sft(negative_explanations=...)`](../../src/nla/models/ar.py) | Pure InfoNCE with batch=4 only contrasts each anchor against 3 random in-batch captions. Hard-neg mining injects K_neg captions sampled from `same_episode` (different step) or `same_position_type` (different episode), so the contrastive denominator gains visually-similar-but-wrong distractors. Off by default to keep paper-faithful baseline reproducible; pass `--ar-nce-hard-negative-source same_episode` to turn on. |
+| `--ar-av-mix-max` | `0.0` | **`0.3`** | [`src/nla/training/sft.py` `_ar_av_mix_p` + the train-loop call](../../src/nla/training/sft.py) | V2 postmortem ([06_v2_postmortem_v3_rerun.md](06_v2_postmortem_v3_rerun.md)) traced the AR-reconstruction-shortcut failure mode to the SFT/eval distribution gap: AR was only ever trained on *gold* captions but evaluated on *AV-generated* ones at test time. Mixing 30% AV-gen captions into AR's input post-warmup forces AR to reconstruct from realistic generations, and exposes template collapse to the contrastive loss (where the failure mode is penalizable). Pass `--ar-av-mix-max 0` to revert to V2 behavior. |
+| `GRPOConfig.rollouts_per_activation` (`--rollouts-per-activation`) | `4` | **`8`** | [`src/nla/training/grpo.py`](../../src/nla/training/grpo.py) | Group-relative advantage normalization is noisy with K=4: each rollout's advantage is std-normalized over only 3 peers, and the rare lucky/unlucky tail dominates. K=8 doubles rollout cost but halves the per-group advantage variance. The live `droid_100ep_v2_grpo_run1` is unaffected (its `config.json` froze K=4); the next GRPO run picks up K=8 unless the user passes `--rollouts-per-activation 4`. |
+
+The test coverage for the first two lives in
+[`tests/test_ar_hard_negative_nce.py`](../../tests/test_ar_hard_negative_nce.py)
+and
+[`tests/test_dataset_hard_negative_mining.py`](../../tests/test_dataset_hard_negative_mining.py);
+see also [`tests/test_sft_smoke.py::test_run_sft_logs_ar_mix_and_nce`](../../tests/test_sft_smoke.py)
+for the AR-AV mix integration smoke.
+
+---
+
+## 8. v2 / v3 ablation candidates (don't run yet — capture for later)
 
 - Full-FT vs LoRA-32 vs LoRA-64 (all on top of v1's other knobs).
 - AR depth sweep: 10 / 16 / 20 / 24 layers.

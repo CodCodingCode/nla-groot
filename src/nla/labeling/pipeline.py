@@ -34,6 +34,35 @@ from nla.labeling.openai_client import DEFAULT_MODEL, label_many_async
 logger = logging.getLogger(__name__)
 
 
+# LIBERO suite names recognized by ``_infer_suite_from_dataset_root``.  Order
+# matters: ``libero_10`` must be checked before ``libero_1`` would match (no
+# such suite exists today, but matching the longer name first is the
+# defensive choice).  Kept in sync with ``prompts._LIBERO_SUITES``.
+_LIBERO_SUITES_FOR_PATH: tuple[str, ...] = (
+    "libero_spatial",
+    "libero_object",
+    "libero_goal",
+    "libero_10",
+)
+
+
+def _infer_suite_from_dataset_root(dataset_root: Path) -> str | None:
+    """Best-effort suite tag from a dataset path.
+
+    Matches ``libero_(spatial|object|goal|10)`` against the *string form* of
+    the dataset root so paths like
+    ``third_party/Isaac-GR00T/examples/LIBERO/libero_goal_no_noops_1.0.0_lerobot``
+    resolve to ``"libero_goal"``.  Returns ``None`` if nothing matches; the
+    caller treats that as a silent no-op and the V4 builder will fall back to
+    example-id-based inference.
+    """
+    s = str(dataset_root).lower()
+    for suite in _LIBERO_SUITES_FOR_PATH:
+        if suite in s:
+            return suite
+    return None
+
+
 @dataclass
 class LabelingManifest:
     activations_root: str
@@ -67,8 +96,20 @@ async def run_labeling(
     guarantee_strata: bool = False,
     api_key: str | None = None,
     resume: bool = True,
+    suite: str | None = None,
 ) -> int:
     """Sample one position per example, build inputs with frames, label them.
+
+    Parameters
+    ----------
+    suite:
+        Optional LIBERO suite tag (``libero_goal`` / ``libero_spatial`` /
+        ``libero_object`` / ``libero_10``) stamped onto every constructed
+        :class:`PositionLabelInput` so the V4 prompt builder can activate
+        per-suite addenda without relying on example-id prefixes.  When
+        ``None`` we attempt to infer the suite from ``dataset_root``; if
+        that also fails, ``suite`` stays ``None`` (a silent no-op for V3
+        and for V4 with no per-suite addendum registered).
 
     Returns the number of newly-labeled examples.
     """
@@ -79,6 +120,13 @@ async def run_labeling(
     frames_cache = labels_dir / "frames_cache"
     frames_cache.mkdir(parents=True, exist_ok=True)
     out_jsonl = labels_dir / "labels.jsonl"
+
+    if suite is None:
+        suite = _infer_suite_from_dataset_root(dataset_root)
+        if suite is not None:
+            logger.info("Inferred suite=%s from dataset_root", suite)
+    else:
+        logger.info("Using explicit suite=%s", suite)
 
     logger.info("Loading activation index from %s", activations_root)
     reader = ActivationShardReader(activations_root)
@@ -114,6 +162,7 @@ async def run_labeling(
                 frame_cache_dir=frames_cache,
                 state_name=state_name,
                 pool=pool,
+                suite=suite,
             )
         )
         logger.info("  %d inputs ready (with frames)", len(inputs))
@@ -143,6 +192,8 @@ async def run_labeling(
         extra={
             "positions_per_example": positions_per_example,
             "guarantee_strata": guarantee_strata,
+            "suite": suite,
+            "prompt_mode": os.environ.get("NLA_POSITION_PROMPT_MODE", "v3"),
         },
     )
     manifest.save(labels_dir / "manifest.json")

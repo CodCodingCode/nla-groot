@@ -1,5 +1,21 @@
 # V2 SFT post-mortem: lessons learned & GRPO A/B cookbook
 
+> **[V3 LIBERO results superseding this doc]** The V2 DROID failure modes
+> described below were the motivation for the V3 LIBERO 4-suite rerun.
+> Authoritative pass/fail signal for V3 lives in
+> `data/sft/libero_4suite_v3/v3_scorecard.json`, produced by
+> [`scripts/eval/build_v3_scorecard.py`](../../scripts/eval/build_v3_scorecard.py).
+> The V3 eval pipeline (retrieval margin, 3-axis LLM judge, closed-loop
+> sim A/B, live AV captioning) is documented in
+> [`v3_libero_eval_refactor.plan.md`](../../.cursor/plans/v3_libero_eval_refactor_c499993c.plan.md)
+> and runs automatically as Phase 6 of the SFT watcher
+> ([`scripts/eval/run_post_sft_evals.sh`](../../scripts/eval/run_post_sft_evals.sh)).
+> All raw DROID artifacts referenced below have been archived to
+> `data/_archive_droid/` via
+> [`scripts/migration/archive_droid.sh`](../../scripts/migration/archive_droid.sh)
+> — read the manifest at `data/_archive_droid/MANIFEST.txt` for the
+> origin → destination map.
+
 > **Start here for “what do we run next?”** [`docs/sft_plan/06_v2_postmortem_v3_rerun.md`](../sft_plan/06_v2_postmortem_v3_rerun.md) (overnight checklist, judge B, **`--ar-av-mix-max`**, GRPO). **SFT-plan sibling:** [`04_v2_lessons_learned.md`](../sft_plan/04_v2_lessons_learned.md) (same run, plan-folder wording). **Repo overview:** [`README.md`](../../README.md).
 
 This note summarizes what **`data/sft/droid_100ep_v2_nce`** taught us (quantitative vs qualitative failure modes), what we changed in code afterward, how we evaluate honestly, and a **simple ~1-hour A/B** to test whether **GRPO** moves the needle on **template / “bag of phrases” collapse**.
@@ -211,6 +227,31 @@ python scripts/eval/dump_av_samples.py \
 - **No visible language gain** — RL horizon too short or \(\beta\) too high vs LR too low.
 - **Reward hacking without grounding** — reconstruction improves but judge generic rate unchanged (needs multimodal loss / richer reward).
 - **Instability** — lower **`--learning-rate`**, raise **`--beta`**, reduce **`rollout-temperature`**, or temporarily disable **`--ar-co-train-weight`**.
+
+---
+
+## 7.5 Intervention leverage sweep (which slots matter?)
+
+Aggregate reconstruction quality does not tell us **which token slots** \((L, p)\) actually move the action head. **`scripts/eval/nla_steer_leverage_sweep.py`** repeats the existing single-shot causal probe (`scripts/eval/nla_steer_groot_action.py`) over a **grid** of `SteerSpec` placements (`last_text`, `anchor`, `image_patch` × seeds, `fixed` × token range), with **matched-norm Gaussian null controls** so rankings are not confounded by replacement magnitude alone. It is **open-loop** — one `(traj, step)` observation, no sim rollout — and writes a ranked JSONL/CSV of `|Δaction|` per condition.
+
+```bash
+PYTHONPATH=src python scripts/eval/nla_steer_leverage_sweep.py \
+  --model-path     nvidia/GR00T-N1.7-3B \
+  --dataset-path   /path/to/lerobot_dataset \
+  --embodiment-tag OXE_DROID_EEP \
+  --ar-dir         data/sft/droid_100ep_v2_nce/ar \
+  --traj-id 0 --step 0 \
+  --text-file      steer_bullets.txt \
+  --placements     last_text,anchor,image_patch \
+  --image-patch-seeds 0,1,2,3,4 \
+  --fixed-token-range 0::16 \
+  --null-samples   4 \
+  --sort-by        delta_vs_null \
+  --out-jsonl      data/sft/droid_100ep_v2_nce/intervention_leverage.jsonl \
+  --out-csv        data/sft/droid_100ep_v2_nce/intervention_leverage.csv
+```
+
+Each row carries `effect.global_max_abs` (real steer) and `null_global_max_abs_median` plus `null_global_max_abs_p95`; `delta_vs_null_median` is the recommended ranking key when judging **which slots are causally important** rather than which slots merely accept large vectors.
 
 ---
 

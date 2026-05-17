@@ -120,7 +120,10 @@ Concise reference distilled from project code and the Anthropic NLA paper (Trans
 | `scripts/eval/overlay_av_video.py` | MP4 with AV text overlay (demo) |
 | `scripts/eval/nla_steer_overlay_video.py` | MP4: frames + **baseline vs backbone-steer** action deltas (needs GR00T + Cosmos HF access) |
 | `scripts/eval/nla_steer_groot_action.py` | Prints numeric **baseline vs steer** `get_action` diff (same deps) |
+| `scripts/eval/nla_steer_quant_probe.py` | **Math probe**: one timestep, **two** AR prompts → Δactions + numeric previews + JSON (**clear steerability stats**) |
 | `scripts/eval/nla_steer_ar_smoke.py` | AR→ĥ + hook on toy backbone only (**no** GR00T) |
+| `scripts/eval/run_gr00t_server_nla_steer.py` | Launch a GR00T policy server with `NlaSteerGr00tPolicy` so any Isaac sim client (LIBERO/SimplerEnv) hits a steered backbone — runbook: `docs/evals/sim_steer_rollout.md`; closed-loop LIBERO Goal pilot results: `docs/evals/libero_goal_pilot_results.md` |
+| `scripts/eval/steerability_eval.py` | **Steerability eval interface**: config-driven harness comparing N `(AR dir, steer text)` rows on shared LIBERO env+seeds; optional **multi-hold-out** AV grading via ``av_eval.datasets``; optional ``patch_scorecard`` merges sim + IND-judge outcomes into ``v3_scorecard.json``. See `scripts/eval/steerability_v1.yaml`, `scripts/eval/steerability_v1_vs_v3.yaml` (v1 vs `libero_4suite_v3` head-to-head, 3 seeds). Artifacts typically under `data/eval/steerability_v1/` or `data/eval/steerability_v1_vs_v3/` |
 
 ### Local CI-style contract (no GitHub Action required)
 

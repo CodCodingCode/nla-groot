@@ -29,9 +29,12 @@ for the first runs.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import math
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -74,7 +77,12 @@ class GRPOConfig:
 
     # Sampling
     batch_size: int = 4            # B: distinct activations per step
-    rollouts_per_activation: int = 4  # K
+    # V3 default raised from 4 to 8 (see docs/sft_plan/02_hyperparams.md
+    # "V3 defaults"): a larger group-relative reward population makes the
+    # advantage normalization less noisy at the cost of K× rollout-time
+    # memory + compute. CLI users can still pass --rollouts-per-activation
+    # 4 to recover the V2 group size.
+    rollouts_per_activation: int = 8  # K
     rollout_max_new_tokens: int = 160
     rollout_temperature: float = 1.0
     rollout_top_p: float = 0.95
@@ -128,6 +136,24 @@ class GRPOConfig:
     # output distribution instead of staying pinned at the warm-start labels.
     ar_co_train_weight: float = 0.0
 
+    # Optional multimodal-judge reward term (Workstream B).  When
+    # ``judge_reward_weight > 0`` we blend ``r_recon`` (z-scored within the
+    # step) with ``r_judge`` from the existing GPT-5.1 grader fed the same
+    # cached camera frames the labeler saw.  Default 0 = pure reconstruction
+    # (byte-identical to pre-judge runs; the new fields are even hidden from
+    # the saved ``config.json``).
+    judge_reward_weight: float = 0.0
+    judge_concurrency: int = 8
+    judge_model: str | None = None
+    judge_cache_path: str | None = None
+    frames_cache: str | None = None
+    # Camera-key tokens used to construct per-row image filenames as
+    # ``{frames_cache}/{source_example_id}__{video_key}.jpg``.  Required (and
+    # validated as non-empty) whenever ``judge_reward_weight > 0``.  LIBERO
+    # runs use ``["image", "wrist_image"]``; any corpus that adheres to the
+    # flat ``{source_id}__{key}.jpg`` cache layout works with arbitrary tokens.
+    judge_video_keys: list[str] = field(default_factory=list)
+
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -135,7 +161,16 @@ class GRPOConfig:
 
 
 def _serialize_config(cfg: GRPOConfig) -> dict[str, Any]:
-    return asdict(cfg)
+    d = asdict(cfg)
+    # Hide judge fields entirely when the feature is off so a baseline run's
+    # config.json is byte-identical to the pre-judge layout.
+    if cfg.judge_reward_weight <= 0.0:
+        for k in (
+            "judge_reward_weight", "judge_concurrency", "judge_model",
+            "judge_cache_path", "frames_cache", "judge_video_keys",
+        ):
+            d.pop(k, None)
+    return d
 
 
 def _setup_outputs(out_dir: Path) -> dict[str, Path]:
@@ -164,6 +199,234 @@ def _lr_schedule(step: int, cfg: GRPOConfig) -> float:
 def _write_jsonl_row(path: Path, row: dict) -> None:
     with path.open("a") as f:
         f.write(json.dumps(row) + "\n")
+
+
+# ----------------------------------------------------------------------------
+# Multimodal judge reward (optional)
+# ----------------------------------------------------------------------------
+
+
+def _judge_cache_key(source_id: str, rollout_text: str) -> str:
+    h = hashlib.sha1()
+    h.update(source_id.encode("utf-8"))
+    h.update(b":")
+    h.update(rollout_text.encode("utf-8"))
+    return h.hexdigest()
+
+
+def _load_judge_cache(path: str | Path | None) -> dict[str, dict]:
+    """Read an append-only JSONL cache of judge verdicts into a dict.
+
+    Missing / unreadable files yield an empty dict.  Caller is expected to
+    pass the same dict back into ``_compute_judge_rewards`` so it gets
+    mutated in place across steps.
+    """
+    if path is None:
+        return {}
+    p = Path(path)
+    if not p.exists():
+        return {}
+    out: dict[str, dict] = {}
+    with p.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            key = obj.get("key")
+            if key:
+                out[key] = obj
+    return out
+
+
+def _image_paths_for_source(
+    source_id: str,
+    frames_cache: Path,
+    video_keys: list[str],
+) -> list[str]:
+    """Return cached frame paths for ``source_id`` against ``video_keys``.
+
+    Mirrors ``scripts/eval/llm_judge_av_captions.py:_image_paths_for`` so the
+    labeling pipeline, the standalone judge, and GRPO's online judge reward
+    all agree on the ``{frames_cache}/{source_id}__{video_key}.jpg`` filename
+    convention. Missing files are silently skipped per key; an empty return
+    list means the caller should treat the rollout as having no visual
+    grounding and fall back to ``r_judge = 0``.
+    """
+    paths: list[str] = []
+    for key in video_keys:
+        candidate = frames_cache / f"{source_id}__{key}.jpg"
+        if candidate.exists():
+            paths.append(str(candidate))
+    return paths
+
+
+def _verdicts_to_scalar(grounding: str | None, appropriateness: str | None) -> float:
+    """Map judge verdicts onto r_judge ∈ {-1.5, -0.5, +0.5, +1.5} (0 on error)."""
+    if grounding is None or appropriateness is None:
+        return 0.0
+    b = +1.0 if grounding == "specific" else -1.0
+    c = +0.5 if appropriateness == "appropriate" else -0.5
+    return b + c
+
+
+def _blend_rewards(
+    r_recon: torch.Tensor,
+    r_judge: torch.Tensor,
+    weight: float,
+) -> torch.Tensor:
+    """Z-score r_recon within the step then blend with r_judge.
+
+    When ``weight <= 0`` we return ``r_recon`` untouched (no z-scoring, no
+    extra allocations) so baseline runs are byte-identical.
+    """
+    if weight <= 0.0:
+        return r_recon
+    mean = r_recon.mean()
+    std = r_recon.std().clamp_min(1e-6)
+    r_recon_norm = (r_recon - mean) / std
+    return (1.0 - weight) * r_recon_norm + weight * r_judge.to(r_recon)
+
+
+async def _grade_rollouts_async(
+    inputs: list,  # list[GradeInput]
+    *,
+    model: str,
+    concurrency: int,
+    max_retries: int = 4,
+    base_backoff: float = 1.0,
+):
+    """Concurrent judge calls; returns the GradeResult per input (order preserved)."""
+    from nla.labeling.grader import _grade_one_async
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    sem = asyncio.Semaphore(max(1, concurrency))
+    try:
+        results = await asyncio.gather(*[
+            _grade_one_async(client, inp, model, sem, max_retries, base_backoff)
+            for inp in inputs
+        ])
+    finally:
+        await client.close()
+    return results
+
+
+def _compute_judge_rewards(
+    rollout_texts: list[str],
+    source_example_ids: list[str],
+    position_types: list[str],
+    *,
+    frames_cache: str | Path,
+    video_keys: list[str],
+    judge_cache: dict[str, dict] | None,
+    judge_cache_path: str | Path | None = None,
+    judge_model: str | None = None,
+    judge_concurrency: int = 8,
+    grade_fn=None,
+) -> list[float]:
+    """Score each rollout with the multimodal judge, returning r_judge values.
+
+    Side-effects:
+      * Mutates ``judge_cache`` (key -> entry dict) in place.
+      * Appends new entries to ``judge_cache_path`` (JSONL) when set.
+
+    ``grade_fn`` is an injection seam for tests: if given, it's called as
+    ``grade_fn(inputs, model=..., concurrency=...)`` and must return a list
+    of objects exposing ``.grounding`` and ``.appropriateness`` AxisGrade
+    attributes (or ``None``).  Production uses the default OpenAI path.
+    """
+    from nla.labeling.grader import DEFAULT_GRADER_MODEL, GradeInput
+
+    assert len(rollout_texts) == len(source_example_ids) == len(position_types)
+    if judge_cache is None:
+        judge_cache = {}
+    frames_cache = Path(frames_cache)
+    if judge_model is not None:
+        os.environ["OPENAI_GRADER_MODEL"] = judge_model
+    model = judge_model or DEFAULT_GRADER_MODEL
+
+    rewards: list[float] = [0.0] * len(rollout_texts)
+    to_grade_indices: list[int] = []
+    to_grade_inputs: list = []  # list[GradeInput]
+    to_grade_keys: list[str] = []
+
+    for i, (text, src_id, ptype) in enumerate(
+        zip(rollout_texts, source_example_ids, position_types)
+    ):
+        key = _judge_cache_key(src_id, text)
+        cached = judge_cache.get(key)
+        if cached is not None:
+            rewards[i] = float(cached.get("r_judge", 0.0))
+            continue
+        ipaths = _image_paths_for_source(src_id, frames_cache, video_keys)
+        if not ipaths:
+            # No frames -> neutral signal, do not call the grader.
+            rewards[i] = 0.0
+            continue
+        inp = GradeInput(
+            example_id=f"{src_id}__grpo__{i}",
+            variant_id="grpo_rollout",
+            description=text,
+            instruction="",
+            position_type=ptype,
+            image_paths=ipaths,
+            seq_len=None,
+            position_index=None,
+        )
+        to_grade_indices.append(i)
+        to_grade_inputs.append(inp)
+        to_grade_keys.append(key)
+
+    if to_grade_inputs:
+        if grade_fn is not None:
+            results = grade_fn(
+                to_grade_inputs, model=model, concurrency=judge_concurrency,
+            )
+        else:
+            try:
+                results = asyncio.run(_grade_rollouts_async(
+                    to_grade_inputs, model=model, concurrency=judge_concurrency,
+                ))
+            except Exception as e:
+                logger.warning("Judge grading raised %r; falling back to neutral", e)
+                results = [None] * len(to_grade_inputs)
+
+        cache_path = Path(judge_cache_path) if judge_cache_path else None
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+        fout = cache_path.open("a") if cache_path is not None else None
+        try:
+            for idx, key, res in zip(to_grade_indices, to_grade_keys, results):
+                grounding = None
+                appropriateness = None
+                if res is not None:
+                    g = getattr(res, "grounding", None)
+                    a = getattr(res, "appropriateness", None)
+                    grounding = getattr(g, "verdict", None) if g is not None else None
+                    appropriateness = getattr(a, "verdict", None) if a is not None else None
+                r = _verdicts_to_scalar(grounding, appropriateness)
+                rewards[idx] = r
+                entry = {
+                    "key": key,
+                    "source_id": source_example_ids[idx],
+                    "rollout_text": rollout_texts[idx],
+                    "verdict_b": grounding,
+                    "verdict_c": appropriateness,
+                    "r_judge": r,
+                }
+                judge_cache[key] = entry
+                if fout is not None:
+                    fout.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    fout.flush()
+        finally:
+            if fout is not None:
+                fout.close()
+
+    return rewards
 
 
 def _build_gen_mask(
@@ -213,6 +476,15 @@ def grpo_step(
     use_kl: bool = True,
     use_pg: bool = True,
     ar_train_weight: float = 0.0,
+    source_example_ids: list[str] | None = None,
+    frames_cache: str | None = None,
+    judge_video_keys: list[str] | None = None,
+    judge_reward_weight: float = 0.0,
+    judge_cache: dict[str, dict] | None = None,
+    judge_cache_path: str | None = None,
+    judge_model: str | None = None,
+    judge_concurrency: int = 8,
+    judge_grade_fn=None,
 ) -> dict:
     """One GRPO update worth of forward computation (no optimizer step here).
 
@@ -271,6 +543,43 @@ def grpo_step(
             rewards = -((pred_scaled - target_scaled) ** 2).mean(dim=-1).float()
         ar_mse = torch.zeros((), device=device)
 
+    # ----- 3b. Optional multimodal-judge blend -------------------------------
+    # Default weight=0.0 short-circuits before any judge work; baseline runs
+    # are byte-identical to pre-judge code.
+    judge_rewards_list: list[float] | None = None
+    if judge_reward_weight > 0.0 and frames_cache is not None:
+        if source_example_ids is None:
+            raise ValueError(
+                "judge_reward_weight > 0 requires source_example_ids "
+                "(plumbed from the dataset)."
+            )
+        if len(source_example_ids) != B:
+            raise ValueError(
+                f"len(source_example_ids)={len(source_example_ids)} != B={B}"
+            )
+        if not judge_video_keys:
+            raise ValueError(
+                "judge_reward_weight > 0 requires a non-empty judge_video_keys "
+                "list (e.g. ['image', 'wrist_image'] for LIBERO)."
+            )
+        src_rep = [s for s in source_example_ids for _ in range(K)]
+        judge_rewards_list = _compute_judge_rewards(
+            rollout_texts=rollout_texts,
+            source_example_ids=src_rep,
+            position_types=ptypes_rep,
+            frames_cache=frames_cache,
+            video_keys=judge_video_keys,
+            judge_cache=judge_cache,
+            judge_cache_path=judge_cache_path,
+            judge_model=judge_model,
+            judge_concurrency=judge_concurrency,
+            grade_fn=judge_grade_fn,
+        )
+        r_judge_tensor = torch.tensor(
+            judge_rewards_list, dtype=rewards.dtype, device=rewards.device,
+        )
+        rewards = _blend_rewards(rewards, r_judge_tensor, judge_reward_weight)
+
     # ----- 4. Group-relative advantage ---------------------------------------
     rewards_grp = rewards.view(B, K)
     adv_grp = rewards_grp - rewards_grp.mean(dim=1, keepdim=True)
@@ -323,6 +632,10 @@ def grpo_step(
             "logp_ref_mean": float((ref_logprobs * mask).sum().item() / float(n_tok.item())),
             "gen_len_mean": float(token_counts.float().mean().item()),
         }
+        if judge_rewards_list is not None:
+            jt = torch.tensor(judge_rewards_list, dtype=torch.float32)
+            diagnostics["judge_reward_mean"] = float(jt.mean().item())
+            diagnostics["judge_reward_pos_frac"] = float((jt > 0).float().mean().item())
 
     return {
         "loss": total_loss,
@@ -466,7 +779,29 @@ def _build_models(cfg: GRPOConfig):
     return policy_av, ref_av, ar
 
 
+def _validate_judge_config(cfg: GRPOConfig) -> None:
+    """Fail fast when the judge term is requested but its prerequisites are missing."""
+    if cfg.judge_reward_weight <= 0.0:
+        return
+    if not cfg.frames_cache:
+        raise ValueError(
+            "judge_reward_weight > 0 requires --frames-cache (directory of "
+            "cached camera frames named {source_id}__{video_key}.jpg)."
+        )
+    if not cfg.judge_video_keys:
+        raise ValueError(
+            "judge_reward_weight > 0 requires --judge-video-keys (camera-key "
+            "tokens, e.g. 'image wrist_image' for LIBERO). Frame filenames "
+            "are resolved as {frames_cache}/{source_id}__{video_key}.jpg."
+        )
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise ValueError(
+            "judge_reward_weight > 0 requires OPENAI_API_KEY in the environment."
+        )
+
+
 def run_grpo(cfg: GRPOConfig) -> dict:
+    _validate_judge_config(cfg)
     out_dir = Path(cfg.output_dir)
     paths = _setup_outputs(out_dir)
     paths["config"].write_text(json.dumps(_serialize_config(cfg), indent=2))
@@ -508,6 +843,18 @@ def run_grpo(cfg: GRPOConfig) -> dict:
     start = time.time()
     final_metrics: dict = {}
 
+    judge_cache = (
+        _load_judge_cache(cfg.judge_cache_path)
+        if cfg.judge_reward_weight > 0.0 else None
+    )
+    if judge_cache is not None:
+        logger.info(
+            "Judge reward enabled (weight=%.3f, concurrency=%d, model=%s); "
+            "loaded %d cached verdicts from %s",
+            cfg.judge_reward_weight, cfg.judge_concurrency,
+            cfg.judge_model or "(default)", len(judge_cache), cfg.judge_cache_path,
+        )
+
     while step < cfg.total_steps:
         for batch in train_loader:
             if step >= cfg.total_steps:
@@ -518,6 +865,7 @@ def run_grpo(cfg: GRPOConfig) -> dict:
 
             acts = batch["activations"].to(cfg.device, non_blocking=True)
             ptypes = batch["position_type"]
+            source_ids = batch.get("example_id") if cfg.judge_reward_weight > 0.0 else None
 
             out = grpo_step(
                 policy_av, ref_av, ar,
@@ -532,6 +880,14 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                 use_kl=cfg.use_kl,
                 use_pg=cfg.use_pg,
                 ar_train_weight=cfg.ar_co_train_weight,
+                source_example_ids=source_ids,
+                frames_cache=cfg.frames_cache,
+                judge_video_keys=cfg.judge_video_keys,
+                judge_reward_weight=cfg.judge_reward_weight,
+                judge_cache=judge_cache,
+                judge_cache_path=cfg.judge_cache_path,
+                judge_model=cfg.judge_model,
+                judge_concurrency=cfg.judge_concurrency,
             )
             loss = out["loss"]
             (loss / max(1, cfg.grad_accum_steps)).backward()

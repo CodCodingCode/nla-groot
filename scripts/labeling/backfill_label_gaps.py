@@ -2,8 +2,9 @@
 """Backfill labels.jsonl rows for examples with fewer than the planned positions.
 
 The original labeling run sampled ``positions_per_example=4`` distinct token
-positions per example with ``seed=0`` (see ``data/labels/droid_100ep/manifest.json``).
-After deduplication and one row drop, ~368 examples have fewer than 4 unique
+positions per example with ``seed=0`` (recorded in
+``data/labels/<dataset>/manifest.json``). After deduplication and any manual
+drops, a handful of examples typically end up with fewer than 4 unique
 ``(source_example_id, position_index, position_type)`` rows in ``labels.jsonl``.
 
 Two backfill strategies are supported:
@@ -29,9 +30,9 @@ Both modes append to ``labels.jsonl`` via ``label_many_async`` with
 Example::
 
     python scripts/labeling/backfill_label_gaps.py \\
-        --labels      data/labels/droid_100ep/labels.jsonl \\
-        --activations data/activations/droid_100ep \\
-        --dataset     third_party/Isaac-GR00T/demo_data/droid_sample \\
+        --labels      data/labels/libero_goal_pilot/labels.jsonl \\
+        --activations data/activations/libero_goal_pilot \\
+        --dataset     third_party/Isaac-GR00T/examples/LIBERO/libero_goal_no_noops_1.0.0_lerobot \\
         --positions-per-example 4 \\
         --mode force-fill \\
         --model gpt-5-mini \\

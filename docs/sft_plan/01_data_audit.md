@@ -2,6 +2,29 @@
 
 > **Context:** Label statistics here do **not** guarantee AV outputs match cameras after SFT. For the **V2 failure mode** (high reconstruction but **generic templates**), grounding checks, and rerun checklist, see **`06_v2_postmortem_v3_rerun.md`**.
 
+> **Cleanup status (2026-05-15):** `droid_100ep/labels.jsonl` has been rewritten
+> in place by two cleaning passes. Originals preserved as `labels.jsonl.bak*`.
+>
+> 1. **`scripts/labeling/strip_hallucinated_image_region.py`** removed every
+>    `image_region` bullet on `image_patch` rows (75,593 rows examined,
+>    66,390 bullets stripped in the `patch_or_layout` pass + 9,627 in the
+>    `all_image_patch` follow-up). Rationale: the labeler is told `image
+>    patch k of n` as metadata but never sees which patch is `k`, so any
+>    spatial claim about the region is a teacher-side guess. We keep
+>    `image_region` on `last_text` (528) and `anchor` (138) rows because
+>    those positions correspond to gripper-camera close-ups that the
+>    labeler can actually see.
+> 2. **`scripts/labeling/scrub_fabricated_measurements.py`** scrubbed
+>    fabricated `cm` / `mm` / `m` / `inch` / `degree` / `%` measurements
+>    from every bullet (15,935 rows, 16,866 bullets). The phrase is excised
+>    in place; the rest of the bullet is preserved (so directional info
+>    like "front-left of the plate" survives, only the bogus "20–30 cm" is
+>    deleted). Final count of rows containing any numeric measurement: **0**.
+>
+> Both scripts are deterministic, dry-run-able, and unit-tested
+> (`tests/test_strip_hallucinated_image_region.py`,
+> `tests/test_scrub_fabricated_measurements.py`).
+
 Audit run: 2026-05-14, against the three on-disk `labels.jsonl` files and
 their matching `data/activations/<run>/index.jsonl`. All numbers come from
 direct file reads; the audit script lives at `/tmp/audit_labels.py` and the

@@ -5,10 +5,15 @@
 Use this to sanity-check decoding + overlay layout when ``nla_steer_overlay_video.py``
 cannot run. Overlay text clearly states **POLICY NOT RUN**.
 
+This script is dataset-agnostic: ``--dataset-path`` accepts any LeRobot
+dataset root (LIBERO, bridge sample, fractal sample, ...). The DROID demo
+dataset is no longer used by our pipeline; the example below points at the
+in-tree LIBERO demo bundle that ships with the vendored GR00T repo.
+
 Example::
 
     PYTHONPATH=src .venv/bin/python scripts/eval/nla_steer_overlay_visual_demo.py \\
-        --dataset-path third_party/Isaac-GR00T/demo_data/droid_sample \\
+        --dataset-path third_party/Isaac-GR00T/demo_data/libero_demo \\
         --out nla_steer_overlay_VISUAL_DEMO.mp4
 """
 

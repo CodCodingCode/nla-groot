@@ -352,6 +352,7 @@ def load_grade_rows(path: str | Path) -> list[GradeResult]:
             obj = json.loads(line)
             g = obj.get("grounding")
             a = obj.get("appropriateness")
+            d = obj.get("template_distinguishable")
             out.append(GradeResult(
                 example_id=obj["example_id"],
                 variant_id=obj["variant_id"],
@@ -359,6 +360,7 @@ def load_grade_rows(path: str | Path) -> list[GradeResult]:
                 model=obj.get("model", DEFAULT_GRADER_MODEL),
                 grounding=(AxisGrade(**g) if g else None),
                 appropriateness=(AxisGrade(**a) if a else None),
+                template_distinguishable=(AxisGrade(**d) if d else None),
                 elapsed_ms=float(obj.get("elapsed_ms", 0.0)),
                 usage=obj.get("usage", {}),
                 error=obj.get("error"),

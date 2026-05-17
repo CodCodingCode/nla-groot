@@ -15,16 +15,16 @@ Output: an MP4 with the **camera image on top** and a **dedicated text panel bel
 sharper picture; when ``ffmpeg`` is available, a **libx264** pass is used by default
 (avoid ``--no-h264`` unless you must — OpenCV ``mp4v`` is often blocky).
 
-Example::
+Example (LIBERO)::
 
     PYTHONPATH=src .venv/bin/python scripts/eval/nla_steer_overlay_video.py \\
-        --model-path nvidia/GR00T-N1.7-3B \\
-        --dataset-path third_party/Isaac-GR00T/demo_data/droid_sample \\
-        --embodiment-tag OXE_DROID_RELATIVE_EEF_RELATIVE_JOINT \\
-        --ar-dir data/sft/droid_100ep_v2_nce/ar \\
+        --model-path     checkpoints/GR00T-N1.7-LIBERO/libero_goal \\
+        --dataset-path   third_party/Isaac-GR00T/examples/LIBERO/libero_goal_no_noops_1.0.0_lerobot \\
+        --embodiment-tag LIBERO_PANDA \\
+        --ar-dir         data/sft/libero_goal_pilot_v3/ar \\
         --traj-id 0 --max-steps 32 \\
-        --placement anchor --blend 1.0 \\
-        --text-file steer_bullets.txt \\
+        --placement      anchor --blend 1.0 \\
+        --text-file      steer_bullets.txt \\
         --out /tmp/nla_steer_compare.mp4
 
 **Stochastic policies:** diffusion sampling can change both runs. Use ``--seed``

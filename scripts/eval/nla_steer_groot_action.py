@@ -10,19 +10,24 @@ action latents move when you inject an NLA reconstruction at
 Requires the Isaac-GR00T stack (Python 3.10 venv, ``pip install -e`` the
 vendored GR00T repo) exactly like ``scripts/extraction/run_extract.py``.
 
-Example::
+Example (LIBERO)::
 
     PYTHONPATH=src python scripts/eval/nla_steer_groot_action.py \\
-        --model-path   nvidia/GR00T-N1.7-3B \\
-        --dataset-path /path/to/lerobot_dataset \\
-        --embodiment-tag OXE_DROID_EEP \\
-        --ar-dir       data/sft/my_run/ar \\
-        --traj-id      0 --step 0 \\
-        --placement    image_patch \\
-        --text-file    my_steer_bullets.txt
+        --model-path     checkpoints/GR00T-N1.7-LIBERO/libero_goal \\
+        --dataset-path   third_party/Isaac-GR00T/examples/LIBERO/libero_goal_no_noops_1.0.0_lerobot \\
+        --embodiment-tag LIBERO_PANDA \\
+        --ar-dir         data/sft/libero_goal_pilot_v3/ar \\
+        --traj-id        0 --step 0 \\
+        --placement      image_patch \\
+        --text-file      my_steer_bullets.txt
 
-``--text`` / ``--text-file`` should use the same bullet style as your labeling
-pipeline (AR was trained on ``Summary of the following text: <text>…</text>``).
+``--embodiment-tag`` accepts either the GR00T enum name (e.g. ``LIBERO_PANDA``,
+``BRIDGE_V2``) or its lower-cased value (``libero_sim``, ``bridge_v2``).
+LIBERO is the supported target; non-LIBERO embodiments are passed through
+unchanged but not exercised in our eval suite. ``--text`` / ``--text-file``
+should use the same bullet
+style as your labeling pipeline (AR was trained on
+``Summary of the following text: <text>…</text>``).
 """
 
 from __future__ import annotations
@@ -32,9 +37,8 @@ import json
 import logging
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
 
-import numpy as np
+import torch
 
 
 logger = logging.getLogger("nla.steer_groot")
@@ -84,61 +88,6 @@ def _load_steer_text(args: argparse.Namespace) -> str:
     raise SystemExit("Provide --text or --text-file with your AR bullet description.")
 
 
-def _policy_get_action(policy: Any, observation: dict[str, Any]) -> dict[str, Any]:
-    fn = getattr(policy, "get_action", None)
-    if fn is None:
-        raise RuntimeError(
-            "Gr00tPolicy has no get_action(). Use an Isaac-GR00T revision that "
-            "exposes policy.get_action(observation), or extend this script."
-        )
-    out = fn(observation)
-    if isinstance(out, tuple) and len(out) >= 1:
-        out = out[0]
-    if not isinstance(out, dict):
-        raise RuntimeError(f"Unexpected get_action return type: {type(out)}")
-    if any(isinstance(v, dict) for v in out.values()):
-        flat: dict[str, Any] = {}
-        for k, v in out.items():
-            if isinstance(v, dict):
-                for k2, v2 in v.items():
-                    flat[f"{k}.{k2}"] = v2
-            else:
-                flat[k] = v
-        return flat
-    return out
-
-
-def _to_numpy(x: Any) -> np.ndarray:
-    if x is None:
-        return np.array([])
-    if hasattr(x, "detach"):
-        return np.asarray(x.detach().cpu().float().numpy())
-    return np.asarray(x)
-
-
-def _action_stats(baseline: dict[str, Any], steered: dict[str, Any]) -> dict[str, Any]:
-    keys = sorted(set(baseline.keys()) | set(steered.keys()))
-    per: dict[str, Any] = {}
-    all_abs: list[float] = []
-    for k in keys:
-        a = _to_numpy(baseline.get(k))
-        b = _to_numpy(steered.get(k))
-        if a.shape != b.shape:
-            per[k] = {"error": f"shape mismatch {a.shape} vs {b.shape}"}
-            continue
-        diff = b.astype(np.float64) - a.astype(np.float64)
-        per[k] = {
-            "max_abs": float(np.max(np.abs(diff))),
-            "mean_abs": float(np.mean(np.abs(diff))),
-            "rms": float(np.sqrt(np.mean(diff**2))),
-        }
-        all_abs.extend(np.abs(diff).ravel().tolist())
-    return {
-        "per_modality_key": per,
-        "global_max_abs": float(max(all_abs)) if all_abs else 0.0,
-    }
-
-
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--model-path", required=True)
@@ -172,7 +121,13 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
 
-    from nla.steering import SteerSpec, attach_backbone_steer, ar_text_to_backbone_vec
+    from nla.steering import (
+        SteerSpec,
+        action_stats,
+        ar_text_to_backbone_vec,
+        attach_backbone_steer,
+        policy_get_action,
+    )
     from nla.steering.groot_obs import build_observation_for_step
     from nla.training.checkpoint import load_ar_from_sft
 
@@ -230,13 +185,13 @@ def main(argv: list[str] | None = None) -> int:
     policy.model.eval()
 
     with torch.inference_mode():
-        base_action = _policy_get_action(policy, obs)
+        base_action = policy_get_action(policy, obs)
 
         logger.info("Running steered forward (hook on backbone) …")
         with attach_backbone_steer(with_policy.backbone, steer_vec, spec):
-            steer_action = _policy_get_action(policy, obs)
+            steer_action = policy_get_action(policy, obs)
 
-    stats = _action_stats(base_action, steer_action)
+    stats = action_stats(base_action, steer_action)
     logger.info(
         "Global max |Δaction| = %.6f across all returned modality tensors",
         stats["global_max_abs"],

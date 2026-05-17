@@ -1,0 +1,6 @@
+- scene: tabletop with a black bowl, a white plate with red rim, and an overhead robot gripper.
+- target: the white plate is the destination object.
+- distractor: the black bowl currently on the table near the plate.
+- gripper: open and approaching the bowl from above.
+- spatial: workspace centered with the plate to the right of the bowl.
+- task: place the bowl on the plate.

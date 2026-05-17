@@ -125,3 +125,60 @@ So: **yes**, you often want a **new** sentence when the **task phase** changes; 
 **V2:** recon OK, **grounding failed** → measure **judge B** + **closed-loop** every time.  
 **V3 overnight:** same data discipline + **contrastive + closed-loop eval**; enable **`--ar-av-mix-max`** when you want AR to see **AV** text during SFT; add **GRPO + co-train** for **AV** policy gradients beyond CE.
 **Steering:** text edit → **AR difference** → **add to residual**; **temporal smoothing** is a **product** decision (when to refresh vs hold).
+
+---
+
+## 6. Next GRPO run with multimodal-judge reward
+
+Once **`droid_100ep_v2_grpo_run1`** finishes (DO NOT launch this in parallel with it), the next GRPO experiment should turn on the optional **multimodal-judge** reward term so the AV is pressured toward **camera-grounded** text rather than only toward whatever string happens to invert through AR.
+
+The reward becomes (with `w = --judge-reward-weight`):
+
+\[
+  r = (1 - w) \cdot \mathrm{zscore}(r_\text{recon}) + w \cdot r_\text{judge},
+  \qquad r_\text{judge} \in \{-1.5, -0.5, +0.5, +1.5\}
+\]
+
+where `r_judge = b_score + c_score` from the same GPT-5.1 judge `scripts/eval/llm_judge_av_captions.py` already uses:
+
+- `b_score = +1` if grounding=`specific`, else `-1`
+- `c_score = +0.5` if appropriateness=`appropriate`, else `-0.5`
+
+### Flags (all default-off; `--judge-reward-weight 0` is byte-identical to current code)
+
+| Flag | Recommended starter | Notes |
+|------|---------------------|-------|
+| `--judge-reward-weight` | `0.3` | Start small; 1.0 = pure judge, 0 = pure recon (current). |
+| `--judge-concurrency` | `16` | Max in-flight OpenAI calls **per GRPO step**. |
+| `--frames-cache` | `data/labels/droid_100ep/frames_cache` | Same dir the labeler / `llm_judge_av_captions.py` use. |
+| `--judge-cache-path` | `data/grpo/judge_cache.jsonl` | Append-only `sha1(source_id:text)` cache; persists across runs / resumes. |
+| `--judge-model` | (unset → `gpt-5.1`) | Override `OPENAI_GRADER_MODEL` if you need to A/B graders. |
+
+Run validation requires both `--frames-cache` and `OPENAI_API_KEY` when `--judge-reward-weight > 0`; otherwise the script aborts early.
+
+### Recommended launch command (next GRPO run)
+
+```bash
+OPENAI_API_KEY=sk-... PYTHONPATH=src python scripts/training/run_grpo.py \
+    --sft-dir          data/sft/droid_100ep_v2_nce \
+    --activations-root data/activations/droid_100ep \
+    --output-dir       data/grpo/droid_100ep_v2_grpo_run2_judge \
+    --batch-size 4 --rollouts-per-activation 4 \
+    --rollout-temperature 1.0 --rollout-top-p 0.95 --rollout-max-new-tokens 160 \
+    --beta 0.02 --learning-rate 3e-6 --warmup-steps 20 --total-steps 250 \
+    --eval-every 25 --save-every 50 --grad-clip 1.0 \
+    --ar-co-train-weight 0.1 --eval-temperatures 0.0,0.7,1.0 --eval-max-examples 64 \
+    --gradient-checkpointing --seed 0 --device cuda \
+    --judge-reward-weight 0.3 \
+    --judge-concurrency   16 \
+    --frames-cache        data/labels/droid_100ep/frames_cache \
+    --judge-cache-path    data/grpo/judge_cache.jsonl
+```
+
+### Caveats
+
+- **Per-step latency.** Even with `--judge-concurrency 16`, the OpenAI grader adds wallclock to every step that has cache misses; expect ~1–3 s/step overhead during the first epoch and progressively less as the cache fills (the cache is keyed by `sha1(source_id + ":" + rollout_text)` and persists across resumes / runs).
+- **DO NOT launch this while `droid_100ep_v2_grpo_run1` is still training** — both runs would compete for the same GPU + filesystem locks under `data/grpo/`. Wait for it to finish, snapshot its metrics, then start the judge-on run from the same SFT checkpoint.
+- The judge term blends with **z-scored** reconstruction reward (current `r_recon` is on the order of `-0.005`, judge is in `[-1.5, +1.5]`), so the two terms are on comparable scales after blend.
+- If the judge API errors transiently, the rollout's `r_judge` falls back to 0 (neutral) for that step — never propagates a NaN.
+

@@ -31,13 +31,22 @@ from nla.labeling.context import (
     sample_positions_per_example,
 )
 from nla.labeling.frames import DatasetInfo, EpisodeFrameLoader, save_jpeg
-from nla.labeling.openai_client import _build_messages, label_many_async
+from nla.labeling.openai_client import (
+    _build_messages,
+    _select_position_builder,
+    label_many_async,
+)
 from nla.labeling.prompts import (
     LabelInput,
     PositionLabelInput,
+    V4_MOTOR_IMPERATIVE_PHRASES,
+    V4_PLAN_PHASES,
+    V4_SCAFFOLD_FORBIDDEN_PHRASES,
     build_position_prompt,
     build_step_prompt,
     build_strict_position_prompt,
+    build_v4_position_prompt,
+    infer_suite_from_example_id,
 )
 from nla.layer_spec import BACKBONE_EMBEDDING_DIM
 
@@ -110,6 +119,51 @@ def test_position_prompt_image_patch_forbids_index_layout_inference():
     assert "upper-right of the table" not in sys_p
 
 
+def test_position_prompt_hardens_against_anthropomorphic_phrasing():
+    """May-2026 prompt hardening: the LIBERO pilot judge audit found that
+    ``last_text`` bullets were emitting "instruction has been read" /
+    "goal committed" phrasing because the system prompt itself said the
+    last bullet describes "what the model is committing to".
+
+    This test pins the new neutral wording: the production prompt must
+    (a) not steer with anthropomorphic verbs in its own guidance text,
+    (b) include an explicit Forbidden phrasings block listing
+    "committing to" and "instruction has been read" as banned, and
+    (c) not show "image_region" as the canonical last-bullet category for
+    image_patch examples (it should suggest target/scene/spatial instead).
+    """
+    inp = PositionLabelInput(
+        example_id="ex_hard@p9_last_text",
+        instruction="put the bowl on the plate",
+        decoded_text_context="ctx",
+        position_index=9,
+        position_type="last_text",
+        sequence_length=143,
+        image_paths=[],
+    )
+    sys_p, _ = build_position_prompt(inp)
+
+    assert "Forbidden phrasings" in sys_p
+    assert "committing to" in sys_p
+    assert "instruction has been read" in sys_p
+    assert "goal committed" in sys_p
+
+    guidance_block, _, _ = sys_p.partition("Rules for IMAGE-PATCH positions:")
+    assert "what the model is committing to" not in guidance_block
+    assert "language: instruction has been read" not in guidance_block
+    assert "goal is to grasp the blue cube" not in guidance_block
+
+    image_patch_example_line = next(
+        (line for line in guidance_block.splitlines()
+         if line.lstrip().startswith("- image_patch:")),
+        None,
+    )
+    assert image_patch_example_line is not None
+    assert "image_region:" not in image_patch_example_line
+
+    assert "Avoid the 'image_region' category" in sys_p
+
+
 def test_strict_position_prompt_inherits_image_patch_rules():
     """Strict relabel prompt must also carry the anti-hallucination rules
     so re-labeled rows do not regress to confident layout claims."""
@@ -126,6 +180,352 @@ def test_strict_position_prompt_inherits_image_patch_rules():
     sys_p, _ = build_strict_position_prompt(inp)
     assert "Rules for IMAGE-PATCH positions" in sys_p
     assert "Additional rules (strict):" in sys_p
+
+
+# ---------------------------------------------------------------------------
+# V4 prompt — Phase-1 LIBERO corpus repair (SA1)
+# ---------------------------------------------------------------------------
+
+def _v4_inp(position_type, *, position_index=42, image_patch_meta=(42, 248)):
+    """Helper: build a PositionLabelInput at a canonical sample position."""
+    return PositionLabelInput(
+        example_id=f"ex_v4@p{position_index}_{position_type}",
+        instruction="put the bowl on the plate",
+        decoded_text_context="<image: 248 patches> some text",
+        position_index=position_index,
+        position_type=position_type,
+        sequence_length=277,
+        image_paths=["/tmp/fake.jpg"],
+        image_patch_meta=image_patch_meta if position_type == "image_patch" else None,
+    )
+
+
+def test_v4_position_prompt_forbids_scaffold_leakage():
+    """The V4 system text must explicitly list the prompt-scaffolding
+    phrases that V3 labelers regurgitated into captions ("action head",
+    "this patch carries", "transformer", ...). The diversity audit flagged
+    these as the dominant boilerplate; V4 must call them out by name so the
+    labeler cannot reuse them."""
+    sys_p, _ = build_v4_position_prompt(_v4_inp("image_patch"))
+    assert "Scaffold-leakage ban" in sys_p
+    for phrase in ("action head", "this patch carries", "transformer",
+                   "embedding", "hidden state", "residual stream",
+                   "token carries", "the patch carries", "carries the"):
+        assert phrase in sys_p, f"V4 scaffold-leakage ban missing phrase: {phrase!r}"
+    assert all(p in sys_p for p in V4_SCAFFOLD_FORBIDDEN_PHRASES)
+
+
+def test_v4_position_prompt_forbids_motor_imperatives():
+    """At least 3 second-person motor-imperative phrasings must be named as
+    forbidden in the V4 system text. The Phase-1 plan requires the labeler
+    to stop saying things like "grasp the bowl" / "align the gripper" and
+    instead describe the scene in third person."""
+    sys_p, _ = build_v4_position_prompt(_v4_inp("last_text", position_index=200,
+                                                image_patch_meta=None))
+    assert "Motor-imperative ban" in sys_p
+    listed = [p for p in V4_MOTOR_IMPERATIVE_PHRASES if p in sys_p]
+    assert len(listed) >= 3, (
+        f"Expected >=3 motor-imperative phrases listed in V4 system text; "
+        f"found {len(listed)}: {listed}"
+    )
+    for required in ("grasp the", "align the gripper", "reach toward"):
+        assert required in sys_p, f"Missing required motor-imperative ban: {required!r}"
+    assert "descriptive third-person" in sys_p
+    assert "pickup" in sys_p and "approach" in sys_p
+    for phase in V4_PLAN_PHASES[:5]:
+        assert phase in sys_p
+
+
+def test_v4_position_prompt_position_type_conditioning():
+    """The position-type-conditional last-bullet rule must actually differ
+    between ``image_patch`` and ``last_text`` system prompts. This is the
+    big lever from Agent 4 against high cross-position Jaccard."""
+    sys_ip, _ = build_v4_position_prompt(_v4_inp("image_patch"))
+    sys_lt, _ = build_v4_position_prompt(_v4_inp("last_text", position_index=200,
+                                                 image_patch_meta=None))
+    sys_an, _ = build_v4_position_prompt(_v4_inp("anchor", position_index=276,
+                                                 image_patch_meta=None))
+
+    assert sys_ip != sys_lt, "image_patch and last_text V4 prompts must differ"
+    assert sys_ip != sys_an
+    assert sys_lt != sys_an
+
+    assert "Position-conditional last bullet (IMAGE-PATCH)" in sys_ip
+    assert "Position-conditional last bullet (LAST-TEXT)" in sys_lt
+    assert "Position-conditional last bullet (ANCHOR)" in sys_an
+
+    assert "Position-conditional last bullet (LAST-TEXT)" not in sys_ip
+    assert "Position-conditional last bullet (IMAGE-PATCH)" not in sys_lt
+
+    assert "Do NOT restate the task instruction" in sys_ip
+    assert "next ~3 timesteps" in sys_lt
+    assert "overall trajectory phase" in sys_an
+
+    assert "language" in sys_ip.lower() and "OPTIONAL" in sys_ip
+
+
+def test_v4_last_bullet_image_patch_vs_last_text_differs():
+    """SA4 disambiguation gate: same instruction + same frame must yield
+    DIFFERENT position-clause sections in the user prompt AND DIFFERENT
+    last-bullet sections in the system prompt for image_patch vs
+    last_text. This is the prompt-side guarantee that backs the Jaccard
+    delta metric in ``scripts/eval/audit_ptype_disambiguation.py``."""
+    # Two inputs identical except for position_type (and metadata that's
+    # logically tied to the ptype: image_patch_meta).
+    ip = PositionLabelInput(
+        example_id="ex_v4@p042_image_patch",
+        instruction="put the bowl on the plate",
+        decoded_text_context="<image: 248 patches> some text",
+        position_index=42,
+        position_type="image_patch",
+        sequence_length=277,
+        image_paths=["/tmp/fake.jpg"],
+        image_patch_meta=(42, 248),
+    )
+    lt = PositionLabelInput(
+        example_id="ex_v4@p200_last_text",
+        instruction="put the bowl on the plate",
+        decoded_text_context="<image: 248 patches> some text",
+        position_index=200,
+        position_type="last_text",
+        sequence_length=277,
+        image_paths=["/tmp/fake.jpg"],
+        image_patch_meta=None,
+    )
+    sys_ip, user_ip = build_v4_position_prompt(ip)
+    sys_lt, user_lt = build_v4_position_prompt(lt)
+
+    assert user_ip != user_lt, (
+        "User prompts must differ between image_patch and last_text "
+        "(the position clause embeds the ptype label)."
+    )
+    assert "IMAGE-PATCH" in user_ip and "LAST TEXT" in user_lt
+
+    assert sys_ip != sys_lt, (
+        "System prompts must differ between image_patch and last_text "
+        "(the per-ptype last-bullet clause)."
+    )
+
+    # Isolate the per-ptype last-bullet clauses so we can test prescriptive
+    # language without false positives from the shared V4-LEAK-1 rule.
+    ip_clause = sys_ip.split("Position-conditional last bullet (IMAGE-PATCH)")[1]
+    lt_clause = sys_lt.split("Position-conditional last bullet (LAST-TEXT)")[1]
+
+    # image_patch clause: perceptual phrasing, restate-instruction ban,
+    # canonical 'visible in this frame: <object> <state>' example.
+    assert "restate" in ip_clause
+    assert "perceptual" in ip_clause
+    assert "visible in this frame" in ip_clause
+    assert (
+        "black wine bottle upright on the wooden tabletop next to the gripper"
+        in ip_clause
+    )
+
+    # last_text clause: explicit temporal connector, plan-phase list,
+    # canonical 'pickup phase over the next 3 timesteps: ...' example, and
+    # NO 'perceptual' phrasing in the clause body itself.
+    assert "over the next 3 timesteps" in lt_clause
+    assert "plan-phase list" in lt_clause
+    assert "perceptual" not in lt_clause
+    assert (
+        "pickup phase over the next 3 timesteps: gripper closes on the "
+        "wine bottle, then lifts before placing on the rack"
+        in lt_clause
+    )
+
+
+def test_v4_leak_rule_present():
+    """The V4-LEAK-1 cross-leak rule must appear in the V4 system prompt
+    (i.e. baked into ``_V4_POSITION_SYSTEM`` via ``_V4_EXTRA_RULES``) so
+    every V4 row carries the discipline regardless of ptype."""
+    inp = PositionLabelInput(
+        example_id="ex_leak@p10_anchor",
+        instruction="put the bowl on the plate",
+        decoded_text_context="ctx",
+        position_index=10,
+        position_type="anchor",
+        sequence_length=11,
+        image_paths=[],
+    )
+    sys_p, _ = build_v4_position_prompt(inp)
+    assert "Rule V4-LEAK-1" in sys_p
+    assert "Position-type discipline" in sys_p
+    assert "image_patch-style perceptual bullets" in sys_p
+    assert "last_text-style temporal-plan bullets" in sys_p
+    assert "over the next 3 timesteps" in sys_p
+    assert "DIFFERENT last bullets for image_patch vs last_text" in sys_p
+
+
+def test_v4_position_prompt_suite_hook():
+    """Unknown suite names must remain a no-op (no error, no extra block).
+
+    Once SA2 registers ``_V4_SUITE_ADDENDA["libero_spatial"]`` (see
+    ``test_v4_libero_spatial_addendum_present``) the known-suite branch
+    diverges from the default prompt; this test still pins the unknown-suite
+    no-op contract so SA5's pipeline can pass arbitrary suite tags safely.
+    """
+    inp = _v4_inp("image_patch")
+    sys_default, _ = build_v4_position_prompt(inp)
+    sys_unknown_suite, _ = build_v4_position_prompt(inp, suite="not_a_real_suite")
+    assert sys_default == sys_unknown_suite
+
+
+def test_v4_libero_spatial_addendum_present():
+    """When ``suite="libero_spatial"`` is passed, the V4 system prompt must
+    surface the SP-1..SP-5 rule block: in-frame relation verification (SP-1),
+    explicit frame-of-reference (SP-2), the named confabulation pairs (SP-3),
+    visually verifiable landmark requirement (SP-4), and occlusion handling
+    (SP-5). This addendum is the lever for fixing the V3 libero_spatial
+    B-pass cluster (~73%)."""
+    inp = _v4_inp("image_patch")
+    sys_p, _ = build_v4_position_prompt(inp, suite="libero_spatial")
+    assert "LIBERO-SPATIAL addendum" in sys_p
+    assert "Rule SP-1" in sys_p
+    assert "visible in the attached camera frame" in sys_p
+    assert "Rule SP-2" in sys_p
+    assert "frame of reference" in sys_p.lower()
+    assert "Rule SP-3" in sys_p
+    for pair in ("bowl", "plate", "mug", "shelf", "cube", "tray",
+                 "wine bottle", "rack"):
+        assert pair in sys_p, f"SP-3 confabulation pair missing: {pair!r}"
+    assert "Rule SP-4" in sys_p
+    assert "wooden tabletop" in sys_p or "silver gripper" in sys_p
+    assert "Rule SP-5" in sys_p
+    assert "occluded" in sys_p.lower() or "occlusion" in sys_p.lower()
+    # SP-6 / SP-7 added in iteration 1 after observing instruction-anchored
+    # color hallucinations on the V3-bad pilot ("pick up the BLACK bowl" ->
+    # labeler asserts a black bowl is visible even when bowls are gray).
+    assert "Rule SP-6" in sys_p
+    assert "instruction" in sys_p.lower()
+    assert "visually verify" in sys_p
+    assert "Rule SP-7" in sys_p
+    assert "metallic" in sys_p
+
+
+def test_v4_libero_spatial_addendum_absent_for_other_suites():
+    """The libero_spatial rule block must NOT appear when another suite is
+    selected; the other 3 suites are healthy at V3 and do not need the extra
+    constraints."""
+    inp = _v4_inp("image_patch")
+    # Use addendum-unique markers (the base prompt also says "visible in the
+    # attached camera frame", so use SP-N rule headers + the confabulation-pair
+    # lexicon as the disambiguator).
+    for suite in ("libero_goal", "libero_object", "libero_10"):
+        sys_p, _ = build_v4_position_prompt(inp, suite=suite)
+        assert "LIBERO-SPATIAL addendum" not in sys_p, (
+            f"libero_spatial block leaked into suite={suite!r}"
+        )
+        for marker in ("Rule SP-1", "Rule SP-2", "Rule SP-3",
+                       "Rule SP-4", "Rule SP-5", "Rule SP-6", "Rule SP-7"):
+            assert marker not in sys_p, (
+                f"{marker} leaked into suite={suite!r}"
+            )
+        assert "confabulation" not in sys_p.lower()
+    sys_none, _ = build_v4_position_prompt(inp)
+    assert "LIBERO-SPATIAL addendum" not in sys_none
+    assert "Rule SP-1" not in sys_none
+
+
+def test_v4_suite_auto_inference_from_example_id():
+    """If the caller does not pass ``suite=...`` but the input's example_id
+    starts with ``libero_spatial::`` (the eval-style prefix), the spatial
+    addendum must auto-activate. Also exercise the inference helper directly
+    on the public surface."""
+    inp = PositionLabelInput(
+        example_id="libero_spatial::traj000017_step000014@p151_anchor",
+        instruction="pick up the bowl",
+        decoded_text_context="ctx",
+        position_index=151,
+        position_type="anchor",
+        sequence_length=200,
+        image_paths=["/tmp/fake.jpg"],
+    )
+    sys_inferred, _ = build_v4_position_prompt(inp)  # no suite= passed
+    assert "LIBERO-SPATIAL addendum" in sys_inferred
+    assert "Rule SP-1" in sys_inferred
+
+    inp_goal = PositionLabelInput(
+        example_id="libero_goal::traj000000_step000000@p0_anchor",
+        instruction="t",
+        decoded_text_context="c",
+        position_index=0,
+        position_type="anchor",
+        sequence_length=1,
+        image_paths=[],
+    )
+    sys_goal, _ = build_v4_position_prompt(inp_goal)
+    assert "LIBERO-SPATIAL addendum" not in sys_goal
+
+    assert infer_suite_from_example_id(
+        "libero_spatial::traj1_step2@p3_anchor"
+    ) == "libero_spatial"
+    assert infer_suite_from_example_id(
+        "libero_goal::x"
+    ) == "libero_goal"
+    assert infer_suite_from_example_id(
+        "libero_object::x"
+    ) == "libero_object"
+    assert infer_suite_from_example_id(
+        "libero_10::x"
+    ) == "libero_10"
+    assert infer_suite_from_example_id("traj1_step2@p3_anchor") is None
+    assert infer_suite_from_example_id(None) is None
+    assert infer_suite_from_example_id(
+        "no_prefix", extra={"suite": "libero_spatial"},
+    ) == "libero_spatial"
+    assert infer_suite_from_example_id(
+        "no_prefix", extra={"suite": "bogus_suite"},
+    ) is None
+
+
+def test_pipeline_dispatches_v4_when_mode_set(monkeypatch):
+    """SA5 wiring: ``_select_position_builder`` must return the V4 builder
+    when ``NLA_POSITION_PROMPT_MODE=v4`` (or any of the documented aliases),
+    fall back to the strict builder for ``strict``/``v3_strict``, and stay
+    on the V3 default otherwise.  This is the only contract production
+    re-label runs depend on; the rest of the dispatch is plumbing."""
+    monkeypatch.setenv("NLA_POSITION_PROMPT_MODE", "v4")
+    assert _select_position_builder() is build_v4_position_prompt
+    assert _select_position_builder("v4") is build_v4_position_prompt
+    assert _select_position_builder("V4_position") is build_v4_position_prompt
+    assert _select_position_builder("v4-position") is build_v4_position_prompt
+
+    assert _select_position_builder("strict") is build_strict_position_prompt
+    assert _select_position_builder("v3_strict") is build_strict_position_prompt
+
+    assert _select_position_builder("v3") is build_position_prompt
+    assert _select_position_builder("totally_unknown_mode") is build_position_prompt
+
+    monkeypatch.setenv("NLA_POSITION_PROMPT_MODE", "v3")
+    assert _select_position_builder() is build_position_prompt
+
+
+def test_pipeline_threads_suite_through_to_v4_builder(monkeypatch, tmp_path: Path):
+    """When ``NLA_POSITION_PROMPT_MODE=v4`` and the input carries a ``suite``
+    attribute (set by SA5's pipeline plumbing), ``_build_messages`` must
+    invoke the V4 builder *with* ``suite=...`` so the per-suite addendum
+    fires.  Verifies the suite-aware dispatch end-to-end at unit scope."""
+    monkeypatch.setenv("NLA_POSITION_PROMPT_MODE", "v4")
+    img = save_jpeg(np.zeros((4, 4, 3), dtype=np.uint8), tmp_path / "img.jpg")
+    inp = PositionLabelInput(
+        example_id="ex_suite@p0_image_patch",
+        instruction="put the bowl on the plate",
+        decoded_text_context="<image: 4 patches>",
+        position_index=0,
+        position_type="image_patch",
+        sequence_length=10,
+        image_paths=[str(img)],
+        image_patch_meta=(0, 4),
+        suite="libero_spatial",
+    )
+    messages, kind, _ = _build_messages(inp)
+    assert kind == "position"
+    sys_p = messages[0]["content"]
+    # libero_spatial addendum must be present (proof that suite was threaded
+    # through to build_v4_position_prompt).
+    assert "LIBERO-SPATIAL addendum" in sys_p
+    # And the V4 system text identity (so we know we did not fall back to V3).
+    assert "Scaffold-leakage ban" in sys_p
 
 
 def test_step_prompt_keeps_backcompat():

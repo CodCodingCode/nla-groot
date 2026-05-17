@@ -32,7 +32,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from torch.utils.data import DataLoader
@@ -117,9 +117,14 @@ class SFTConfig:
     #
     # Per-batch coin flip with prob ``p_av = ar_av_mix_max * ramp(step)``;
     # ramp is 0 until ``ar_av_mix_warmup_frac * total_steps`` then linear up
-    # to 1 at total_steps.  ``ar_av_mix_max = 0.0`` (default) disables the
-    # feature entirely.  AV's own CE loss always uses gold tokens.
-    ar_av_mix_max: float = 0.0
+    # to 1 at total_steps. AV's own CE loss always uses gold tokens.
+    #
+    # V3 default raised from 0.0 to 0.3 (see docs/sft_plan/02_hyperparams.md
+    # "V3 defaults"): the V2 postmortem showed the SFT/eval distribution gap
+    # was a primary driver of the AR-reconstruction-shortcut failure mode.
+    # CLI users can still pass ``--ar-av-mix-max 0`` to fall back to the
+    # legacy gold-only objective.
+    ar_av_mix_max: float = 0.3
     ar_av_mix_warmup_frac: float = 0.5
     ar_av_mix_max_new_tokens: int = 96
     ar_av_mix_do_sample: bool = False
@@ -150,6 +155,42 @@ class SFTConfig:
     # otherwise raise ``IndexError`` mid-training. Disable only for ablations
     # where you intentionally feed mismatched labels/activations.
     strict_position_check: bool = True
+
+    # Hard-negative mining for AR's InfoNCE term. ``"none"`` (default) keeps
+    # the legacy in-batch-only contrast. ``"same_episode"`` injects K_neg
+    # captions sampled from the same episode but a different step, biasing
+    # the negative set toward visually-similar-but-temporally-different
+    # scenes. ``"same_position_type"`` samples K_neg from a different episode
+    # whose label has the same position_type, biasing toward "same kind of
+    # token, different scene". ``"topk_cosine"`` consumes a precomputed
+    # JSONL of top-K activation-cosine neighbors (offline-mined by
+    # ``scripts/training/mine_hard_negatives.py``); this is the
+    # strongest form and what the V2 postmortem recommended to break
+    # template collapse. Any non-none value is propagated to
+    # ``LabeledPositionDataset`` and forces the collate fn to emit a
+    # ``negative_descriptions`` key that ``ar.forward_sft`` consumes.
+    ar_nce_hard_negative_source: Literal[
+        "none", "same_episode", "same_position_type", "topk_cosine"
+    ] = "none"
+    ar_nce_hard_negatives_per_anchor: int = 4
+    # Required when ``ar_nce_hard_negative_source == "topk_cosine"``; ignored
+    # otherwise. Path to the mining JSONL produced by
+    # ``scripts/training/mine_hard_negatives.py``.
+    ar_nce_hard_negative_index_path: str | None = None
+
+    # V4 image-patch read-time pooling. ``"pinned"`` (default) preserves V3
+    # behaviour: for each ``image_patch`` row return the single-token
+    # activation at ``entry.position_index`` exactly as the labeling pass
+    # committed to. The non-pinned strategies pool over ALL valid image
+    # patches in the example and return that pooled vector instead — for
+    # ``image_patch`` rows only; ``last_text`` / ``anchor`` rows are
+    # untouched. Per the V4 extraction A/B sweep
+    # (``data/sft/libero_4suite_v3/v4_extraction_scorecard.json``)
+    # ``"mean_pool_image"`` is the recommended V4 setting.
+    image_patch_pooling: Literal[
+        "pinned", "mean_pool_image", "strided_image", "center_image"
+    ] = "pinned"
+    image_patch_pooling_strided_k: int = 4
 
 
 def _setup_outputs(out_dir: Path) -> dict[str, Path]:
@@ -235,6 +276,11 @@ def _make_dataloaders(cfg: SFTConfig):
         split_by=cfg.split_by,
         allow_episode_split_row_fallback=cfg.allow_episode_split_row_fallback,
         min_bullet_lines=cfg.min_bullet_lines,
+        hard_negative_source=cfg.ar_nce_hard_negative_source,
+        hard_negatives_per_anchor=cfg.ar_nce_hard_negatives_per_anchor,
+        hard_negative_index_path=cfg.ar_nce_hard_negative_index_path,
+        image_patch_pooling=cfg.image_patch_pooling,
+        image_patch_pooling_strided_k=cfg.image_patch_pooling_strided_k,
     )
     val_ds = LabeledPositionDataset(
         cfg.activations_root, cfg.labels_jsonl,
@@ -246,6 +292,8 @@ def _make_dataloaders(cfg: SFTConfig):
         split_by=cfg.split_by,
         allow_episode_split_row_fallback=cfg.allow_episode_split_row_fallback,
         min_bullet_lines=cfg.min_bullet_lines,
+        image_patch_pooling=cfg.image_patch_pooling,
+        image_patch_pooling_strided_k=cfg.image_patch_pooling_strided_k,
     )
     logger.info("Train labels: %d  Val labels: %d", len(train_ds), len(val_ds))
 
@@ -482,8 +530,15 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                     logger.info("[step %d] p_av=%.2f mix sample: %s", step, p_av, sample)
 
             if cfg.ar_contrastive_weight > 0.0:
+                # Hard negatives are mined w.r.t. the anchor's activation
+                # row, so they remain valid "describe-a-different-scene"
+                # negatives whether the anchor caption is gold or
+                # AV-generated. Pure MSE-only training
+                # (ar_contrastive_weight == 0) ignores them by design.
+                neg_descs = batch.get("negative_descriptions")
                 ar_mse, ar_nce, _pred_scaled = ar.forward_sft(
                     ar_input_text, acts, return_nce=True,
+                    negative_explanations=neg_descs,
                 )
                 ar_term = ar_mse + cfg.ar_contrastive_weight * ar_nce
             else:

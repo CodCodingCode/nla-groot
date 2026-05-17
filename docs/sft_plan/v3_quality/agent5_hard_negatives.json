@@ -1,0 +1,795 @@
+{
+  "n_anchors": 101580,
+  "negs_per_anchor_distribution": {
+    "8": 101580
+  },
+  "all_cos_top1_summary": {
+    "mean": 0.9839912609454097,
+    "std": 0.02333589174539044,
+    "min": 0.7610687017440796,
+    "max": 0.9996528625488281,
+    "count": 101580,
+    "p10": 0.9485765099525452,
+    "p50": 0.9983897805213928,
+    "p90": 0.9992868304252625
+  },
+  "all_cos_summary": {
+    "mean": 0.9785930460442512,
+    "std": 0.02924831184201885,
+    "min": 0.7419986128807068,
+    "max": 0.9996528625488281,
+    "count": 812640,
+    "p10": 0.9334943294525146,
+    "p50": 0.9980838894844055,
+    "p90": 0.9991830587387085
+  },
+  "mined_cos_sampled_summary": {
+    "mean": 0.978192813038826,
+    "std": 0.02937161883989248,
+    "min": 0.8800690174102783,
+    "max": 0.9995153546333313,
+    "count": 4000,
+    "p10": 0.9314352869987488,
+    "p50": 0.9976025223731995,
+    "p90": 0.9991844892501831
+  },
+  "mined_cos_by_ptype": {
+    "image_patch": {
+      "mean": 0.9576736011531248,
+      "std": 0.02954528713328491,
+      "min": 0.8800690174102783,
+      "max": 0.9988707900047302,
+      "count": 2008,
+      "p10": 0.9125974178314209,
+      "p50": 0.9601577520370483,
+      "p90": 0.993864893913269
+    },
+    "last_text": {
+      "mean": 0.9988768378714002,
+      "std": 0.00036639119749893396,
+      "min": 0.9971240758895874,
+      "max": 0.9995153546333313,
+      "count": 1992,
+      "p10": 0.9983940124511719,
+      "p50": 0.9989556074142456,
+      "p90": 0.9992786049842834
+    }
+  },
+  "random_cos_summary": {
+    "mean": 0.8871522388458252,
+    "std": 0.10702826625785318,
+    "min": 0.5564512014389038,
+    "max": 0.997458815574646,
+    "count": 500,
+    "p10": 0.711931586265564,
+    "p50": 0.9481192231178284,
+    "p90": 0.9847319722175598
+  },
+  "random_cos_by_ptype": {
+    "image_patch": {
+      "mean": 0.7493787972913312,
+      "std": 0.056978217854816535,
+      "min": 0.5564512014389038,
+      "max": 0.890588641166687,
+      "count": 173,
+      "p10": 0.6678441166877747,
+      "p50": 0.7526443004608154,
+      "p90": 0.816087007522583
+    },
+    "anchor": {
+      "mean": 0.9610447671315442,
+      "std": 0.019992092103581747,
+      "min": 0.8906285166740417,
+      "max": 0.997458815574646,
+      "count": 146,
+      "p10": 0.9425074458122253,
+      "p50": 0.955690860748291,
+      "p90": 0.9921480417251587
+    },
+    "last_text": {
+      "mean": 0.9592323286757285,
+      "std": 0.020862445215103775,
+      "min": 0.8866198062896729,
+      "max": 0.9947940111160278,
+      "count": 181,
+      "p10": 0.9373900890350342,
+      "p50": 0.956268846988678,
+      "p90": 0.989009439945221
+    }
+  },
+  "stored_vs_recomputed_max_abs_diff": 1.1920928955078125e-06,
+  "jaccard_summary": {
+    "mean": 0.384962941211064,
+    "std": 0.07676978622911283,
+    "min": 0.10909090909090909,
+    "max": 0.6557377049180327,
+    "count": 4000,
+    "p10": 0.2871287128712871,
+    "p50": 0.38372093023255816,
+    "p90": 0.4823529411764706
+  },
+  "jaccard_by_ptype": {
+    "image_patch": {
+      "mean": 0.35324189729160843,
+      "std": 0.07306474367229987,
+      "min": 0.10909090909090909,
+      "max": 0.65,
+      "count": 2008,
+      "p10": 0.25842696629213485,
+      "p50": 0.3516483516483517,
+      "p90": 0.44871794871794873
+    },
+    "last_text": {
+      "mean": 0.4169387726318806,
+      "std": 0.0664709049011144,
+      "min": 0.24242424242424243,
+      "max": 0.6557377049180327,
+      "count": 1992,
+      "p10": 0.330188679245283,
+      "p50": 0.4146341463414634,
+      "p90": 0.5
+    }
+  },
+  "random_jaccard_summary": {
+    "mean": 0.2845834822000944,
+    "std": 0.063375660602096,
+    "min": 0.14285714285714285,
+    "max": 0.5157894736842106,
+    "count": 500,
+    "p10": 0.21052631578947367,
+    "p50": 0.27380952380952384,
+    "p90": 0.37662337662337664
+  },
+  "cross_suite": {
+    "n_pairs": 812640,
+    "same_suite": 718932,
+    "same_suite_pct": 88.46869462492617,
+    "cross_suite_pct": 11.531305375073828,
+    "suite_pair_counts": {
+      "object->object": 201922,
+      "goal->goal": 183767,
+      "spatial->spatial": 182474,
+      "10->10": 150769,
+      "spatial->goal": 16807,
+      "goal->spatial": 13516,
+      "10->object": 12654,
+      "10->goal": 9662,
+      "10->spatial": 8835,
+      "object->10": 7312,
+      "object->goal": 4729,
+      "spatial->10": 4532,
+      "goal->10": 4414,
+      "object->spatial": 3957,
+      "goal->object": 3743,
+      "spatial->object": 3547
+    }
+  },
+  "cross_position_type": {
+    "same_ptype": 809897,
+    "same_ptype_pct": 99.66245816105533,
+    "ptype_pair_counts": {
+      "last_text->last_text": 407258,
+      "image_patch->image_patch": 402632,
+      "last_text->anchor": 1422,
+      "anchor->last_text": 1321,
+      "anchor->anchor": 7
+    }
+  },
+  "degenerate": {
+    "self_matches": 0,
+    "self_matches_pct": 0.0,
+    "same_source_example_id": 0,
+    "same_source_example_id_pct": 0.0,
+    "identical_caption_text": 0,
+    "identical_caption_text_pct": 0.0,
+    "missing_caption_pairs": 0
+  },
+  "examples": [
+    {
+      "anchor_id": "10__traj000372_step000048@p046_image_patch",
+      "anchor_snippet": "- scene: tabletop workspace with a gray robot arm, a dark three-compartment caddy, and a white mug on a wooden surface.\n- target: the caddy\u2019s back compartment is the placement slot, with the book-sized dark rectangular object nearby.\n- dist...",
+      "negs": [
+        {
+          "neg_id": "10__traj000027_step000044@p045_image_patch",
+          "cos": 0.9518836140632629,
+          "jaccard": 0.46835443037974683,
+          "snippet": "- scene: wooden tabletop with a brown three-compartment caddy, a white mug, and a black book standing near the front edge.\n- target: the book is the relevant object to pick up; it is a dark rectangular object with a visible spine and pages...."
+        },
+        {
+          "neg_id": "10__traj000299_step000018@p046_image_patch",
+          "cos": 0.9480857253074646,
+          "jaccard": 0.4675324675324675,
+          "snippet": "- scene: wooden tabletop with a brown caddy, a silver mug with a gold handle, a black pen-like object, and the robot arm above the table.\n- target: the book is not visible in this patch; the caddy\u2019s open back compartment is the placement de..."
+        },
+        {
+          "neg_id": "10__traj000368_step000028@p046_image_patch",
+          "cos": 0.9441742897033691,
+          "jaccard": 0.367816091954023,
+          "snippet": "- scene: Wooden tabletop with a black-and-brown caddy, a black book standing upright, and a white mug with yellow liquid.\n- target: The book is the graspable object matching the instruction; the caddy\u2019s rear compartment is the placement goa..."
+        },
+        {
+          "neg_id": "10__traj000028_step000044@p046_image_patch",
+          "cos": 0.9413574934005737,
+          "jaccard": 0.4155844155844156,
+          "snippet": "- scene: tabletop workspace with a robot arm above a wooden table and a brown three-compartment caddy.\n- target: a black book-like object lies near the white mug, separate from the caddy.\n- spatial: the caddy\u2019s back compartment is the far s..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "object__traj000293_step000046@p147_last_text",
+      "anchor_snippet": "- scene: a wicker basket with a white liner sits on the left, and a robot arm hovers over a tiled floor with several small items.\n- target: the alphabet soup can is the multicolored can on the floor near the lower center of the workspace.\n-...",
+      "negs": [
+        {
+          "neg_id": "object__traj000006_step000050@p147_last_text",
+          "cos": 0.9993138909339905,
+          "jaccard": 0.3888888888888889,
+          "snippet": "- scene: tabletop setup with a white woven basket on the left and a cluster of food items on the right.\n- target: canned soup with a red label and green top sits in front of the other objects.\n- distractor: green bottle stands near the cent..."
+        },
+        {
+          "neg_id": "object__traj000364_step000044@p147_last_text",
+          "cos": 0.9992411732673645,
+          "jaccard": 0.5194805194805194,
+          "snippet": "- language: the parsed task is pick up alphabet soup and place it in the basket.\n- target: the red-and-green soup can sits on the floor in front of the robot.\n- scene: a wicker basket lined with white fabric is positioned to the left of the..."
+        },
+        {
+          "neg_id": "object__traj000069_step000036@p147_last_text",
+          "cos": 0.9992071986198425,
+          "jaccard": 0.3655913978494624,
+          "snippet": "- scene: tabletop workspace with a woven basket on the left, a soup can near the front, and other small blocks and containers near the robot.\n- target: the alphabet soup can with a red label and green top sits closest to the reach area on t..."
+        },
+        {
+          "neg_id": "object__traj000345_step000044@p147_last_text",
+          "cos": 0.9991912841796875,
+          "jaccard": 0.4,
+          "snippet": "- scene: tabletop work area with a wicker basket lined in white paper, a soup can, a green bottle, a small orange block, a blue block, and a red carton under the robot arm.\n- target: alphabet soup can is the grasp target, standing near the ..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "10__traj000041_step000034@p149_last_text",
+      "anchor_snippet": "- scene: wooden tabletop with a woven basket on the left and a robot arm centered over two food items.\n- target: an alphabet soup can and a cream cheese box are the two objects named in the instruction.\n- spatial: the cream cheese box is un...",
+      "negs": [
+        {
+          "neg_id": "10__traj000373_step000048@p149_last_text",
+          "cos": 0.9988520741462708,
+          "jaccard": 0.42857142857142855,
+          "snippet": "- scene: wooden table with a woven basket on the left and a white robot arm over the workspace.\n- target: alphabet soup can and cream cheese box are the two objects named by the instruction.\n- target: the soup can with colorful label and th..."
+        },
+        {
+          "neg_id": "10__traj000373_step000052@p149_last_text",
+          "cos": 0.9987660646438599,
+          "jaccard": 0.45348837209302323,
+          "snippet": "- target: basket sits on the left side of the tabletop as the destination container.\n- target: alphabet soup can and cream cheese box are the two manipulable items on the right side near the gripper.\n- scene: wooden table surface with the r..."
+        },
+        {
+          "neg_id": "10__traj000074_step000058@p149_last_text",
+          "cos": 0.9986840486526489,
+          "jaccard": 0.45652173913043476,
+          "snippet": "- scene: tabletop workspace with a wicker basket on the left, a white robot arm over the table, and two food items on the right.\n- target: alphabet soup can with red-and-green labeling sits near the robot gripper on the wooden surface.\n- ta..."
+        },
+        {
+          "neg_id": "10__traj000318_step000054@p149_last_text",
+          "cos": 0.9986536502838135,
+          "jaccard": 0.4,
+          "snippet": "- language: active instruction is to put both the alphabet soup and the cream cheese box into the basket.\n- target: alphabet soup can is on the table near the robot gripper, with a red-and-green label visible.\n- target: cream cheese box is ..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "10__traj000271_step000020@p105_image_patch",
+      "anchor_snippet": "- scene: tabletop with a gray robot arm over a wooden surface, a white plate, a white mug, a red patterned mug, and a chocolate pudding cup.\n- target: white mug stands near the plate in the front camera, while the red mug hangs under the gr...",
+      "negs": [
+        {
+          "neg_id": "10__traj000157_step000040@p098_image_patch",
+          "cos": 0.9122625589370728,
+          "jaccard": 0.32051282051282054,
+          "snippet": "- scene: wooden tabletop with two pink-rimmed plates and two mugs beneath a white robot arm.\n- target: white mug with a yellow handle sits left of center near the left plate.\n- target: yellow-and-white mug with a white handle sits under the..."
+        },
+        {
+          "neg_id": "10__traj000210_step000006@p104_image_patch",
+          "cos": 0.9104001522064209,
+          "jaccard": 0.4375,
+          "snippet": "- scene: wooden tabletop with a white plate, a white mug, a red patterned mug, and a chocolate pudding cup.\n- target: white mug sits to the right of the plate and is the object to be moved onto it.\n- target: chocolate pudding cup lies below..."
+        },
+        {
+          "neg_id": "10__traj000000_step000054@p106_image_patch",
+          "cos": 0.9060494303703308,
+          "jaccard": 0.32926829268292684,
+          "snippet": "- scene: tabletop workspace with two plates, a white mug with yellow handle, a red patterned mug, and a white ribbed mug under the robot arm.\n- target: white mug on the left side of the table is positioned nearest the left plate.\n- target: ..."
+        },
+        {
+          "neg_id": "10__traj000108_step000024@p103_image_patch",
+          "cos": 0.9036411643028259,
+          "jaccard": 0.6,
+          "snippet": "- scene: tabletop workspace with a red patterned mug, a white mug, a white plate, and a chocolate pudding cup.\n- target: white mug is the object to place on the plate; chocolate pudding cup is the second object to place beside the plate.\n- ..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "10__traj000213_step000050@p151_last_text",
+      "anchor_snippet": "- scene: wooden tabletop with a black caddy, a mug, and a black book-like object near the robot gripper.\n- target: the black rectangular book stands upright below the gripper and is the object to pick up.\n- spatial: the caddy\u2019s back compart...",
+      "negs": [
+        {
+          "neg_id": "10__traj000348_step000050@p151_last_text",
+          "cos": 0.9986912608146667,
+          "jaccard": 0.4177215189873418,
+          "snippet": "- scene: tabletop workspace with a gray robot arm, a brown two-compartment caddy, a white mug, and a black book standing near the front edge.\n- target: the black book is the object to grasp; it is upright beside the mug and in front of the ..."
+        },
+        {
+          "neg_id": "10__traj000159_step000044@p151_last_text",
+          "cos": 0.9986629486083984,
+          "jaccard": 0.4166666666666667,
+          "snippet": "- scene: tabletop workspace with a gray robot arm, a black book-like object, a white mug, and a brown caddy with three compartments.\n- target: the book is the black rectangular object standing near the left side of the table, separated from..."
+        },
+        {
+          "neg_id": "10__traj000311_step000054@p151_last_text",
+          "cos": 0.998661458492279,
+          "jaccard": 0.425,
+          "snippet": "- scene: wooden tabletop with a black robotic gripper arm, a brown caddy with three compartments, and a light-colored mug nearby.\n- target: the book is visible as a thin black rectangular object standing near the gripper and table edge.\n- s..."
+        },
+        {
+          "neg_id": "10__traj000279_step000034@p151_last_text",
+          "cos": 0.9986326098442078,
+          "jaccard": 0.5507246376811594,
+          "snippet": "- scene: tabletop workspace with a wooden surface, a black caddy with multiple compartments, a white robot arm, a mug, and a black rectangular book.\n- target: the black book stands upright near the mug, separate from the caddy and ready to ..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "goal__traj000003_step000008@p145_last_text",
+      "anchor_snippet": "- scene: tabletop workspace with a bowl, patterned plate, black bottle, blue rectangular item, drawers, and the robot arm overhead.\n- target: gray bowl is the object to grasp and place into the top drawer.\n- spatial: bowl sits between the b...",
+      "negs": [
+        {
+          "neg_id": "goal__traj000119_step000008@p145_last_text",
+          "cos": 0.9992696046829224,
+          "jaccard": 0.3146067415730337,
+          "snippet": "- scene: tabletop workspace with a drawer cabinet, a black appliance base, a white hotplate, and a metal bowl on the desk.\n- target: the bowl is centered in the workspace and is the object to be placed into the drawer.\n- distractor: the ope..."
+        },
+        {
+          "neg_id": "goal__traj000119_step000010@p145_last_text",
+          "cos": 0.9991514086723328,
+          "jaccard": 0.34615384615384615,
+          "snippet": "- language: instruction parsed as open the top drawer and place the bowl inside.\n- scene: tabletop workspace with a black cabinet drawer unit, white coil burner, wooden rack, bottle, bowl, plate, and blue carton.\n- target: gray bowl on the ..."
+        },
+        {
+          "neg_id": "goal__traj000363_step000010@p145_last_text",
+          "cos": 0.9991130232810974,
+          "jaccard": 0.4074074074074074,
+          "snippet": "- scene: tabletop workspace with a white induction cooktop, a black bottle, a gray bowl, a white plate with red rings, and a cabinet/drawer unit beside the robot arm.\n- target: the gray bowl is the object to be moved; it sits near the plate..."
+        },
+        {
+          "neg_id": "goal__traj000119_step000012@p145_last_text",
+          "cos": 0.9990838766098022,
+          "jaccard": 0.44871794871794873,
+          "snippet": "- scene: tabletop workspace with a dark cabinet drawer on the right, a white stove-like surface on the left, and a robot arm above the center.\n- target: gray bowl sits near the center of the table, below a dark bottle and above a striped pl..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "10__traj000281_step000048@p149_last_text",
+      "anchor_snippet": "- scene: wooden tabletop with a woven basket at left, a blue box near center, and a striped soup can at lower right.\n- target: alphabet soup can is the striped can on the table; cream cheese box is the small blue carton near the basket.\n- s...",
+      "negs": [
+        {
+          "neg_id": "10__traj000208_step000040@p149_last_text",
+          "cos": 0.9988453388214111,
+          "jaccard": 0.5443037974683544,
+          "snippet": "- scene: wooden tabletop with a woven basket on the left and a robot arm over objects on the right.\n- target: alphabet soup can with red and green stripes sits near the lower right of the main view.\n- target: cream cheese box is the small b..."
+        },
+        {
+          "neg_id": "10__traj000221_step000052@p149_last_text",
+          "cos": 0.9982931613922119,
+          "jaccard": 0.47191011235955055,
+          "snippet": "- scene: tabletop workspace with a wicker basket on the left and two canned food items on the wooden surface.\n- target: alphabet soup can stands near the robot gripper, and a cream cheese box sits farther back near the basket.\n- spatial: th..."
+        },
+        {
+          "neg_id": "10__traj000289_step000040@p149_last_text",
+          "cos": 0.998249888420105,
+          "jaccard": 0.42528735632183906,
+          "snippet": "- language: put both items into the basket; two-object pick-and-place task active.\n- target: alphabet soup can and cream cheese box are the goal objects on the tabletop.\n- scene: wicker basket sits on the left side of the wooden table, empt..."
+        },
+        {
+          "neg_id": "10__traj000083_step000050@p149_last_text",
+          "cos": 0.9981695413589478,
+          "jaccard": 0.3548387096774194,
+          "snippet": "- language: task parses as moving both the alphabet soup can and the cream cheese box into the basket.\n- scene: tabletop workspace with a wicker basket on the left and a white robot arm over a brown wooden surface.\n- target: a cream cheese ..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "spatial__traj000205_step000010@p030_image_patch",
+      "anchor_snippet": "- scene: tabletop workspace with a robot arm above a light wood table and multiple bowls, a plate, and a small packet.\n- target: the black bowl is the bowl centered in the lower camera view, with a dark rim and pale interior.\n- distractor: ...",
+      "negs": [
+        {
+          "neg_id": "spatial__traj000165_step000006@p030_image_patch",
+          "cos": 0.9917793869972229,
+          "jaccard": 0.5405405405405406,
+          "snippet": "- scene: tabletop workspace with a robot arm above a light wood table and multiple dishes scattered around.\n- target: black bowl is visible near the center of the table in the lower camera view.\n- distractor: white plate with a red rim sits..."
+        },
+        {
+          "neg_id": "spatial__traj000327_step000008@p030_image_patch",
+          "cos": 0.9868128895759583,
+          "jaccard": 0.32142857142857145,
+          "snippet": "- scene: tabletop workspace with a robot arm, several small bowls, a white plate with red rings, and a dark cabinet edge.\n- target: black bowl on the table near a small silver ramekin; both are visible among the other dishes.\n- distractor: ..."
+        },
+        {
+          "neg_id": "spatial__traj000415_step000024@p030_image_patch",
+          "cos": 0.979155957698822,
+          "jaccard": 0.5147058823529411,
+          "snippet": "- scene: beige tabletop with a red-rimmed plate, a black bowl, a small silver ramekin, and a dark cabinet at the right.\n- target: black bowl on the table near the silver ramekin, matching the instruction to pick up the bowl.\n- distractor: r..."
+        },
+        {
+          "neg_id": "spatial__traj000123_step000000@p030_image_patch",
+          "cos": 0.979133665561676,
+          "jaccard": 0.37349397590361444,
+          "snippet": "- scene: kitchen work surface with a stove at the top view and a light wood table below.\n- target: black bowl sits on the stove area beside a small white tray, matching the object to pick up.\n- distractor: shiny metal cups, a red-and-white ..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "goal__traj000413_step000030@p054_image_patch",
+      "anchor_snippet": "- scene: tabletop workspace with a gray robot arm, a dark cabinet, a white appliance base, a blue rectangular object, a red ring, and a gray bowl on a light wood surface.\n- target: cabinet drawer handle visible on the dark cabinet; the cabi...",
+      "negs": [
+        {
+          "neg_id": "goal__traj000252_step000022@p054_image_patch",
+          "cos": 0.9732507467269897,
+          "jaccard": 0.44047619047619047,
+          "snippet": "- scene: tabletop workspace with a cabinet, a robot arm, a white burner-like plate, a glass bowl, a black bottle, a blue rectangular object, and a coiled cable.\n- target: dark cabinet drawer front with a silver vertical handle is visible be..."
+        },
+        {
+          "neg_id": "goal__traj000089_step000018@p062_image_patch",
+          "cos": 0.9727554321289062,
+          "jaccard": 0.32222222222222224,
+          "snippet": "- scene: tabletop workspace with a black cabinet at the right, a white burner at the left, and a robot arm above the work area.\n- target: a dark wine bottle stands near the center of the table, below the robot arm and left of the cabinet.\n-..."
+        },
+        {
+          "neg_id": "goal__traj000023_step000008@p054_image_patch",
+          "cos": 0.9707810878753662,
+          "jaccard": 0.38095238095238093,
+          "snippet": "- scene: tabletop workspace with a gray bowl, a white plate with red rings, a black bottle-like object, a blue rectangular item, and a dark cabinet.\n- target: gray bowl is the object to move for the cabinet placement task.\n- spatial: bowl s..."
+        },
+        {
+          "neg_id": "goal__traj000333_step000030@p054_image_patch",
+          "cos": 0.9678269624710083,
+          "jaccard": 0.3595505617977528,
+          "snippet": "- scene: tabletop workspace with a gray robotic arm, a black cabinet on the right, a patterned bowl, a circular plate, and a small blue object on the wood surface.\n- target: the bowl is the relevant object, with a light outer rim and dark p..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "goal__traj000271_step000050@p008_image_patch",
+      "anchor_snippet": "- scene: tabletop workspace with a robot arm, a black bowl-like container on the right, a white plate with red stripes, and a small black bottle near the center.\n- target: cream cheese container is present as a blue-labeled package in the l...",
+      "negs": [
+        {
+          "neg_id": "spatial__traj000010_step000042@p007_image_patch",
+          "cos": 0.9713204503059387,
+          "jaccard": 0.2978723404255319,
+          "snippet": "- scene: tabletop workspace with a robot arm, a white plate, a black drawer unit, a pink-rimmed ramekin, and a patterned black bowl.\n- target: the black bowl sits on the ramekin in the lower center of the scene, directly matching the object..."
+        },
+        {
+          "neg_id": "goal__traj000060_step000048@p007_image_patch",
+          "cos": 0.9696075916290283,
+          "jaccard": 0.3939393939393939,
+          "snippet": "- scene: tabletop workspace with a robot arm, a black rectangular bin/tray, a clear bowl with a red rim, and two dark bottles standing near the arm.\n- target: cream cheese container is the light blue rectangular package with a circular logo..."
+        },
+        {
+          "neg_id": "spatial__traj000069_step000056@p007_image_patch",
+          "cos": 0.9690216779708862,
+          "jaccard": 0.3473684210526316,
+          "snippet": "- scene: beige tabletop with a robot arm, a white plate with red rings, and a patterned black bowl.\n- target: the black bowl is the object named by the instruction and is visible near the plate.\n- spatial: the bowl sits below the plate in t..."
+        },
+        {
+          "neg_id": "spatial__traj000044_step000050@p008_image_patch",
+          "cos": 0.9668532013893127,
+          "jaccard": 0.3173076923076923,
+          "snippet": "- scene: tabletop workspace with two robot arms, a black cabinet on the right, and several small dishes on a light wood surface.\n- target: black bowl sits near the bottom of the close camera view, with a silver patterned interior and pale r..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "spatial__traj000234_step000036@p046_image_patch",
+      "anchor_snippet": "- scene: beige tabletop with a white plate, a black bowl, a small silver ramekin, and a dark cabinet-like object.\n- target: the black bowl is the object to lift, positioned near the ramekin on the table.\n- distractor: the silver ramekin and...",
+      "negs": [
+        {
+          "neg_id": "spatial__traj000025_step000036@p046_image_patch",
+          "cos": 0.9838807582855225,
+          "jaccard": 0.40789473684210525,
+          "snippet": "- scene: tabletop workspace with a black bowl, a silver ramekin, a white plate with red rings, and a black cabinet/drawer unit.\n- target: the black bowl sits next to the ramekin on the table and is the object to lift.\n- spatial: the plate l..."
+        },
+        {
+          "neg_id": "spatial__traj000175_step000008@p046_image_patch",
+          "cos": 0.9778433442115784,
+          "jaccard": 0.4470588235294118,
+          "snippet": "- scene: tabletop with two camera views of the same workspace, robot arm above a light wood surface and a dark cabinet on the right.\n- target: black bowl on the table near a small ramekin, with another gray bowl nearby as a distractor.\n- di..."
+        },
+        {
+          "neg_id": "spatial__traj000394_step000008@p046_image_patch",
+          "cos": 0.9742928743362427,
+          "jaccard": 0.3333333333333333,
+          "snippet": "- scene: light wood tabletop with a black cabinet at the right edge and the robot arm above the workspace.\n- target: black bowl filled with white rice sits near the lower-right area of the table in the main view.\n- distractor: a small metal..."
+        },
+        {
+          "neg_id": "spatial__traj000375_step000004@p046_image_patch",
+          "cos": 0.9734125733375549,
+          "jaccard": 0.40963855421686746,
+          "snippet": "- scene: kitchen counter with a stove at the back, a plate on the counter, and a black drawer unit on the right.\n- target: black bowl sits in the stove area, with the bowl rim visible against the dark burner surface.\n- distractor: a small m..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "object__traj000129_step000044@p060_image_patch",
+      "anchor_snippet": "- scene: tabletop workspace with a white basket on the left, a robot arm in the center, and small containers near the gripper.\n- target: cream cheese carton visible in the lower camera frame, tilted upright with a blue-and-white label.\n- di...",
+      "negs": [
+        {
+          "neg_id": "object__traj000391_step000030@p060_image_patch",
+          "cos": 0.9957607984542847,
+          "jaccard": 0.35555555555555557,
+          "snippet": "- scene: tabletop workspace with a basket on the left and several small food items on the floor-like surface near the robot.\n- target: cream cheese carton is the blue rectangular package near the robot base, matching the pickup instruction...."
+        },
+        {
+          "neg_id": "object__traj000249_step000058@p060_image_patch",
+          "cos": 0.9957545399665833,
+          "jaccard": 0.34408602150537637,
+          "snippet": "- scene: tabletop or floor workspace with a white basket on the left and several small grocery items spread out on the tiles.\n- target: salad dressing bottle is the green bottle near the center, standing upright beside other items.\n- distra..."
+        },
+        {
+          "neg_id": "object__traj000003_step000032@p060_image_patch",
+          "cos": 0.9957044124603271,
+          "jaccard": 0.38271604938271603,
+          "snippet": "- scene: tabletop workspace with a white basket on the left and a robot arm centered above the floor tiles.\n- target: cream cheese is the blue rectangular package on the floor near the robot base.\n- distractor: two cylindrical cans sit to t..."
+        },
+        {
+          "neg_id": "object__traj000415_step000042@p060_image_patch",
+          "cos": 0.9956122040748596,
+          "jaccard": 0.3978494623655914,
+          "snippet": "- scene: tabletop/worksurface with a silver robot arm, a woven basket, and several small food items on the floor-like surface.\n- target: a green bottle-shaped dressing container is positioned near the center beneath the gripper area.\n- dist..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "goal__traj000161_step000038@p143_last_text",
+      "anchor_snippet": "- scene: tabletop workspace with a robot arm over a light wood surface, a black bowl, a black bottle, a coiled red-and-white cable, and a blue carton.\n- target: cream cheese container is the blue carton with a white label near the bottom ce...",
+      "negs": [
+        {
+          "neg_id": "goal__traj000202_step000034@p143_last_text",
+          "cos": 0.9988332986831665,
+          "jaccard": 0.3684210526315789,
+          "snippet": "- language: instruction specifies placing the cream cheese into the bowl.\n- scene: tabletop workspace with a robot arm, a pink-rimmed bowl, a blue cream-cheese box, a dark bottle, and a black appliance.\n- target: the blue cream-cheese packa..."
+        },
+        {
+          "neg_id": "goal__traj000231_step000032@p143_last_text",
+          "cos": 0.9986599087715149,
+          "jaccard": 0.31521739130434784,
+          "snippet": "- scene: tabletop workspace with a robot arm, a dark bowl-like container, a black bottle, a red-and-white coil ring, and a small blue item near the front edge.\n- target: cream cheese is the wooden slotted block/packet resting near the right..."
+        },
+        {
+          "neg_id": "goal__traj000085_step000032@p143_last_text",
+          "cos": 0.9985973238945007,
+          "jaccard": 0.3924050632911392,
+          "snippet": "- language: instruction parsed as placing cream cheese into the bowl.\n- scene: tabletop workspace with a robot arm, a dark bowl, a black cabinet, a bottle, a striped plate, and a small cream-cheese package.\n- target: cream-cheese package si..."
+        },
+        {
+          "neg_id": "goal__traj000253_step000050@p143_last_text",
+          "cos": 0.9985920786857605,
+          "jaccard": 0.4634146341463415,
+          "snippet": "- scene: tabletop workspace with a gray robot arm over a light wood surface, a white plate with red rings, a clear bowl, a dark bottle, and a black cabinet.\n- target: cream cheese container is the small dark object at the gripper area near ..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "10__traj000019_step000004@p154_last_text",
+      "anchor_snippet": "- language: parsed instruction links white mug to the plate and chocolate pudding to the right of the plate.\n- scene: tabletop workspace with a white plate centered low in view, a gray mug on the right, and a chocolate pudding package near ...",
+      "negs": [
+        {
+          "neg_id": "10__traj000068_step000008@p154_last_text",
+          "cos": 0.9993413090705872,
+          "jaccard": 0.49295774647887325,
+          "snippet": "- language: two-step placement task parsed; white mug onto the plate, chocolate pudding to the right of the plate.\n- scene: wooden tabletop with a white-and-pink plate, a gray mug on the right, a red patterned mug under the robot, and a cho..."
+        },
+        {
+          "neg_id": "10__traj000062_step000006@p154_last_text",
+          "cos": 0.999318540096283,
+          "jaccard": 0.3684210526315789,
+          "snippet": "- language: task specifies two placements: white mug onto the plate, then chocolate pudding to the right of the plate.\n- target: white mug is the pale blue-gray cup on the right side of the table, separate from the plate.\n- target: chocolat..."
+        },
+        {
+          "neg_id": "10__traj000356_step000000@p154_last_text",
+          "cos": 0.9992760419845581,
+          "jaccard": 0.3918918918918919,
+          "snippet": "- language: parsed instruction specifies two placements, mug onto plate and pudding to the right of the plate.\n- scene: white mug, striped plate, chocolate pudding snack bar, and red patterned mug are visible on the wooden table.\n- spatial:..."
+        },
+        {
+          "neg_id": "10__traj000068_step000002@p154_last_text",
+          "cos": 0.9992045164108276,
+          "jaccard": 0.36923076923076925,
+          "snippet": "- language: put the white mug on the plate and place the chocolate pudding to the right of the plate.\n- target: white mug stands to the right of the plate, while the red patterned mug is under the gripper.\n- target: small chocolate pudding ..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "object__traj000055_step000048@p026_image_patch",
+      "anchor_snippet": "- scene: tabletop workspace with a robot arm centered above scattered small items on a gray surface.\n- target: cream cheese is the blue rectangular carton near the gripper in the close-up frame.\n- distractor: a woven basket sits to the left...",
+      "negs": [
+        {
+          "neg_id": "object__traj000296_step000048@p026_image_patch",
+          "cos": 0.9742136597633362,
+          "jaccard": 0.3225806451612903,
+          "snippet": "- scene: tabletop workspace with a basket on the left, cream cheese box in the center, and the robot arm over the work area.\n- target: blue Cream O'Land cream cheese package is visible on the table and also close in the gripper camera view...."
+        },
+        {
+          "neg_id": "object__traj000096_step000038@p026_image_patch",
+          "cos": 0.9631361365318298,
+          "jaccard": 0.35051546391752575,
+          "snippet": "- scene: tabletop workspace with a woven basket on the left and a robot arm centered over a gray floor tile surface.\n- target: cream cheese carton is visible among several small packages, including a blue-and-white carton in the lower camer..."
+        },
+        {
+          "neg_id": "object__traj000423_step000058@p026_image_patch",
+          "cos": 0.9577766060829163,
+          "jaccard": 0.29473684210526313,
+          "snippet": "- scene: tabletop or floor-level workspace with a white basket on the left and several bottles clustered near the robot arm.\n- target: bbq sauce bottle with dark reddish-brown liquid and orange cap among the nearby containers.\n- distractor:..."
+        },
+        {
+          "neg_id": "object__traj000258_step000056@p026_image_patch",
+          "cos": 0.9501899480819702,
+          "jaccard": 0.29411764705882354,
+          "snippet": "- scene: tabletop workspace with tiled floor and a metal basket on the left.\n- target: brown tomato-sauce bottle stands near the robot arm beside other condiment packages.\n- distractor: colorful cartons and a second small box sit to the rig..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "spatial__traj000374_step000022@p152_last_text",
+      "anchor_snippet": "- language: parsed task specifies lifting the black bowl from the ramekin and placing it onto the plate.\n- target: black bowl sitting in a small gray ramekin near the center-left of the workspace.\n- scene: white plate with a red patterned r...",
+      "negs": [
+        {
+          "neg_id": "spatial__traj000365_step000026@p152_last_text",
+          "cos": 0.9986959099769592,
+          "jaccard": 0.43373493975903615,
+          "snippet": "- scene: tabletop workspace with a robot arm over a light wood surface, a black cabinet on the right, and a striped plate visible near the top.\n- target: black bowl sits on a small ramekin-like stand near the center of the table.\n- distract..."
+        },
+        {
+          "neg_id": "spatial__traj000365_step000016@p152_last_text",
+          "cos": 0.9982472658157349,
+          "jaccard": 0.47297297297297297,
+          "snippet": "- language: parsed task is pick up the black bowl resting on the ramekin, then place it on the plate.\n- target: black bowl sits directly on a small square ramekin; the bowl is the pickup object.\n- scene: white plate with a dark circular cen..."
+        },
+        {
+          "neg_id": "spatial__traj000208_step000044@p152_last_text",
+          "cos": 0.9982102513313293,
+          "jaccard": 0.30337078651685395,
+          "snippet": "- scene: tabletop workspace with a robot arm above a light wood surface, a black bowl, a white plate, and a red ring-shaped ramekin.\n- target: black bowl sits on the ramekin area and is the object to be lifted; the plate is nearby for place..."
+        },
+        {
+          "neg_id": "spatial__traj000127_step000026@p152_last_text",
+          "cos": 0.9981930255889893,
+          "jaccard": 0.4166666666666667,
+          "snippet": "- scene: tabletop workspace with a robot arm over a light wood surface, a black cabinet on the right, a red-rimmed plate, and a small black ramekin.\n- target: black bowl with patterned interior sits directly on the ramekin near the center o..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "spatial__traj000302_step000026@p083_image_patch",
+      "anchor_snippet": "- scene: tabletop workspace with a robot arm, a white plate with red rings, a black bowl, and a small ramekin-like object.\n- target: black bowl sits to the right of the plate and near the ramekin, matching the object to be lifted.\n- spatial...",
+      "negs": [
+        {
+          "neg_id": "spatial__traj000142_step000022@p082_image_patch",
+          "cos": 0.9780562520027161,
+          "jaccard": 0.38372093023255816,
+          "snippet": "- scene: tabletop workspace with a robot arm at the back and several dishes arranged on a light wood surface.\n- target: black bowl is visible on the right side of the table in the close-up frame, near the plate.\n- distractor: a red-rimmed w..."
+        },
+        {
+          "neg_id": "goal__traj000407_step000032@p081_image_patch",
+          "cos": 0.9668563008308411,
+          "jaccard": 0.3614457831325301,
+          "snippet": "- scene: tabletop kitchen workspace with a gray robot arm, black stove appliance, white plate with red rings, and a metal bowl.\n- target: bowl is the object named by the instruction and is visible on the table near the plate.\n- spatial: sto..."
+        },
+        {
+          "neg_id": "spatial__traj000275_step000036@p079_image_patch",
+          "cos": 0.9665572643280029,
+          "jaccard": 0.35365853658536583,
+          "snippet": "- scene: tabletop workspace with a silver robot arm, a white plate with red rings, a dark cabinet, and a black bowl.\n- target: black bowl sits left of the plate in the front camera, with a round opening and pale textured interior.\n- spatial..."
+        },
+        {
+          "neg_id": "goal__traj000020_step000036@p073_image_patch",
+          "cos": 0.9635937213897705,
+          "jaccard": 0.35714285714285715,
+          "snippet": "- scene: tabletop workspace with a cabinet, robot arm, metal bowl, coiled cable, phone, and round striped plate on a light wood surface.\n- target: black cabinet drawer front and gray horizontal handle are visible as the relevant object for ..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "spatial__traj000232_step000030@p091_image_patch",
+      "anchor_snippet": "- scene: tabletop workspace with a robot arm, a white plate with red rings, a black bowl, and a ramekin area.\n- target: black bowl with gray patterned interior sits below the plate in the camera view.\n- spatial: the bowl is positioned betwe...",
+      "negs": [
+        {
+          "neg_id": "spatial__traj000259_step000018@p075_image_patch",
+          "cos": 0.9421606063842773,
+          "jaccard": 0.3010752688172043,
+          "snippet": "- scene: light wooden cabinet surface with two camera views showing a black cabinet drawer unit, a white plate with red rim, a small metal cup, and a dark bowl.\n- target: black bowl sits on the cabinet near the drawer unit and is the object..."
+        },
+        {
+          "neg_id": "spatial__traj000134_step000040@p084_image_patch",
+          "cos": 0.9418191313743591,
+          "jaccard": 0.4473684210526316,
+          "snippet": "- scene: tabletop workspace with a gray robot arm, a white plate with red rings, and a black bowl with a patterned interior.\n- target: the black bowl sits between the plate and the dark rectangular ramekin-like object.\n- spatial: the bowl i..."
+        },
+        {
+          "neg_id": "goal__traj000079_step000052@p073_image_patch",
+          "cos": 0.934059739112854,
+          "jaccard": 0.35294117647058826,
+          "snippet": "- scene: tabletop workspace with a robot arm, a black cabinet, a wooden slatted rack, a blue packet, and a striped bowl on the table.\n- target: the bowl is the task object, patterned white with dark gray floral motifs and a yellow rim.\n- sp..."
+        },
+        {
+          "neg_id": "spatial__traj000167_step000030@p106_image_patch",
+          "cos": 0.9328170418739319,
+          "jaccard": 0.38202247191011235,
+          "snippet": "- scene: tabletop workspace with a robot arm above a light wood table and several objects spread out.\n- target: black bowl with patterned interior is visible near the lower-left area of the close-up frame.\n- distractor: red-and-white stripe..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "10__traj000254_step000042@p024_image_patch",
+      "anchor_snippet": "- scene: kitchen counter with an open cabinet drawer on the left, a black/gray robotic gripper above the work surface, and a gray bowl on the wooden tabletop.\n- target: the black bowl sits on the counter near the cabinet drawer opening and ...",
+      "negs": [
+        {
+          "neg_id": "spatial__traj000389_step000026@p021_image_patch",
+          "cos": 0.9551023840904236,
+          "jaccard": 0.20212765957446807,
+          "snippet": "- scene: tabletop workspace with a robot arm, a black cookie box, a black bowl, and a white plate with red rings.\n- target: black bowl sits on top of the cookie box in the upper camera view and is the object to grasp.\n- distractor: a second..."
+        },
+        {
+          "neg_id": "object__traj000373_step000030@p024_image_patch",
+          "cos": 0.9548848867416382,
+          "jaccard": 0.2523364485981308,
+          "snippet": "- scene: tabletop workspace with a gray robot arm, a woven basket on the left, and several small food containers on the floor in front of the arm.\n- target: a tomato sauce package is visible among the objects near the center-right of the wo..."
+        },
+        {
+          "neg_id": "10__traj000018_step000058@p025_image_patch",
+          "cos": 0.9545347094535828,
+          "jaccard": 0.21428571428571427,
+          "snippet": "- scene: wooden tabletop with two pink-rimmed plates at the left and right edges, a white mug near the center-left, and a red patterned mug held by the robot gripper.\n- target: the white mug is the object matched to the left-plate part of t..."
+        },
+        {
+          "neg_id": "goal__traj000175_step000038@p024_image_patch",
+          "cos": 0.9544494152069092,
+          "jaccard": 0.22429906542056074,
+          "snippet": "- scene: tabletop workspace with a robot arm centered above a light wood surface and a black cabinet at the right edge.\n- target: wine bottle object is present as a dark bottle-shaped item on the table near the lower center of the view.\n- d..."
+        }
+      ]
+    },
+    {
+      "anchor_id": "10__traj000000_step000028@p010_image_patch",
+      "anchor_snippet": "- scene: tabletop with two plates and three mugs under a robot arm.\n- target: white mug with a yellow handle on the left side of the table.\n- target: yellow-and-white mug near the center, plus a red patterned mug and a gray mug nearby.\n- sp...",
+      "negs": [
+        {
+          "neg_id": "10__traj000013_step000026@p010_image_patch",
+          "cos": 0.9873653054237366,
+          "jaccard": 0.22448979591836735,
+          "snippet": "- scene: tabletop workspace with a woven basket on the left and the robot arm hovering above the table.\n- target: alphabet soup can and tomato sauce carton are visible among several boxed/canned groceries.\n- distractor: orange juice carton,..."
+        },
+        {
+          "neg_id": "10__traj000062_step000038@p010_image_patch",
+          "cos": 0.9872590899467468,
+          "jaccard": 0.44594594594594594,
+          "snippet": "- scene: tabletop workspace with brown wooden surface, plate, two mugs, and a chocolate pudding bar wrapper.\n- target: white mug sits to the right of the plate under the robot gripper.\n- distractor: red patterned mug stands near the center-..."
+        },
+        {
+          "neg_id": "10__traj000079_step000028@p010_image_patch",
+          "cos": 0.9862912893295288,
+          "jaccard": 0.19148936170212766,
+          "snippet": "- scene: tabletop workspace with a metal basket on the left and several grocery items spread on the wooden surface.\n- target: alphabet soup can and tomato sauce carton are both present among the items to be collected.\n- distractor: blue mil..."
+        },
+        {
+          "neg_id": "object__traj000167_step000018@p010_image_patch",
+          "cos": 0.9844066500663757,
+          "jaccard": 0.16831683168316833,
+          "snippet": "- scene: tabletop workspace with a woven basket on the left image and several small cartons and cans arranged on the floor-like surface.\n- target: milk carton is visible among the objects, with a blue carton in the lower view and a red-and-..."
+        }
+      ]
+    }
+  ],
+  "histograms": {
+    "mined_cos": "  [0.000,0.050)      0 |\n  [0.050,0.100)      0 |\n  [0.100,0.150)      0 |\n  [0.150,0.200)      0 |\n  [0.200,0.250)      0 |\n  [0.250,0.300)      0 |\n  [0.300,0.350)      0 |\n  [0.350,0.400)      0 |\n  [0.400,0.450)      0 |\n  [0.450,0.500)      0 |\n  [0.500,0.550)      0 |\n  [0.550,0.600)      0 |\n  [0.600,0.650)      0 |\n  [0.650,0.700)      0 |\n  [0.700,0.750)      0 |\n  [0.750,0.800)      0 |\n  [0.800,0.850)      0 |\n  [0.850,0.900)     76 |\n  [0.900,0.950)    699 |########\n  [0.950,1.000)   3225 |########################################",
+    "random_cos": "  [0.000,0.050)      0 |\n  [0.050,0.100)      0 |\n  [0.100,0.150)      0 |\n  [0.150,0.200)      0 |\n  [0.200,0.250)      0 |\n  [0.250,0.300)      0 |\n  [0.300,0.350)      0 |\n  [0.350,0.400)      0 |\n  [0.400,0.450)      0 |\n  [0.450,0.500)      0 |\n  [0.500,0.550)      0 |\n  [0.550,0.600)      1 |\n  [0.600,0.650)      5 |\n  [0.650,0.700)     30 |#####\n  [0.700,0.750)     47 |#######\n  [0.750,0.800)     50 |########\n  [0.800,0.850)     37 |######\n  [0.850,0.900)      6 |#\n  [0.900,0.950)     86 |##############\n  [0.950,1.000)    238 |########################################",
+    "jaccard": "  [0.000,0.050)      0 |\n  [0.050,0.100)      0 |\n  [0.100,0.150)      2 |\n  [0.150,0.200)     21 |\n  [0.200,0.250)    126 |####\n  [0.250,0.300)    367 |##############\n  [0.300,0.350)    770 |#############################\n  [0.350,0.400)   1034 |########################################\n  [0.400,0.450)    878 |#################################\n  [0.450,0.500)    521 |####################\n  [0.500,0.550)    204 |#######\n  [0.550,0.600)     60 |##\n  [0.600,0.650)     15 |\n  [0.650,0.700)      2 |\n  [0.700,0.750)      0 |\n  [0.750,0.800)      0 |\n  [0.800,0.850)      0 |\n  [0.850,0.900)      0 |\n  [0.900,0.950)      0 |\n  [0.950,1.000)      0 |",
+    "random_jaccard": "  [0.000,0.050)      0 |\n  [0.050,0.100)      0 |\n  [0.100,0.150)      1 |\n  [0.150,0.200)     28 |######\n  [0.200,0.250)    123 |#############################\n  [0.250,0.300)    169 |########################################\n  [0.300,0.350)    100 |#######################\n  [0.350,0.400)     54 |############\n  [0.400,0.450)     17 |####\n  [0.450,0.500)      7 |#\n  [0.500,0.550)      1 |\n  [0.550,0.600)      0 |\n  [0.600,0.650)      0 |\n  [0.650,0.700)      0 |\n  [0.700,0.750)      0 |\n  [0.750,0.800)      0 |\n  [0.800,0.850)      0 |\n  [0.850,0.900)      0 |\n  [0.900,0.950)      0 |\n  [0.950,1.000)      0 |"
+  }
+}

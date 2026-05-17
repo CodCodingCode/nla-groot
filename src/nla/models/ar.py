@@ -183,6 +183,7 @@ class ActivationReconstructor(nn.Module):
         target_activations: torch.Tensor,
         *,
         return_nce: bool = False,
+        negative_explanations: list[list[str]] | None = None,
     ) -> tuple[torch.Tensor, ...]:
         """Returns ``(mse, pred_scaled)``, or ``(mse, nce, pred_scaled)`` if
         ``return_nce=True``.
@@ -201,6 +202,22 @@ class ActivationReconstructor(nn.Module):
         precise failure mode that lets memorization slip through plain MSE on
         small training corpora.  With batch size 1 (smoke tests) we return a
         zero NCE term silently.
+
+        Hard-negative augmentation
+        --------------------------
+        ``negative_explanations`` is optional.  When provided as a
+        ``list[list[str]]`` of shape ``[B][K_neg]`` (K_neg may vary across
+        rows, but typically uniform), we tokenize each row's negatives,
+        compute AR predictions on them, and append per-row similarity
+        columns to the (B, B) softmax matrix, yielding a (B, B+K_neg)
+        logit matrix.  Each new column at ``[i, B+k]`` is the cosine
+        similarity ``cos(pred_scaled[i], pred_neg_scaled[i, k])``: AR
+        should reconstruct its own caption to an embedding that does
+        *not* coincide with what it would compute for a hard-negative
+        caption.  Standard cross-entropy with labels ``arange(B)``.
+
+        When ``negative_explanations is None`` the code path is byte-identical
+        to the random-in-batch-only baseline.
         """
         pred_scaled = self.forward(explanations, device=target_activations.device)
         target_scaled = (target_activations / self.cfg.alpha).to(pred_scaled.dtype)
@@ -227,6 +244,12 @@ class ActivationReconstructor(nn.Module):
                 target_scaled.unsqueeze(0),               # (1, B, H)
                 dim=-1,
             )                                             # (B, B), in [-1, 1]
+            if negative_explanations is not None:
+                sims_neg = self._hard_negative_sims(
+                    pred_scaled=pred_scaled,
+                    negative_explanations=negative_explanations,
+                )
+                sims = torch.cat([sims, sims_neg], dim=1)  # (B, B+K_neg)
             temp = max(1e-6, float(self.cfg.nce_temperature))
             sims = sims / temp
             labels = torch.arange(B, device=pred_scaled.device)
@@ -234,6 +257,43 @@ class ActivationReconstructor(nn.Module):
         else:
             nce = torch.zeros((), device=pred_scaled.device, dtype=mse.dtype)
         return mse, nce, pred_scaled
+
+    def _hard_negative_sims(
+        self,
+        *,
+        pred_scaled: torch.Tensor,
+        negative_explanations: list[list[str]],
+    ) -> torch.Tensor:
+        """Return ``(B, K_neg)`` cosine sims of pred[i] vs AR(negative[i,k]).
+
+        Requires every row to provide the same number of negatives so we can
+        run a single batched AR forward; we validate the shape here to fail
+        loudly rather than silently mis-aligning rows in the cat below.
+        """
+        B = pred_scaled.shape[0]
+        if len(negative_explanations) != B:
+            raise ValueError(
+                "negative_explanations must have one list per batch row; "
+                f"got {len(negative_explanations)} rows for batch size {B}."
+            )
+        k_per_row = {len(row) for row in negative_explanations}
+        if len(k_per_row) != 1:
+            raise ValueError(
+                "negative_explanations must be rectangular (same K_neg for "
+                f"every row); got row-lengths {sorted(k_per_row)}."
+            )
+        K_neg = next(iter(k_per_row))
+        if K_neg == 0:
+            return pred_scaled.new_zeros((B, 0))
+        flat = [neg for row in negative_explanations for neg in row]
+        pred_neg_flat = self.forward(flat, device=pred_scaled.device)  # (B*K_neg, H)
+        pred_neg = pred_neg_flat.view(B, K_neg, pred_neg_flat.shape[-1])
+        # cos(pred[i], pred_neg[i, k]) for each (i, k).
+        return nn.functional.cosine_similarity(
+            pred_scaled.unsqueeze(1),                 # (B, 1, H)
+            pred_neg,                                 # (B, K_neg, H)
+            dim=-1,
+        )
 
     # ------------------------------------------------------------------ save/load
 

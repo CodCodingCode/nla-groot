@@ -1,13 +1,20 @@
 #!/usr/bin/env python
 """Warm-start SFT for AV + AR.
 
-Example::
+Example (LIBERO smoke)::
 
     PYTHONPATH=src python scripts/training/run_sft.py \\
-        --activations-root data/activations/droid_smoke \\
-        --labels-jsonl     data/labels/droid_smoke/labels.jsonl \\
-        --output-dir       data/sft/droid_smoke \\
+        --activations-root data/activations/libero_goal_pilot \\
+        --labels-jsonl     data/labels/libero_goal_pilot/labels.jsonl \\
+        --stats-json       data/activations/libero_goal_pilot/stats.json \\
+        --output-dir       data/sft/libero_goal_pilot_smoke \\
         --batch-size 4 --total-steps 50 --eval-every 10
+
+The script is corpus-agnostic: substitute any extraction root + labels file
+produced by ``scripts/extraction/run_extract.py`` and
+``scripts/labeling/run_label.py``. Always pass ``--stats-json`` so AV/AR see
+the corpus-specific alpha (P75 norm); a mismatched alpha silently miscalibrates
+MSE and the closed-loop FVE.
 """
 
 from __future__ import annotations
@@ -52,6 +59,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ar-contrastive-weight", type=float, default=0.0,
                    help="If >0, add InfoNCE term to AR's SFT loss: penalize generic "
                         "descriptions AR can decode into ANY batch row.")
+    p.add_argument(
+        "--ar-nce-hard-negative-source",
+        choices=["none", "same_episode", "same_position_type", "topk_cosine"],
+        default="none",
+        help="Hard-negative mining for AR's InfoNCE term. 'none' (default) keeps "
+             "the legacy in-batch-only contrast. 'same_episode' samples K negatives "
+             "per anchor from the SAME episode but a DIFFERENT step (visually-similar "
+             "scene, different timestep). 'same_position_type' samples from a "
+             "DIFFERENT episode whose label has the same position_type. 'topk_cosine' "
+             "loads a precomputed JSONL of activation-cosine top-K neighbors (see "
+             "scripts/training/mine_hard_negatives.py); requires "
+             "--ar-nce-hard-negative-index-path. Requires --ar-contrastive-weight > 0 "
+             "to take effect.",
+    )
+    p.add_argument(
+        "--ar-nce-hard-negatives-per-anchor",
+        type=int,
+        default=4,
+        help="K_neg: number of hard-negative captions sampled per anchor when "
+             "--ar-nce-hard-negative-source != none.",
+    )
+    p.add_argument(
+        "--ar-nce-hard-negative-index-path",
+        default=None,
+        help="Path to the mining JSONL produced by mine_hard_negatives.py. Required "
+             "when --ar-nce-hard-negative-source=topk_cosine. Ignored otherwise.",
+    )
     p.add_argument("--use-quality-weights", action="store_true",
                    help="If set, multiply per-batch losses by mean(quality_weight) read "
                         "from labels.jsonl.  No-op until labels carry the field.")
@@ -63,6 +97,25 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Draw training rows with a WeightedRandomSampler so per-batch "
                         "position_type frequencies approximate layer_spec.POSITION_MIX "
                         "(40/40/20). Use when the labels file is skewed.")
+    p.add_argument(
+        "--image-patch-pooling",
+        choices=["pinned", "mean_pool_image", "strided_image", "center_image"],
+        default="pinned",
+        help="V4 image-patch pooling. 'pinned' (default) preserves V3 behaviour "
+             "(use the single labeled position_index per row). The non-pinned "
+             "options pool over every valid image-patch token at read time and "
+             "are applied ONLY to rows whose position_type == 'image_patch' "
+             "(last_text / anchor rows are untouched). Per "
+             "data/sft/libero_4suite_v3/v4_extraction_scorecard.json the "
+             "recommended V4 setting is 'mean_pool_image'.",
+    )
+    p.add_argument(
+        "--image-patch-pooling-strided-k",
+        type=int,
+        default=4,
+        help="K for --image-patch-pooling=strided_image (number of evenly-spaced "
+             "image-patch tokens to average). Ignored for other pooling modes.",
+    )
     p.add_argument("--min-bullets", type=int, default=None,
                    help="Drop labels whose description has fewer than this many '-' "
                         "bullet lines. Use to filter degenerate captions.")
@@ -78,9 +131,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--ar-av-mix-max",
         type=float,
-        default=0.0,
+        default=0.3,
         help="Scheduled sampling for AR only: after warmup, per-batch probability ramps "
-             "linearly up to this value (0 disables). AV CE always uses gold captions.",
+             "linearly up to this value (0 disables). AV CE always uses gold captions. "
+             "V3 default 0.3 (was 0.0); pass 0 to revert to gold-only.",
     )
     p.add_argument(
         "--ar-av-mix-warmup-frac",
@@ -178,6 +232,9 @@ def main(argv: list[str] | None = None) -> int:
         av_weight=args.av_weight,
         ar_weight=args.ar_weight,
         ar_contrastive_weight=args.ar_contrastive_weight,
+        ar_nce_hard_negative_source=args.ar_nce_hard_negative_source,
+        ar_nce_hard_negatives_per_anchor=args.ar_nce_hard_negatives_per_anchor,
+        ar_nce_hard_negative_index_path=args.ar_nce_hard_negative_index_path,
         use_quality_weights=args.use_quality_weights,
         split_by=args.split_by,
         allow_episode_split_row_fallback=not args.no_episode_split_fallback,
@@ -198,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
         ar_av_mix_max_new_tokens=args.ar_av_mix_max_new_tokens,
         ar_av_mix_do_sample=args.ar_av_mix_sample,
         ar_av_mix_log_text_every=args.ar_av_mix_log_text_every,
+        image_patch_pooling=args.image_patch_pooling,
+        image_patch_pooling_strided_k=args.image_patch_pooling_strided_k,
     )
     summary = run_sft(cfg)
     logging.info("SFT done. %s", summary)

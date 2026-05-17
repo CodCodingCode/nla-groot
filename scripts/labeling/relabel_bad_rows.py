@@ -13,17 +13,17 @@ forbids inventing categories).  Writes new rows to a resumable sidecar JSONL.
 Example::
 
     python scripts/labeling/relabel_bad_rows.py \\
-        --labels      data/labels/droid_100ep/labels.jsonl \\
-        --activations data/activations/droid_100ep \\
-        --sidecar     data/labels/droid_100ep/labels.relabel.jsonl \\
+        --labels      data/labels/libero_goal_pilot/labels.jsonl \\
+        --activations data/activations/libero_goal_pilot \\
+        --sidecar     data/labels/libero_goal_pilot/labels.relabel.jsonl \\
         --in-place
 
 If you already ran the API pass and just want to re-merge::
 
     python scripts/labeling/relabel_bad_rows.py \\
-        --labels  data/labels/droid_100ep/labels.jsonl \\
-        --activations data/activations/droid_100ep \\
-        --sidecar data/labels/droid_100ep/labels.relabel.jsonl \\
+        --labels  data/labels/libero_goal_pilot/labels.jsonl \\
+        --activations data/activations/libero_goal_pilot \\
+        --sidecar data/labels/libero_goal_pilot/labels.relabel.jsonl \\
         --merge-only
 """
 

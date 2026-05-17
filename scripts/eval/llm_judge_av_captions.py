@@ -10,23 +10,40 @@ Pipeline per sample:
 
 We then send the **same image(s)** the labeler saw to ``gpt-5.1`` (via the
 existing ``nla.labeling.grader.GPT51Grader`` infra) along with the candidate
-caption, and ask it to grade on two axes:
+caption, and ask it to grade on three axes:
 
-    Axis B -- GROUNDING:        specific vs generic
-    Axis C -- APPROPRIATENESS:  appropriate vs inappropriate
+    Axis B -- GROUNDING:                specific vs generic
+    Axis C -- APPROPRIATENESS:          appropriate vs inappropriate
+    Axis D -- TEMPLATE_DISTINGUISHABLE: specific vs template (anti-collapse)
+
+Axis D is the V3-specific anti-template-collapse axis. It is a stricter
+form of axis B: instead of "could this label describe a different scene?"
+it asks "would this exact caption verbatim also be a reasonable label for
+many *different but similar* manipulation scenes?". Pass = the caption
+commits to scene-fingerprinting details that wouldn't generalise; fail =
+the caption is reusable boilerplate that happens to mention the workspace.
+V2 had high axis-B pass but low axis-D pass because of template collapse.
 
 We grade *both* the gold label (sanity floor) and the AV-generated caption,
 so any drop from gold→pred is the AV's contribution.
 
-Usage::
+Usage (LIBERO)::
 
     OPENAI_API_KEY=... PYTHONPATH=src python scripts/eval/llm_judge_av_captions.py \
-        --ckpt-dir         data/sft/droid_100ep_v2_nce \
-        --activations-root data/activations/droid_100ep \
-        --labels-jsonl     data/labels/droid_100ep/labels.jsonl \
-        --frames-cache     data/labels/droid_100ep/frames_cache \
+        --ckpt-dir         data/sft/libero_goal_pilot_v3 \
+        --activations-root data/activations/libero_goal_pilot \
+        --labels-jsonl     data/labels/libero_goal_pilot/labels.jsonl \
+        --frames-cache     data/labels/libero_goal_pilot/frames_cache \
+        --video-keys       image wrist_image \
         --per-position     12 \
-        --out-jsonl        data/sft/droid_100ep_v2_nce/llm_judge.jsonl
+        --out-jsonl        data/sft/libero_goal_pilot_v3/llm_judge.jsonl
+
+``--video-keys`` is required: it lists the camera-key tokens used to build
+per-row image filenames ``{frames_cache}/{source_id}__{video_key}.jpg``.
+Pass the *exact* tokens your frame cache uses (e.g. ``image wrist_image``
+for LIBERO). The script silently drops any row whose tokens resolve to
+zero on-disk frames and logs a warning so an empty cache cannot
+masquerade as a real grade.
 
 Output:
     - JSONL row per (variant, sample) with full grade JSON.
@@ -46,16 +63,20 @@ from pathlib import Path
 import torch
 
 
-CAMERA_SUFFIXES = ("__exterior_1_left.jpg", "__wrist_left.jpg")
-
-
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--ckpt-dir", required=True)
     p.add_argument("--activations-root", required=True)
     p.add_argument("--labels-jsonl", required=True)
     p.add_argument("--frames-cache", required=True,
-                   help="Directory of cached camera frames as {source_id}__<cam>.jpg")
+                   help="Directory of cached camera frames as {source_id}__{video_key}.jpg")
+    p.add_argument("--video-keys", nargs="+", required=True,
+                   help="Camera-key tokens that compose per-row image filenames "
+                        "as {frames_cache}/{source_id}__{video_key}.jpg "
+                        "(e.g. 'image wrist_image' for LIBERO). The tokens must "
+                        "match what your labeling pipeline / extract_label_frames.py "
+                        "wrote into --frames-cache; rows that resolve to zero "
+                        "on-disk frames are dropped from grading.")
     p.add_argument("--per-position", type=int, default=12)
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--max-new-tokens", type=int, default=220)
@@ -72,10 +93,21 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _image_paths_for(source_id: str, frames_cache: Path) -> list[str]:
+def _image_paths_for(
+    source_id: str,
+    frames_cache: Path,
+    video_keys: list[str],
+) -> list[str]:
+    """Resolve cached frame files for ``source_id`` against ``video_keys``.
+
+    For each ``video_key`` we look up ``{frames_cache}/{source_id}__{video_key}.jpg``
+    and append it iff the file exists. Missing keys are silently skipped so a
+    partially-cached row still gets judged on the keys we do have. The caller
+    is responsible for dropping rows whose returned list is empty.
+    """
     paths: list[str] = []
-    for suffix in CAMERA_SUFFIXES:
-        candidate = frames_cache / f"{source_id}{suffix}"
+    for key in video_keys:
+        candidate = frames_cache / f"{source_id}__{key}.jpg"
         if candidate.exists():
             paths.append(str(candidate))
     return paths
@@ -102,7 +134,12 @@ def _instruction_lookup_from_labels(labels_path: Path) -> dict[str, str]:
 
 
 def _summarize(rows: list[dict]) -> dict:
-    """Aggregate grade rows by (variant_id, position_type)."""
+    """Aggregate grade rows by (variant_id, position_type).
+
+    Reports per-bucket pass rates on all three axes. Axis D's denominator
+    only counts rows whose row actually has axis D populated, so a partial
+    backfill of legacy B/C-only grades doesn't artificially deflate it.
+    """
     by_key: dict[tuple[str, str], list[dict]] = {}
     for r in rows:
         key = (r["variant_id"], r.get("position_type") or "_unk")
@@ -111,12 +148,28 @@ def _summarize(rows: list[dict]) -> dict:
     summary: dict = {}
     for (variant, ptype), bucket in sorted(by_key.items()):
         n = len(bucket)
-        b_pass = sum(1 for r in bucket if (r.get("grounding") or {}).get("verdict") == "specific")
-        c_pass = sum(1 for r in bucket if (r.get("appropriateness") or {}).get("verdict") == "appropriate")
+        b_pass = sum(
+            1 for r in bucket
+            if (r.get("grounding") or {}).get("verdict") == "specific"
+        )
+        c_pass = sum(
+            1 for r in bucket
+            if (r.get("appropriateness") or {}).get("verdict") == "appropriate"
+        )
+        d_rows = [r for r in bucket if r.get("template_distinguishable")]
+        n_d = len(d_rows)
+        d_pass = sum(
+            1 for r in d_rows
+            if (r.get("template_distinguishable") or {}).get("verdict") == "specific"
+        )
         summary[f"{variant}/{ptype}"] = {
             "n": n,
             "grounding_specific_pct": b_pass / n if n else None,
             "appropriateness_appropriate_pct": c_pass / n if n else None,
+            "n_template": n_d,
+            "template_distinguishable_specific_pct": (
+                d_pass / n_d if n_d else None
+            ),
         }
     return summary
 
@@ -169,7 +222,7 @@ async def _amain(args) -> int:
         viable = []
         for i in chosen:
             entry = val_ds.labels[i]
-            ipaths = _image_paths_for(entry.source_example_id, frames_cache)
+            ipaths = _image_paths_for(entry.source_example_id, frames_cache, args.video_keys)
             if ipaths:
                 viable.append((i, ipaths))
         if len(viable) < len(chosen):
@@ -256,13 +309,23 @@ async def _amain(args) -> int:
 
     summary = _summarize(rows)
     print("\n" + "=" * 78)
-    print("Aggregate verdicts  (grounding=specific%   appropriateness=appropriate%)")
+    print(
+        "Aggregate verdicts  "
+        "(B=grounding-specific%   C=appropriate%   D=template-distinguishable-specific%)"
+    )
     print("=" * 78)
     for k in sorted(summary):
         s = summary[k]
         b = s["grounding_specific_pct"]
         c = s["appropriateness_appropriate_pct"]
-        print(f"  {k:<32}  n={s['n']:>3}  B={b*100:5.1f}%   C={c*100:5.1f}%")
+        d = s["template_distinguishable_specific_pct"]
+        b_s = f"{b*100:5.1f}%" if b is not None else "  n/a"
+        c_s = f"{c*100:5.1f}%" if c is not None else "  n/a"
+        d_s = f"{d*100:5.1f}%" if d is not None else "  n/a"
+        print(
+            f"  {k:<32}  n={s['n']:>3}  B={b_s}   C={c_s}   "
+            f"D={d_s} (n={s['n_template']})"
+        )
 
     print("\n" + "=" * 78)
     print(f"Side-by-side judgements (first {args.print_n} samples)")
@@ -276,14 +339,26 @@ async def _amain(args) -> int:
         print(f"instruction: {s['instruction']}")
         gold_g = (gold.get("grounding") or {})
         gold_a = (gold.get("appropriateness") or {})
+        gold_d = (gold.get("template_distinguishable") or {})
         pred_g = (pred.get("grounding") or {})
         pred_a = (pred.get("appropriateness") or {})
-        print(f"[GOLD]   B={gold_g.get('verdict','?'):<10}  C={gold_a.get('verdict','?')}")
+        pred_d = (pred.get("template_distinguishable") or {})
+        print(
+            f"[GOLD]   B={gold_g.get('verdict','?'):<10}  "
+            f"C={gold_a.get('verdict','?'):<14}  "
+            f"D={gold_d.get('verdict','?')}"
+        )
         print(f"         B-reason: {gold_g.get('reason','')}")
         print(f"         C-reason: {gold_a.get('reason','')}")
-        print(f"[AV]     B={pred_g.get('verdict','?'):<10}  C={pred_a.get('verdict','?')}")
+        print(f"         D-reason: {gold_d.get('reason','')}")
+        print(
+            f"[AV]     B={pred_g.get('verdict','?'):<10}  "
+            f"C={pred_a.get('verdict','?'):<14}  "
+            f"D={pred_d.get('verdict','?')}"
+        )
         print(f"         B-reason: {pred_g.get('reason','')}")
         print(f"         C-reason: {pred_a.get('reason','')}")
+        print(f"         D-reason: {pred_d.get('reason','')}")
         # Show first 2 bullets of gold + generated for orientation
         def _first2(text):
             return "\n           ".join(text.strip().splitlines()[:2])

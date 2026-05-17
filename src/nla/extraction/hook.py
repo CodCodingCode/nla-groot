@@ -160,3 +160,132 @@ def attach_hooks(
     finally:
         handle.remove()
         hook._handle = None
+
+
+# ---------------------------------------------------------------------------
+# Intermediate-layer capture (V4 image-patch A/B sweep, layer axis).
+# ---------------------------------------------------------------------------
+
+class IntermediateLayerHook:
+    """Capture the output of a *specific* Qwen3 decoder layer (e.g. layer 8 or 12).
+
+    The GR00T ``Qwen3Backbone`` wrapper truncates layers below
+    ``SELECT_LAYER`` at construction time and only ever returns the final
+    layer's hidden states in ``backbone_features``. To probe layers
+    8 / 12 without editing vendored GR00T code we register a forward hook
+    on the matching ``DecoderLayer`` module directly:
+
+        backbone.model.language_model.layers[layer_idx]
+
+    The decoder layer's forward returns ``(hidden_states, ...)`` (tuple)
+    in HF Transformers >= 4.40; this hook handles both the tuple and
+    bare-tensor cases so it survives small upstream API drift.
+
+    For the V4 sweep we pair this with a parallel ``BackboneFeatureHook``
+    on the wrapper to inherit ``attention_mask`` and ``image_mask``
+    (which depend only on ``input_ids``, so they're identical across
+    layers).
+
+    Usage::
+
+        wrapper_hook   = BackboneFeatureHook()
+        layer8_hook    = IntermediateLayerHook(layer_idx=8)
+        layer12_hook   = IntermediateLayerHook(layer_idx=12)
+        with attach_hooks(backbone, wrapper_hook), \\
+             layer8_hook.attach(backbone), \\
+             layer12_hook.attach(backbone):
+            _ = backbone(batch_feature)
+        h_layer8  = layer8_hook.last     # [B, T, H]
+        h_layer16 = wrapper_hook.last.features
+
+    Notes
+    -----
+    * The hook is attached to the *decoder block* (post-MLP residual
+      output), not the attention sub-block — this matches what
+      ``hidden_states[k]`` would have been if GR00T didn't truncate
+      layers.
+    * Captured tensors are detached + (optionally) moved to CPU + cast
+      to ``store_dtype`` to mirror ``BackboneFeatureHook`` behavior.
+    """
+
+    def __init__(
+        self,
+        layer_idx: int,
+        *,
+        to_cpu: bool = True,
+        store_dtype: torch.dtype | None = torch.float32,
+    ) -> None:
+        if layer_idx < 0:
+            raise ValueError(f"layer_idx must be non-negative, got {layer_idx}")
+        self.layer_idx = int(layer_idx)
+        self.to_cpu = to_cpu
+        self.store_dtype = store_dtype
+        self.last: torch.Tensor | None = None
+        self._handle: torch.utils.hooks.RemovableHandle | None = None
+
+    def __call__(
+        self,
+        module: nn.Module,
+        inputs: tuple[Any, ...],
+        output: Any,
+    ) -> None:
+        if isinstance(output, tuple):
+            hidden_states = output[0]
+        else:
+            hidden_states = output
+        assert hidden_states.ndim == 3, (
+            f"IntermediateLayerHook(layer_idx={self.layer_idx}): expected "
+            f"hidden_states of shape [B, T, H], got {tuple(hidden_states.shape)}"
+        )
+
+        h = hidden_states.detach()
+        if self.store_dtype is not None:
+            h = h.to(dtype=self.store_dtype)
+        if self.to_cpu:
+            h = h.cpu()
+        self.last = h.contiguous()
+
+    def clear(self) -> None:
+        self.last = None
+
+    def _resolve_layer_module(self, backbone: nn.Module) -> nn.Module:
+        """Walk ``backbone.model.language_model.layers[layer_idx]``.
+
+        Kept as a small helper so the lookup path is centralized; if the
+        GR00T wrapper's attribute tree changes we only edit one place.
+        """
+        try:
+            layers = backbone.model.language_model.layers  # type: ignore[attr-defined]
+        except AttributeError as e:
+            raise AttributeError(
+                "IntermediateLayerHook: could not find "
+                "backbone.model.language_model.layers; check that the "
+                "module passed in is a Qwen3Backbone wrapper."
+            ) from e
+        n = len(layers)
+        if self.layer_idx >= n:
+            raise IndexError(
+                f"IntermediateLayerHook: layer_idx={self.layer_idx} but the "
+                f"backbone only has {n} layers (likely because the wrapper "
+                f"truncated above SELECT_LAYER). "
+                "Load the wrapper with select_layer >= layer_idx + 1."
+            )
+        return layers[self.layer_idx]
+
+    @contextlib.contextmanager
+    def attach(self, backbone: nn.Module) -> Iterator["IntermediateLayerHook"]:
+        """Register on ``backbone.model.language_model.layers[layer_idx]``.
+
+        Composes cleanly with ``attach_hooks`` for the wrapper:
+
+            with attach_hooks(backbone, wrap_hook), layer_hook.attach(backbone):
+                ...
+        """
+        layer = self._resolve_layer_module(backbone)
+        handle = layer.register_forward_hook(self)
+        self._handle = handle
+        try:
+            yield self
+        finally:
+            handle.remove()
+            self._handle = None

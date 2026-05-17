@@ -22,25 +22,94 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from nla.labeling.prompts import (
     LabelInput,
     PositionLabelInput,
     build_position_prompt,
     build_step_prompt,
+    build_strict_position_prompt,
 )
 
 logger = logging.getLogger(__name__)
 
 
 DEFAULT_MODEL = os.environ.get("OPENAI_LABELING_MODEL", "gpt-5.1-mini")
+
+
+# ---------------------------------------------------------------------------
+# Position-prompt builder dispatch.
+#
+# Production labeling has historically called ``build_position_prompt`` (V3)
+# unconditionally.  Phase-1 LIBERO repair (May-2026; see
+# ``docs/sft_plan/v4_repair/``) introduces a V4 builder that drops the
+# ``gripper`` / ``motion`` / ``image_region`` headers, bans scaffold-leakage
+# phrases, and conditions the last bullet on the position type.  We dispatch
+# to the right builder based on ``NLA_POSITION_PROMPT_MODE`` (or the
+# ``--prompt-mode`` CLI flag, which sets the env var before pipeline import)
+# so the same labeling pipeline can re-label data under either prompt.
+# ---------------------------------------------------------------------------
+
+_PROMPT_MODE = os.environ.get("NLA_POSITION_PROMPT_MODE", "v3").lower()
+
+
+def _select_position_builder(mode: str | None = None) -> Callable:
+    """Return the position-prompt builder for the requested mode.
+
+    ``mode`` defaults to the current ``NLA_POSITION_PROMPT_MODE`` env var (or
+    ``"v3"``) so callers and tests can override it dynamically without
+    re-importing the module.  Unknown modes silently fall back to V3 so a
+    typo in the env var never crashes a long-running label job.
+    """
+    if mode is None:
+        mode = os.environ.get("NLA_POSITION_PROMPT_MODE", _PROMPT_MODE)
+    mode = (mode or "v3").lower()
+    if mode in ("v4", "v4_position", "v4-position"):
+        from nla.labeling.prompts import build_v4_position_prompt
+        return build_v4_position_prompt
+    if mode in ("strict", "v3_strict"):
+        return build_strict_position_prompt
+    return build_position_prompt
+
+
+def _call_position_builder(
+    builder: Callable,
+    inp: PositionLabelInput,
+) -> tuple[str, str]:
+    """Invoke a position-prompt builder, threading ``suite`` if it accepts one.
+
+    V3 builders (``build_position_prompt``, ``build_strict_position_prompt``)
+    take only ``(inp,)``; the V4 builder also accepts ``suite=...``.  We probe
+    the signature once and fall back to the unary call on a ``TypeError`` so
+    a custom builder that rejects unexpected kwargs still works.
+    """
+    suite = getattr(inp, "suite", None)
+    if suite is not None:
+        try:
+            params = inspect.signature(builder).parameters
+        except (TypeError, ValueError):
+            params = None
+        accepts_suite = (
+            params is not None
+            and (
+                "suite" in params
+                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            )
+        )
+        if accepts_suite:
+            try:
+                return builder(inp, suite=suite)
+            except TypeError:
+                pass
+    return builder(inp)
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +158,8 @@ def _build_messages(inp) -> tuple[list[dict], str, dict]:
     Returns ``(messages, kind, meta_for_logging)``.
     """
     if isinstance(inp, PositionLabelInput):
-        sys_p, user_p = build_position_prompt(inp)
+        builder = _select_position_builder()
+        sys_p, user_p = _call_position_builder(builder, inp)
         image_paths = inp.image_paths
         kind = "position"
         meta = {

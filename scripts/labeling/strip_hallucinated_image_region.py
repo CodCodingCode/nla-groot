@@ -46,7 +46,7 @@ Example
 ::
 
     PYTHONPATH=src python scripts/labeling/strip_hallucinated_image_region.py \\
-        --labels data/labels/droid_100ep/labels.jsonl \\
+        --labels data/labels/libero_goal_pilot/labels.jsonl \\
         --match patch_or_layout \\
         --dry-run
 """

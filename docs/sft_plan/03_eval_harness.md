@@ -24,7 +24,7 @@
 | 4 | **LLM judge vs frames** (`gold` + `av_pred`, **B** grounding / **C** appropriateness) | **Scene-specific** language vs camera — **must-run** for interpretability claims | **`scripts/eval/llm_judge_av_captions.py`** |
 | 5 | **Train vs val FVE/CE gap** | Memorization | future / `train_fve_subsample` |
 | 6 | **Greedy vs sampled closed-loop** (e.g. 0.0 vs 0.7) | Collapse / entropy at AV | `closed_loop_temperatures` on SFT; GRPO eval |
-| 7 | **Stratified FVE** by `position_type` | image_patch vs text vs anchor | `StratifiedFve` |
+| 7 | **Stratified FVE** by `position_type` | image_patch vs text vs anchor | `StratifiedFve` (uses per-dim batch-mean baseline as of 2026-05; see note below) |
 | 8 | **Samples dump** | Cheap eyeball | **`scripts/eval/dump_av_samples.py`** (ad hoc; not auto every `eval_every` yet) |
 
 ### Nice-to-have for run #1 (cheap, ship if time permits)
@@ -93,6 +93,8 @@ quality, but the headline NLA metric is **closed-loop**: `h → AV → text → 
 even if the AV is talking to itself.
 
 **Status (2026-05+):** (2) and (3) are satisfied for SFT via **`--eval-closed-loop`** and **`closed_loop_temperatures`** (metrics prefixed `closed_greedy/`, `closed_t…/`). Shared refactor into `nla.eval.recon` may still happen. (1) rename to `tf/*` in logs is **not** done — mentally treat default `fve`/`cosine` as teacher-forced. **Additionally:** run **`llm_judge_av_captions.py`** — reconstruction alone is not enough (**`06_v2_postmortem_v3_rerun.md`**).
+
+**FVE definition note (2026-05):** `_StreamingFve` was previously using a single scalar grand-mean over batch × hidden dims as the FVE baseline, which silently disagreed with the per-dimension batch-mean definition in the module docstring and inflated `fve` vs the documented formula. As of the V4 audit pass it accumulates per-dim sums and matches `fve_per_token` exactly (see `tests/test_fve.py`). `mse` and `cosine` are unchanged. Pre-fix `fve` numbers (e.g. anything written to `data/sft/libero_4suite_v3/metrics.jsonl`) used the global-mean baseline and are **not** directly comparable to post-fix values; rationale and algebra live in `docs/sft_plan/v4_training_recon_audit.md` §4.1.
 
 Legacy three-item list for history:
 

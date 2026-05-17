@@ -1,0 +1,6 @@
+- scene: tabletop kitchen with a wine bottle, a wine rack with horizontal slats, and an overhead robot gripper.
+- target: the wine rack is the destination receptacle for the wine bottle.
+- distractor: a bowl and plate sit on the table but are not the goal.
+- gripper: open and reaching toward the wine bottle from above.
+- spatial: wine bottle in the back of the workspace, wine rack to the right rear.
+- task: pick up the wine bottle and place it on the wine rack.
