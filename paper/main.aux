@@ -1,0 +1,113 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{frasertaliente2026nla}
+\citation{nvidia2025gr00t,brohan2023rt2,kim2024openvla}
+\citation{alain2017linear,belinkov2022probing}
+\citation{cunningham2023sparseautoencoders,bricken2023monosemanticity}
+\citation{turner2023actadd,zou2023repe}
+\citation{frasertaliente2026nla}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{The NLA recipe, on a VLA.}{1}{section.1}\protected@file@percent }
+\citation{nvidia2025gr00t}
+\citation{brohan2023rt2}
+\citation{kim2024openvla}
+\citation{octo2024}
+\citation{alain2017linear}
+\citation{cunningham2023sparseautoencoders,bricken2023monosemanticity,templeton2024scaling}
+\citation{frasertaliente2026nla}
+\citation{turner2023actadd,zou2023repe,liu2024incontext,panickssery2024steering}
+\citation{liu2023libero}
+\citation{frasertaliente2026nla}
+\@writefile{toc}{\contentsline {paragraph}{Contributions.}{2}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Thesis.}{2}{Item.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Background and related work}{2}{section.2}\protected@file@percent }
+\newlabel{sec:related}{{2}{2}{Background and related work}{section.2}{}}
+\@writefile{toc}{\contentsline {paragraph}{Vision--language--action policies.}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Activation interpretability.}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Activation steering.}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Robotic simulation benchmarks.}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Method}{3}{section.3}\protected@file@percent }
+\newlabel{sec:method}{{3}{3}{Method}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Data: extraction and labeling}{3}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Architecture: \textsc  {AV}{} and \textsc  {AR}{}}{3}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\textsc  {AV}{}: activation \(\to \) text.}{3}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\textsc  {AR}{}: text \(\to \) activation.}{3}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Training}{3}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Joint SFT.}{3}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Optional GRPO phase.}{3}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Steering: language \(\to \) live policy}{3}{subsection.3.4}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Data flow in \texttt  {\small  nla-groot}. Solid arrows are training paths; dashed arrows are inference / steering paths. \textsc  {AR}{} doubles as the GRPO reward model and as the source of the live backbone steering vector.\relax }}{4}{figure.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:overview}{{1}{4}{Data flow in \code {nla-groot}. Solid arrows are training paths; dashed arrows are inference / steering paths. \AR {} doubles as the GRPO reward model and as the source of the live backbone steering vector.\relax }{figure.caption.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Evaluation harness}{4}{section.4}\protected@file@percent }
+\newlabel{sec:eval}{{4}{4}{Evaluation harness}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Axis 1 -- Offline reconstruction and discriminability}{4}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Axis 2 -- Multimodal LLM judge}{4}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Axis 3 -- Closed-loop steerability A/B}{4}{subsection.4.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces V3 scorecard (\texttt  {\small  libero\_4suite\_v3}). Thresholds are pre-registered in \texttt  {\small  build\_v3\_scorecard.py}. Required metrics determine the \emph  {overall} verdict; the overall verdict is \textbf  {FAIL}.\relax }}{5}{table.caption.2}\protected@file@percent }
+\newlabel{tab:scorecard}{{1}{5}{V3 scorecard (\code {libero\_4suite\_v3}). Thresholds are pre-registered in \code {build\_v3\_scorecard.py}. Required metrics determine the \emph {overall} verdict; the overall verdict is \textbf {FAIL}.\relax }{table.caption.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Experiments and results}{5}{section.5}\protected@file@percent }
+\newlabel{sec:results}{{5}{5}{Experiments and results}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Setup}{5}{subsection.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Scorecard}{5}{subsection.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}AV captions vs.\ teacher (judge)}{5}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}Closed-loop steerability}{5}{subsection.5.4}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Multimodal judge: gold (teacher) vs.\ \textsc  {AV}{} captions, pass rates on a 24-row held-out sample per dataset. Numbers from \texttt  {\small  data/eval/steerability\_v1\_vs\_v3/av\_metrics.json}.\relax }}{6}{table.caption.3}\protected@file@percent }
+\newlabel{tab:av-judge}{{2}{6}{Multimodal judge: gold (teacher) vs.\ \AV {} captions, pass rates on a 24-row held-out sample per dataset. Numbers from \code {data/eval/steerability\_v1\_vs\_v3/av\_metrics.json}.\relax }{table.caption.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces LIBERO Goal closed-loop steerability on \texttt  {\small  put\_the\_bowl\_on\_the\_plate}, three seeds. ``Target winner rate'' is the fraction of seeds in which the maximum-displaced tracked body was the one named by the steer prompt.\relax }}{6}{table.caption.4}\protected@file@percent }
+\newlabel{tab:steer}{{3}{6}{LIBERO Goal closed-loop steerability on \code {put\_the\_bowl\_on\_the\_plate}, three seeds. ``Target winner rate'' is the fraction of seeds in which the maximum-displaced tracked body was the one named by the steer prompt.\relax }{table.caption.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Reading the results}{6}{subsection.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{(i) Reconstruction passes; behavior does not.}{6}{subsection.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{(ii) Shorthand template collapse persists in V3.}{6}{subsection.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{(iii) Steering bites, but is not yet semantic.}{6}{subsection.5.5}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Per-tracked-body summaries across conditions on \texttt  {\small  put\_the\_bowl\_on\_the\_plate}. Baseline (left bar in each group) is the only condition with task-typical bowl displacement; every steering arm dampens motion approximately uniformly.\relax }}{7}{figure.caption.5}\protected@file@percent }
+\newlabel{fig:displacement}{{2}{7}{Per-tracked-body summaries across conditions on \code {put\_the\_bowl\_on\_the\_plate}. Baseline (left bar in each group) is the only condition with task-typical bowl displacement; every steering arm dampens motion approximately uniformly.\relax }{figure.caption.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Limitations}{7}{section.6}\protected@file@percent }
+\newlabel{sec:limitations}{{6}{7}{Limitations}{section.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}Discussion and outlook}{7}{section.7}\protected@file@percent }
+\newlabel{sec:discussion}{{7}{7}{Discussion and outlook}{section.7}{}}
+\bibstyle{plainnat}
+\bibdata{refs}
+\bibcite{alain2017linear}{{1}{2017}{{Alain and Bengio}}{{}}}
+\bibcite{belinkov2022probing}{{2}{2022}{{Belinkov}}{{}}}
+\bibcite{bricken2023monosemanticity}{{3}{2023}{{Bricken et~al.}}{{}}}
+\bibcite{brohan2023rt2}{{4}{2023}{{Brohan et~al.}}{{}}}
+\bibcite{cunningham2023sparseautoencoders}{{5}{2023}{{Cunningham et~al.}}{{Cunningham, Ewart, Riggs, Huben, and Sharkey}}}
+\bibcite{frasertaliente2026nla}{{6}{2026}{{Fraser-Taliente et~al.}}{{}}}
+\bibcite{kim2024openvla}{{7}{2024}{{Kim et~al.}}{{}}}
+\bibcite{liu2023libero}{{8}{2023}{{Liu et~al.}}{{Liu, Zhu, Gao, Feng, Liu, Zhu, and Stone}}}
+\bibcite{liu2024incontext}{{9}{2024}{{Liu et~al.}}{{Liu, Ye, Xing, and Zou}}}
+\bibcite{nvidia2025gr00t}{{10}{2025}{{NVIDIA}}{{}}}
+\bibcite{octo2024}{{11}{2024}{{Octo Model Team}}{{}}}
+\bibcite{panickssery2024steering}{{12}{2024}{{Panickssery et~al.}}{{Panickssery, Gabrieli, Schulz, Tong, Hubinger, and Turner}}}
+\bibcite{templeton2024scaling}{{13}{2024}{{Templeton et~al.}}{{}}}
+\bibcite{turner2023actadd}{{14}{2023}{{Turner et~al.}}{{Turner, Thiergart, Udell, Leech, Mini, and MacDiarmid}}}
+\bibcite{zou2023repe}{{15}{2023}{{Zou et~al.}}{{}}}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Reproducibility appendix}{9}{appendix.A}\protected@file@percent }
+\newlabel{app:repro}{{A}{9}{Reproducibility appendix}{appendix.A}{}}
+\@writefile{toc}{\contentsline {paragraph}{Hardware.}{9}{appendix.A}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Software.}{9}{appendix.A}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Checkpoint identifiers.}{9}{appendix.A}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Canonical commands.}{9}{appendix.A}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Hyperparameters.}{9}{appendix.A}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Non-default SFT hyperparameters for \texttt  {\small  libero\_4suite\_v3}.\relax }}{9}{table.caption.6}\protected@file@percent }
+\newlabel{tab:hp}{{4}{9}{Non-default SFT hyperparameters for \code {libero\_4suite\_v3}.\relax }{table.caption.6}{}}
+\@writefile{toc}{\contentsline {paragraph}{Scorecard schema.}{9}{table.caption.6}\protected@file@percent }
+\gdef \@abspage@last{9}

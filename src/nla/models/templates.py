@@ -43,13 +43,53 @@ AV_PROMPT_TEMPLATE = (
 )
 
 
+# Intent-conditioned variant used by sim-success GRPO. The model receives the
+# usual scene activation AND a target task it should make the policy execute.
+# The bullet structure mirrors the descriptive template so the AR (trained on
+# bullet-style targets) sees a familiar surface form, but the *content* shifts
+# toward "what would have to be in this activation for the policy to do the
+# target task" rather than "what is in this activation now."
+AV_PROMPT_INTENT_CONDITIONED_TEMPLATE = (
+    "You are interpretability tooling for the GR00T N1.7 vision-language-action "
+    "robot model. You are shown one internal backbone activation, plus a target "
+    "task you want the policy to execute next.\n"
+    "Position type: {position_type}.\n"
+    "Activation: " + AV_SLOT_PLACEHOLDER + "\n"
+    "Target task: {target_intent}\n"
+    "Write a 5-6 bullet description (one per line, '- <category>: <content>.'). "
+    "Use these categories in order: scene, target, distractor, gripper, spatial, "
+    "task. The last bullet ('- task:') must be the imperative for the target "
+    "task above, phrased exactly as the model's instruction would say it. "
+    "Write the bullets so that, if an activation reconstructor mapped this "
+    "text back into backbone space, the resulting vector would make the policy "
+    "execute the target task in this scene.\n"
+    "Bullets:"
+)
+
+
 # AR template — keep verbatim so the head's pick-off position is stable.
 AR_PROMPT_TEMPLATE = "Summary of the following text: <text>{explanation}</text> <summary>"
 
 
-def render_av_prompt(position_type: PositionType) -> str:
-    """Substitute the position type into the AV template (slot stays as marker)."""
-    return AV_PROMPT_TEMPLATE.format(position_type=position_type)
+def render_av_prompt(
+    position_type: PositionType,
+    *,
+    target_intent: str | None = None,
+) -> str:
+    """Substitute the position type (and optional target intent) into the AV prompt.
+
+    When ``target_intent`` is None the legacy descriptive template is used
+    (byte-identical to pre-intent code). When provided, the intent-conditioned
+    variant is used; this is the prompt path GRPO sim-reward training takes
+    so the AV produces a rollout aimed at the target task rather than a
+    generic description of the current scene.
+    """
+    if target_intent is None:
+        return AV_PROMPT_TEMPLATE.format(position_type=position_type)
+    return AV_PROMPT_INTENT_CONDITIONED_TEMPLATE.format(
+        position_type=position_type,
+        target_intent=target_intent.strip(),
+    )
 
 
 def render_ar_prompt(explanation: str) -> str:

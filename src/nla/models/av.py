@@ -225,8 +225,13 @@ class ActivationVerbalizer(nn.Module):
         position_types: list[PositionType],
         target_texts: list[str] | None,
         device: torch.device | None = None,
+        target_intent_texts: list[str] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
         """Tokenize each (prompt, optional target) pair.
+
+        When ``target_intent_texts`` is provided (length must match B), the
+        intent-conditioned AV template is used instead of the legacy
+        descriptive one. This is the path sim-success GRPO takes.
 
         Returns
         -------
@@ -237,15 +242,19 @@ class ActivationVerbalizer(nn.Module):
         """
         device = device or self.device
         slot_id = self.cfg.slot_token_id
+        if target_intent_texts is not None and len(target_intent_texts) != len(position_types):
+            raise ValueError(
+                f"target_intent_texts length {len(target_intent_texts)} "
+                f"must match position_types length {len(position_types)}"
+            )
 
         encoded_ids: list[list[int]] = []
         encoded_labels: list[list[int]] = []
         slot_indices: list[int] = []
 
         for b, pos_type in enumerate(position_types):
-            # Render with the placeholder, then substitute the runtime slot
-            # token string so the tokenizer turns it into a single id.
-            prompt = render_av_prompt(pos_type).replace(
+            intent = None if target_intent_texts is None else target_intent_texts[b]
+            prompt = render_av_prompt(pos_type, target_intent=intent).replace(
                 AV_SLOT_PLACEHOLDER, self.cfg.slot_token_str
             )
             prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
@@ -333,14 +342,22 @@ class ActivationVerbalizer(nn.Module):
         top_p: float | None = None,
         do_sample: bool = True,
         return_logprobs: bool = False,
+        target_intent_texts: list[str] | None = None,
     ) -> dict:
-        """Sampling rollout used both for inference and GRPO."""
+        """Sampling rollout used both for inference and GRPO.
+
+        When ``target_intent_texts`` is provided (one string per row), the
+        intent-conditioned AV prompt is used instead of the descriptive one.
+        This is the path sim-success GRPO uses to condition the rollout on
+        the target task the policy should learn to execute.
+        """
         max_new_tokens = max_new_tokens or self.cfg.max_new_tokens
         temperature = temperature if temperature is not None else self.cfg.generation_temperature
         top_p = top_p if top_p is not None else self.cfg.generation_top_p
 
         input_ids, attention_mask, _, slot_indices = self._tokenize_prompts(
             position_types, target_texts=None, device=activations.device,
+            target_intent_texts=target_intent_texts,
         )
         embeds = self._embed_with_injection(input_ids, attention_mask, slot_indices, activations)
 
@@ -378,12 +395,20 @@ class ActivationVerbalizer(nn.Module):
         position_types: list[PositionType],
         gen_token_ids: torch.Tensor,
         gen_attention_mask: torch.Tensor,
+        *,
+        target_intent_texts: list[str] | None = None,
     ) -> torch.Tensor:
         """Differentiable per-token log probs of ``gen_token_ids`` under this AV.
 
         Used by GRPO to compute the policy gradient term (with grad) and the
         KL anchor (no grad). Activation injection follows the same single-slot
         recipe as ``forward_sft`` / ``generate``.
+
+        When ``target_intent_texts`` is provided (one string per row), the
+        intent-conditioned AV prompt is used. The caller MUST pass the same
+        ``target_intent_texts`` that ``generate`` used to produce
+        ``gen_token_ids``, otherwise the score-time prompt won't match the
+        rollout-time prompt and logprobs will be meaningless.
 
         Args:
             activations:        ``(B, H)`` raw activation vectors.
@@ -402,6 +427,10 @@ class ActivationVerbalizer(nn.Module):
         device = activations.device
         B = activations.shape[0]
         assert B == len(position_types) == gen_token_ids.shape[0]
+        if target_intent_texts is not None and len(target_intent_texts) != B:
+            raise ValueError(
+                f"target_intent_texts length {len(target_intent_texts)} != B={B}"
+            )
         T_gen = gen_token_ids.shape[1]
         slot_id = self.cfg.slot_token_id
 
@@ -412,7 +441,8 @@ class ActivationVerbalizer(nn.Module):
         rows_score_start: list[int] = []
         rows_gen_lens: list[int] = []
         for b in range(B):
-            prompt = render_av_prompt(position_types[b]).replace(
+            intent = None if target_intent_texts is None else target_intent_texts[b]
+            prompt = render_av_prompt(position_types[b], target_intent=intent).replace(
                 AV_SLOT_PLACEHOLDER, self.cfg.slot_token_str
             )
             prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)

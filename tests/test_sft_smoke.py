@@ -357,3 +357,81 @@ def test_run_sft_logs_ar_mix_and_nce(tmp_path: Path, monkeypatch):
     # Dead NCE baseline at B=2 is ln(2); final row should be comfortably below.
     final_ar_nce = float(train_rows[-1]["ar_nce"])
     assert final_ar_nce < (math.log(cfg.batch_size) - 0.01)
+
+
+def test_run_sft_with_action_consistency_kernel_logs_diagnostics(
+    tmp_path: Path, monkeypatch
+):
+    """λ>0 A/B vs λ=0: kernel diagnostics surface in metrics.jsonl when
+    a (fake) kernel is wired in. Validates the splice in run_sft's train loop
+    without requiring real GR00T."""
+    _write_synthetic_dump(tmp_path / "act", n_examples=4)
+    _write_synthetic_labels(
+        tmp_path / "labels.jsonl",
+        [
+            ("traj0_step0000", 3, "- scene: a\n- target: b"),
+            ("traj0_step0001", 5, "- scene: c\n- target: d"),
+            ("traj0_step0002", 7, "- scene: e\n- target: f"),
+            ("traj0_step0003", 9, "- scene: g\n- target: h"),
+        ],
+    )
+
+    av_template, ar_template = _make_tiny_models(alpha=5.0)
+
+    def _fake_build_models(_cfg):
+        return av_template, ar_template
+
+    monkeypatch.setattr("nla.training.sft._build_models", _fake_build_models)
+
+    class _StubKernel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def consistency_loss(self, *, descriptions, example_ids, position_types):
+            from nla.training.action_head_consistency import ActionConsistencyDiagnostics
+
+            self.calls += 1
+            param = next(ar_template.parameters())
+            loss = (param.float().abs().mean() * 0.0)  # zero but grad-carrying
+            diag = ActionConsistencyDiagnostics(
+                n_rows=len(descriptions), loss=0.0, baseline_cache_misses=len(descriptions),
+            )
+            return loss + 0.123, diag
+
+    stub = _StubKernel()
+    monkeypatch.setattr(
+        "nla.training.sft._build_action_consistency_kernel",
+        lambda *_, **__: stub,
+    )
+
+    cfg = SFTConfig(
+        activations_root=str(tmp_path / "act"),
+        labels_jsonl=str(tmp_path / "labels.jsonl"),
+        output_dir=str(tmp_path / "sft_out_ahc"),
+        av_cfg=AVConfig(activation_dim=TINY_ACTIVATION_DIM, alpha=5.0, dtype="float32"),
+        ar_cfg=ARConfig(activation_dim=TINY_ACTIVATION_DIM, alpha=5.0, dtype="float32",
+                        truncate_to_n_layers=1),
+        device="cpu",
+        batch_size=2,
+        total_steps=4,
+        warmup_steps=1,
+        eval_every=1000,
+        save_every=10_000,
+        log_every=1,
+        held_out_fraction=0.25,
+        gradient_checkpointing=False,
+        action_consistency_weight=0.5,
+        action_consistency_every_n_steps=1,
+    )
+    run_sft(cfg)
+
+    metrics = [
+        json.loads(l)
+        for l in (tmp_path / "sft_out_ahc" / "metrics.jsonl").read_text().splitlines()
+        if l.strip()
+    ]
+    train_rows = [r for r in metrics if r.get("phase") == "train"]
+    assert train_rows
+    assert all("action_consistency_loss" in r for r in train_rows)
+    assert all(r["action_consistency_n_rows"] > 0 for r in train_rows)
+    assert stub.calls == len(train_rows)

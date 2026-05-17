@@ -18,7 +18,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -144,7 +144,7 @@ def run_one_rollout(
     seed: int,
     policy_host: str,
     policy_port: int,
-    output_dir: Path,
+    output_dir: Path | None,
     tracked_bodies: list[str],
     target_body: str | None,
     n_action_steps: int = 8,
@@ -152,11 +152,34 @@ def run_one_rollout(
     fps: int = 20,
     suppress_done: bool = True,
     steps_per_render: int = 1,
+    *,
+    options: dict[str, Any] | None = None,
+    early_stop_on_predicate: Callable[[dict[str, Any]], bool] | None = None,
+    early_stop_check_every: int = 1,
+    capture_frames: bool = True,
+    return_trajectory: bool = False,
 ) -> dict[str, Any]:
+    """Run one LIBERO rollout against a (possibly NLA-steered) policy server.
+
+    Optional parameters added for sim-reward GRPO use:
+
+    - ``options``: passed verbatim to every ``client.get_action(obs, options)``
+      call. The NLA wrapper reads ``options["steer_h"]`` per request so a
+      single server can score many different (text, intent) pairs.
+    - ``early_stop_on_predicate``: callable that takes the *partial*
+      :class:`ObjectStateLogger.to_dict()` trajectory and returns True to
+      cut the rollout short. Used by the GRPO worker to abort as soon as
+      the steered intent's predicate fires.
+    - ``early_stop_check_every``: skip the predicate check for ``N-1`` out
+      of every ``N`` sim steps; checks are cheap (numpy) but not free.
+    - ``capture_frames`` / ``return_trajectory``: turn off MP4/parquet
+      writes when used as a reward function (we only care about the score).
+    """
     from gr00t.policy.server_client import PolicyClient
     from nla.eval.steerability.object_logger import ObjectStateLogger, episode_summary
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
     env = make_env(env_name, suppress_done=suppress_done)
     client = PolicyClient(host=policy_host, port=policy_port, timeout_ms=120_000)
     obs, info = env.reset(seed=seed)
@@ -165,10 +188,12 @@ def run_one_rollout(
     frames: list[np.ndarray] = []
 
     t = 0
-    frames.append(render_panel(obs, success=bool(info.get("success", False)), t=t))
+    if capture_frames:
+        frames.append(render_panel(obs, success=bool(info.get("success", False)), t=t))
 
+    early_stopped = False
     while t < max_episode_steps:
-        action_chunk, _ = client.get_action(_to_server_obs(obs))
+        action_chunk, _ = client.get_action(_to_server_obs(obs), options=options)
         sub_actions = _unpack_action_chunk(action_chunk, n_action_steps=n_action_steps)
         if not sub_actions:
             break
@@ -176,17 +201,29 @@ def run_one_rollout(
             obs, reward, done, truncated, info = env.step(sub_action)
             logger.log_step(reward=reward, info=info)
             t += 1
-            if t % steps_per_render == 0:
+            if capture_frames and t % steps_per_render == 0:
                 frames.append(render_panel(obs, success=bool(info.get("success", False)), t=t))
             if t >= max_episode_steps:
                 break
             if done or truncated:
                 break
+            if early_stop_on_predicate is not None and (t % early_stop_check_every == 0):
+                try:
+                    if early_stop_on_predicate(logger.to_dict()):
+                        early_stopped = True
+                        break
+                except Exception:
+                    # Never let predicate evaluation crash a rollout.
+                    pass
+        if early_stopped:
+            break
 
     # Write artifacts
-    parquet_path = output_dir / "trajectory.parquet"
-    logger.write_parquet(parquet_path)
-    encode_mp4(frames, output_dir / "rollout.mp4", fps=fps)
+    if output_dir is not None:
+        parquet_path = output_dir / "trajectory.parquet"
+        logger.write_parquet(parquet_path)
+        if capture_frames:
+            encode_mp4(frames, output_dir / "rollout.mp4", fps=fps)
 
     traj = logger.to_dict()
     summary = episode_summary(traj, target_body=target_body)
@@ -196,9 +233,13 @@ def run_one_rollout(
         "n_action_steps": n_action_steps,
         "max_episode_steps": max_episode_steps,
         "target_body": target_body,
+        "early_stopped": bool(early_stopped),
     })
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=float))
+    if output_dir is not None:
+        (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=float))
     env.close()
+    if return_trajectory:
+        summary["_trajectory"] = traj
     return summary
 
 
@@ -209,8 +250,11 @@ def _cli() -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--policy-host", default="localhost")
     parser.add_argument("--policy-port", type=int, default=5555)
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--tracked-bodies", nargs="+", required=True)
+    parser.add_argument("--output-dir", default=None,
+                        help="If set, write trajectory.parquet/rollout.mp4/summary.json.")
+    parser.add_argument("--tracked-bodies", nargs="+", default=None,
+                        help="If unset and --target-task is set, the default tracked-bodies "
+                             "for the resolved task spec are used.")
     parser.add_argument("--target-body", default=None)
     parser.add_argument("--n-action-steps", type=int, default=8)
     parser.add_argument("--max-episode-steps", type=int, default=300)
@@ -218,22 +262,101 @@ def _cli() -> None:
     parser.add_argument("--steps-per-render", type=int, default=1)
     parser.add_argument("--suppress-done", action="store_true", default=True)
     parser.add_argument("--no-suppress-done", dest="suppress_done", action="store_false")
+    parser.add_argument(
+        "--steer-h-path", default=None,
+        help="Path to a .npy file with a [H]-shaped float32 steer vector. "
+             "When set, sent as options['steer_h'] on every get_action call.",
+    )
+    parser.add_argument(
+        "--steer-placement", default=None,
+        choices=["last_text", "image_patch", "anchor", "image_patch_all", "fixed"],
+        help="Per-call override for the steer placement (NlaSteerGr00tPolicy "
+             "reads this via options['steer_spec'].placement).",
+    )
+    parser.add_argument(
+        "--steer-blend", type=float, default=None,
+        help="Per-call override for the steer blend factor [0, 1].",
+    )
+    parser.add_argument(
+        "--target-task", default=None,
+        help="Canonical LIBERO Goal task id whose predicate + dense shaping "
+             "should be added to the printed summary. When set, an "
+             "'r_sim' field appears in the JSON output with the combined "
+             "reward score.",
+    )
+    parser.add_argument(
+        "--early-stop-on-success", action="store_true",
+        help="Break the rollout as soon as the target-task predicate fires "
+             "(only meaningful when --target-task is set).",
+    )
+    parser.add_argument(
+        "--no-frames", action="store_true",
+        help="Skip MP4 frame capture (saves ~30% wall time on long rollouts).",
+    )
     args = parser.parse_args()
+
+    # Resolve tracked-bodies from the target task spec when omitted.
+    tracked_bodies = list(args.tracked_bodies) if args.tracked_bodies else []
+    target_task = args.target_task
+    if target_task and not tracked_bodies:
+        from nla.eval.steerability.predicates import tracked_bodies_for
+        tracked_bodies = tracked_bodies_for(target_task)
+    if not tracked_bodies:
+        raise SystemExit(
+            "--tracked-bodies is required (or --target-task must resolve to a "
+            "task in nla.eval.steerability.predicates.GOAL_TASKS)"
+        )
+
+    options: dict[str, object] | None = None
+    if args.steer_h_path:
+        arr = np.load(args.steer_h_path).astype(np.float32, copy=False)
+        options = {"steer_h": arr}
+        if args.steer_placement is not None or args.steer_blend is not None:
+            spec_dict: dict[str, object] = {}
+            if args.steer_placement is not None:
+                spec_dict["placement"] = args.steer_placement
+            if args.steer_blend is not None:
+                spec_dict["blend"] = float(args.steer_blend)
+            options["steer_spec"] = spec_dict
+
+    early_stop_cb = None
+    if args.early_stop_on_success and target_task:
+        from nla.eval.steerability.predicates import predicate_fires, resolve_task
+        spec = resolve_task(target_task)
+        def _cb(traj: dict, _spec=spec) -> bool:
+            return predicate_fires(traj, _spec)
+        early_stop_cb = _cb
 
     summary = run_one_rollout(
         env_name=args.env_name,
         seed=args.seed,
         policy_host=args.policy_host,
         policy_port=args.policy_port,
-        output_dir=Path(args.output_dir),
-        tracked_bodies=list(args.tracked_bodies),
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        tracked_bodies=tracked_bodies,
         target_body=args.target_body,
         n_action_steps=args.n_action_steps,
         max_episode_steps=args.max_episode_steps,
         fps=args.fps,
         steps_per_render=args.steps_per_render,
         suppress_done=args.suppress_done,
+        options=options,
+        early_stop_on_predicate=early_stop_cb,
+        capture_frames=not args.no_frames,
+        return_trajectory=bool(target_task),
     )
+
+    if target_task:
+        from nla.eval.steerability.predicates import score as predicate_score
+        traj = summary.pop("_trajectory", None)
+        if traj is not None:
+            score_breakdown = predicate_score(traj, target_task)
+            summary["r_sim"] = score_breakdown["r"]
+            summary["sim_score_breakdown"] = score_breakdown
+        else:
+            summary["r_sim"] = None
+            summary["sim_score_breakdown"] = None
+
     print(json.dumps(summary, indent=2, default=float))
 
 

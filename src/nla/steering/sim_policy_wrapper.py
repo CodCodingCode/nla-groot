@@ -24,11 +24,19 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import torch
 
 from gr00t.policy.policy import BasePolicy, PolicyWrapper
 
 from nla.steering.backbone_steer import SteerSpec, attach_backbone_steer
+
+# Keys we look for in the per-call ``options`` dict. The bytes variants exist
+# because msgpack_numpy decodes string keys as bytes when ``raw=True``; we use
+# ``raw=False`` in MsgSerializer.from_bytes but still defend against both forms.
+_STEER_H_KEYS = ("steer_h", b"steer_h")
+_STEER_SPEC_KEYS = ("steer_spec", b"steer_spec")
+_STEER_DISABLE_KEYS = ("steer_disabled", b"steer_disabled")
 
 
 def _resolve_inner_backbone(policy: BasePolicy) -> torch.nn.Module:
@@ -107,12 +115,98 @@ class NlaSteerGr00tPolicy(PolicyWrapper):
     def _get_action(
         self, observation: dict[str, Any], options: dict[str, Any] | None = None
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        if not self._enabled:
+        steer_vec, spec, disabled = self._resolve_per_call(options)
+        if disabled or (not self._enabled and steer_vec is None):
             return self.policy._get_action(observation, options)
+        if steer_vec is None:
+            steer_vec = self._steer_vec
+        if spec is None:
+            spec = self._spec
         with attach_backbone_steer(
             self._backbone,
-            self._steer_vec,
-            self._spec,
+            steer_vec,
+            spec,
             batch_index=self._batch_index,
         ):
             return self.policy._get_action(observation, options)
+
+    # ------------------------------------------------------------------ helpers
+
+    def _resolve_per_call(
+        self,
+        options: dict[str, Any] | None,
+    ) -> tuple[torch.Tensor | None, SteerSpec | None, bool]:
+        """Pull a request-scoped steer vector / spec / disable flag out of ``options``.
+
+        Returns ``(steer_vec_or_None, spec_or_None, disabled_bool)``. When a
+        client passes nothing, both are ``None`` and we fall back to the
+        startup vector / spec stored on the wrapper. This is the path the
+        GRPO sim-reward worker uses: send one ``steer_h`` per call so a
+        single server can score thousands of different intents without restart.
+        """
+        if not options:
+            return None, None, False
+        disabled = False
+        for k in _STEER_DISABLE_KEYS:
+            if k in options:
+                disabled = bool(options[k])
+                break
+        steer_vec: torch.Tensor | None = None
+        for k in _STEER_H_KEYS:
+            if k in options and options[k] is not None:
+                steer_vec = self._coerce_steer_vec(options[k])
+                break
+        spec: SteerSpec | None = None
+        for k in _STEER_SPEC_KEYS:
+            if k in options and options[k] is not None:
+                spec = self._coerce_spec(options[k])
+                break
+        return steer_vec, spec, disabled
+
+    @staticmethod
+    def _coerce_steer_vec(raw: Any) -> torch.Tensor:
+        """Accept numpy float arrays, lists, or torch tensors. Returns CPU float [H]."""
+        if isinstance(raw, torch.Tensor):
+            t = raw
+        elif isinstance(raw, np.ndarray):
+            t = torch.from_numpy(raw)
+        else:
+            t = torch.tensor(np.asarray(raw, dtype=np.float32))
+        t = t.detach().float().cpu().contiguous()
+        if t.dim() == 2 and t.shape[0] == 1:
+            t = t.squeeze(0)
+        if t.dim() != 1:
+            raise ValueError(
+                f"options['steer_h'] must be a 1-D vector (or [1, H]); got shape {tuple(t.shape)}"
+            )
+        return t
+
+    def _coerce_spec(self, raw: Any) -> SteerSpec:
+        """Accept either a SteerSpec or a dict (msgpack round-trips dicts).
+
+        Missing fields fall back to the wrapper's startup ``self._spec`` so
+        callers can override just ``placement``/``blend`` without re-supplying
+        everything.
+        """
+        if isinstance(raw, SteerSpec):
+            return raw
+        if not isinstance(raw, dict):
+            raise TypeError(
+                f"options['steer_spec'] must be SteerSpec or dict; got {type(raw)!r}"
+            )
+
+        def _get(d: dict, name: str, default: Any) -> Any:
+            for k in (name, name.encode("utf-8")):
+                if k in d:
+                    v = d[k]
+                    if isinstance(v, bytes):
+                        return v.decode("utf-8")
+                    return v
+            return default
+
+        return SteerSpec(
+            placement=_get(raw, "placement", self._spec.placement),
+            blend=float(_get(raw, "blend", self._spec.blend)),
+            fixed_token_index=_get(raw, "fixed_token_index", self._spec.fixed_token_index),
+            image_patch_seed=int(_get(raw, "image_patch_seed", self._spec.image_patch_seed)),
+        )

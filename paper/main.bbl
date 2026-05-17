@@ -1,0 +1,101 @@
+\begin{thebibliography}{15}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Alain and Bengio(2017)]{alain2017linear}
+Guillaume Alain and Yoshua Bengio.
+\newblock Understanding intermediate layers using linear classifier probes.
+\newblock In \emph{ICLR Workshop}, 2017.
+
+\bibitem[Belinkov(2022)]{belinkov2022probing}
+Yonatan Belinkov.
+\newblock Probing classifiers: Promises, shortcomings, and advances.
+\newblock \emph{Computational Linguistics}, 48\penalty0 (1), 2022.
+
+\bibitem[Bricken et~al.(2023)]{bricken2023monosemanticity}
+Trenton Bricken et~al.
+\newblock Towards monosemanticity: Decomposing language models with dictionary
+  learning.
+\newblock \emph{Transformer Circuits Thread}, 2023.
+
+\bibitem[Brohan et~al.(2023)]{brohan2023rt2}
+Anthony Brohan et~al.
+\newblock {RT-2}: Vision-language-action models transfer web knowledge to
+  robotic control.
+\newblock In \emph{Conference on Robot Learning (CoRL)}, 2023.
+
+\bibitem[Cunningham et~al.(2023)Cunningham, Ewart, Riggs, Huben, and
+  Sharkey]{cunningham2023sparseautoencoders}
+Hoagy Cunningham, Aidan Ewart, Logan Riggs, Robert Huben, and Lee Sharkey.
+\newblock Sparse autoencoders find highly interpretable features in language
+  models.
+\newblock \emph{arXiv preprint arXiv:2309.08600}, 2023.
+
+\bibitem[Fraser-Taliente et~al.(2026)]{frasertaliente2026nla}
+Connor Fraser-Taliente et~al.
+\newblock Natural language autoencoders produce unsupervised explanations of
+  {LLM} activations.
+\newblock \emph{Transformer Circuits Thread}, 2026.
+\newblock Anthropic interpretability dispatch.
+
+\bibitem[Kim et~al.(2024)]{kim2024openvla}
+Moo~Jin Kim et~al.
+\newblock {OpenVLA}: An open-source vision-language-action model.
+\newblock In \emph{Conference on Robot Learning (CoRL)}, 2024.
+
+\bibitem[Liu et~al.(2023)Liu, Zhu, Gao, Feng, Liu, Zhu, and
+  Stone]{liu2023libero}
+Bo~Liu, Yifeng Zhu, Chongkai Gao, Yihao Feng, Qiang Liu, Yuke Zhu, and Peter
+  Stone.
+\newblock {LIBERO}: Benchmarking knowledge transfer for lifelong robot
+  learning.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)
+  Datasets and Benchmarks Track}, 2023.
+
+\bibitem[Liu et~al.(2024)Liu, Ye, Xing, and Zou]{liu2024incontext}
+Sheng Liu, Haotian Ye, Lei Xing, and James Zou.
+\newblock In-context vectors: Making in context learning more effective and
+  controllable through latent space steering.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2024.
+
+\bibitem[{NVIDIA}(2025)]{nvidia2025gr00t}
+{NVIDIA}.
+\newblock {GR00T-N1}: An open foundation model for generalist humanoid robots.
+\newblock \emph{arXiv preprint}, 2025.
+\newblock Public checkpoints: nvidia/GR00T-N1.7-3B, nvidia/GR00T-N1.7-LIBERO.
+
+\bibitem[{Octo Model Team}(2024)]{octo2024}
+{Octo Model Team}.
+\newblock {Octo}: An open-source generalist robot policy.
+\newblock \emph{arXiv preprint arXiv:2405.12213}, 2024.
+
+\bibitem[Panickssery et~al.(2024)Panickssery, Gabrieli, Schulz, Tong, Hubinger,
+  and Turner]{panickssery2024steering}
+Nina Panickssery, Nick Gabrieli, Julian Schulz, Meg Tong, Evan Hubinger, and
+  Alexander~Matt Turner.
+\newblock Steering llama 2 via contrastive activation addition.
+\newblock In \emph{Annual Meeting of the Association for Computational
+  Linguistics (ACL)}, 2024.
+
+\bibitem[Templeton et~al.(2024)]{templeton2024scaling}
+Adly Templeton et~al.
+\newblock Scaling monosemanticity: Extracting interpretable features from
+  {Claude 3 Sonnet}.
+\newblock \emph{Transformer Circuits Thread}, 2024.
+
+\bibitem[Turner et~al.(2023)Turner, Thiergart, Udell, Leech, Mini, and
+  MacDiarmid]{turner2023actadd}
+Alexander~Matt Turner, Lisa Thiergart, David Udell, Gavin Leech, Ulisse Mini,
+  and Monte MacDiarmid.
+\newblock Activation addition: Steering language models without optimization.
+\newblock \emph{arXiv preprint arXiv:2308.10248}, 2023.
+
+\bibitem[Zou et~al.(2023)]{zou2023repe}
+Andy Zou et~al.
+\newblock Representation engineering: A top-down approach to {AI} transparency.
+\newblock \emph{arXiv preprint arXiv:2310.01405}, 2023.
+
+\end{thebibliography}

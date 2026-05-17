@@ -1,0 +1,69 @@
+% System overview figure for nla-groot.
+% Solid arrows: training signal. Dashed arrows: inference / steering.
+\begin{tikzpicture}[
+    >=Latex,
+    font=\small,
+    node distance=10mm and 14mm,
+    every node/.style={align=center},
+    box/.style={rectangle, draw, rounded corners=2pt,
+                minimum height=8mm, minimum width=20mm, align=center,
+                inner sep=3pt},
+    bigbox/.style={box, fill=black!3, minimum height=11mm,
+                   minimum width=24mm},
+    inflow/.style={->, thick},
+    steerflow/.style={->, thick, dashed},
+    lbl/.style={midway, font=\scriptsize, align=center,
+                fill=white, inner sep=1pt}
+  ]
+
+  % Top row: extraction pipeline.
+  \node[box]                       (frame)  {Camera frame\\+ instruction};
+  \node[box, right=of frame]       (groot)  {GR00T\\backbone};
+  \node[bigbox, right=of groot]    (h)      {$\hvec\in\mathbb{R}^{2048}$\\layer 16};
+
+  % Teacher labeling above h.
+  \node[box, above=of h]           (teacher){Multimodal\\teacher (GPT)};
+  \node[box, right=of teacher]     (gold)   {Gold caption\\(bullets)};
+
+  % AV and AR in the centre.
+  \node[bigbox, below=14mm of h]   (AV)     {\AV{}\\(LoRA Qwen3-4B)};
+  \node[bigbox, right=20mm of AV]  (text)   {$y$ (text)};
+  \node[bigbox, right=of text]     (AR)     {\AR{}\\(LoRA Qwen3-4B,\\16 layers)};
+  \node[bigbox, right=of AR]       (hhat)   {$\hhat$};
+
+  % Down-stream: live policy server + sim.
+  \node[box, below=14mm of AR]     (server) {GR00T policy\\server};
+  \node[box, right=of server]      (sim)    {LIBERO\\sim client};
+
+  % Extraction edges.
+  \draw[inflow] (frame) -- (groot);
+  \draw[inflow] (groot) -- (h);
+  \draw[inflow] (frame.north) |- (teacher.west);
+  \draw[inflow] (teacher) -- (gold);
+
+  % Training: h -> AV; gold supervises AV (CE).
+  \draw[inflow] (h.south) -| (AV.north);
+  \draw[inflow] (gold.south) .. controls +(-1.5,-0.5) and +(0,1.0) ..
+    (AV.north east) node[lbl, above right=1mm and 0mm] {CE on $y_\star$};
+
+  % Training: gold -> AR -> hhat; MSE against h.
+  \draw[inflow] (gold.east) -| (AR.north);
+  \draw[inflow] (AR) -- (hhat);
+  \draw[inflow, bend right=18] (hhat.north) to
+    node[lbl, above] {MSE in $\hvec/\alpha$ space} (h.east);
+
+  % AV -> text -> AR at inference (and AR-AV-mix during late SFT).
+  \draw[steerflow] (AV) -- (text);
+  \draw[steerflow] (text) -- (AR);
+
+  % Steering: AR -> server -> sim.
+  \draw[steerflow] (AR.south) -- (server.north)
+    node[lbl, right] {inject in backbone};
+  \draw[steerflow] (server) -- (sim);
+
+  % Optional GRPO loop: AR is the reward.
+  \draw[steerflow] (hhat.south) .. controls +(0,-1.2) and +(1,0) ..
+    (AV.east) node[lbl, below right=1mm and 1mm]
+    {reward $-\|\hvec/\alpha - \hhat\|^2$ (GRPO)};
+
+\end{tikzpicture}

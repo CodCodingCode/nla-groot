@@ -26,6 +26,26 @@ Example (LIBERO, recon + multimodal-judge blend)::
         --judge-reward-weight 0.5 \\
         --frames-cache       data/labels/libero_goal_pilot/frames_cache \\
         --judge-video-keys   image wrist_image
+
+Example (LIBERO, sim-success steerability GRPO)::
+
+    # 1) Launch a long-running NlaSteerGr00tPolicy server in another shell:
+    #    python scripts/eval/run_gr00t_server_nla_steer.py --ar-dir data/sft/libero_goal_pilot_v3/ar
+    # 2) Mine counterfactual (scene, target_intent) pairs:
+    #    python scripts/training/mine_grpo_counterfactual_pairs.py \\
+    #        --labels      data/labels/libero_4suite_combined/labels.jsonl \\
+    #        --output      data/grpo/cf_pairs.jsonl
+    # 3) Train:
+    PYTHONPATH=src python scripts/training/run_grpo.py \\
+        --sft-dir          data/sft/libero_4suite_v3 \\
+        --activations-root data/activations/libero_4suite_combined \\
+        --output-dir       data/grpo/libero_4suite_v3_sim \\
+        --beta 0.02 --total-steps 200 --rollouts-per-activation 4 \\
+        --sim-reward-weight 0.5 \\
+        --sim-counterfactual-pairs-path data/grpo/cf_pairs.jsonl \\
+        --sim-policy-host localhost --sim-policy-port 5555 \\
+        --sim-n-workers 4 --sim-max-steps 100 \\
+        --sim-placement image_patch --sim-blend 1.0
 """
 
 from __future__ import annotations
@@ -113,6 +133,69 @@ def _build_parser() -> argparse.ArgumentParser:
                         "pass 'image wrist_image'; the tokens must match what "
                         "your labeling pipeline / extract_label_frames.py wrote.")
 
+    # Sim-success reward (Framing B). Off by default; setting weight=0
+    # keeps a baseline GRPO run byte-identical to pre-sim code.
+    p.add_argument("--sim-reward-weight", type=float, default=0.0,
+                   help="Blend coefficient for the LIBERO sim-success reward "
+                        "(0 = no sim term, 1 = pure sim). When > 0, requires "
+                        "--sim-counterfactual-pairs-path and a running "
+                        "NlaSteerGr00tPolicy server reachable at "
+                        "--sim-policy-host:--sim-policy-port. The per-rollout "
+                        "score combines a binary predicate (e.g. on/under/in) "
+                        "with dense shaping from "
+                        "nla.eval.steerability.predicates.")
+    p.add_argument("--sim-counterfactual-pairs-path", default=None,
+                   help="JSONL of {source_example_id, target_intent, "
+                        "target_task, target_env_name, ...} rows produced by "
+                        "scripts/training/mine_grpo_counterfactual_pairs.py.")
+    p.add_argument("--sim-policy-host", default="localhost")
+    p.add_argument("--sim-policy-port", type=int, default=5555,
+                   help="ZMQ port the NlaSteerGr00tPolicy server is listening "
+                        "on. The trainer fans out short rollouts to this one "
+                        "server; the server should have been launched with the "
+                        "same AR your SFT dir holds.")
+    p.add_argument("--sim-n-workers", type=int, default=4,
+                   help="Number of concurrent in-flight LIBERO rollouts per "
+                        "GRPO step. Each worker is one subprocess holding one "
+                        "ZMQ client connection.")
+    p.add_argument("--sim-max-steps", type=int, default=100,
+                   help="Max simulator steps per rollout (capped further by "
+                        "early-stop-on-predicate). Short rollouts speed up "
+                        "GRPO at the cost of weaker sparse signal; 100 ~= "
+                        "30s of robot motion on LIBERO Goal.")
+    p.add_argument("--sim-placement", default="image_patch",
+                   choices=["last_text", "image_patch", "anchor", "image_patch_all", "fixed"],
+                   help="Per-step steer placement sent to the policy server "
+                        "via options['steer_spec'].placement.")
+    p.add_argument("--sim-blend", type=float, default=1.0,
+                   help="Per-step steer blend factor sent to the policy "
+                        "server via options['steer_spec'].blend; lambda=1 is "
+                        "full overwrite, lambda=0.5 mixes the original "
+                        "activation 50/50 with the AR-decoded one.")
+    p.add_argument("--sim-cache-path", default=None,
+                   help="JSONL cache of sim rewards keyed by sha1(env|task|"
+                        "source_id|text|seed|max_steps).")
+    p.add_argument("--sim-rollout-python", default=None,
+                   help="Python interpreter to invoke the rollout subprocess "
+                        "with. Defaults to $NLA_ROLLOUT_PYTHON or the trainer's "
+                        "current interpreter. Production runs typically point "
+                        "this at the LIBERO venv.")
+    p.add_argument("--sim-rollout-script", default=None,
+                   help="Path to rollout.py (default: in-tree "
+                        "src/nla/eval/steerability/rollout.py).")
+    p.add_argument("--sim-timeout-s", type=float, default=240.0,
+                   help="Per-rollout subprocess timeout (kill + score 0 on "
+                        "timeout). 240s comfortably covers a 100-step "
+                        "LIBERO Goal rollout including env reset.")
+    p.add_argument("--sim-seed-base", type=int, default=0,
+                   help="Per-rollout seed = sim_seed_base + step*9973 + i.")
+    p.add_argument("--no-intent-conditioned-prompt", action="store_true",
+                   help="By default sim-GRPO uses an intent-conditioned AV "
+                        "prompt (see AV_PROMPT_INTENT_CONDITIONED_TEMPLATE) "
+                        "so the policy AV learns to write text targeted at a "
+                        "task. Pass this to fall back to the descriptive prompt "
+                        "for ablations.")
+
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--log-level", default="INFO")
@@ -148,6 +231,12 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 "--judge-reward-weight > 0 requires OPENAI_API_KEY in the environment."
             )
+
+    if args.sim_reward_weight > 0.0 and not args.sim_counterfactual_pairs_path:
+        raise SystemExit(
+            "--sim-reward-weight > 0 requires --sim-counterfactual-pairs-path "
+            "(produced by scripts/training/mine_grpo_counterfactual_pairs.py)."
+        )
 
     cfg = GRPOConfig(
         sft_dir=args.sft_dir,
@@ -185,6 +274,20 @@ def main(argv: list[str] | None = None) -> int:
         judge_cache_path=args.judge_cache_path,
         frames_cache=args.frames_cache,
         judge_video_keys=list(args.judge_video_keys) if args.judge_video_keys else [],
+        sim_reward_weight=args.sim_reward_weight,
+        sim_counterfactual_pairs_path=args.sim_counterfactual_pairs_path,
+        sim_policy_host=args.sim_policy_host,
+        sim_policy_port=args.sim_policy_port,
+        sim_n_workers=args.sim_n_workers,
+        sim_max_steps=args.sim_max_steps,
+        sim_placement=args.sim_placement,
+        sim_blend=args.sim_blend,
+        sim_cache_path=args.sim_cache_path,
+        sim_rollout_python=args.sim_rollout_python,
+        sim_rollout_script=args.sim_rollout_script,
+        sim_timeout_s=args.sim_timeout_s,
+        sim_seed_base=args.sim_seed_base,
+        use_intent_conditioned_prompt=not args.no_intent_conditioned_prompt,
     )
     summary = run_grpo(cfg)
     logging.info("GRPO done. %s", summary)

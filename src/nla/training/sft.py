@@ -192,6 +192,36 @@ class SFTConfig:
     ] = "pinned"
     image_patch_pooling_strided_k: int = 4
 
+    # ---- Action-head consistency (Phase B scaffolding, see
+    # ``src/nla/training/action_head_consistency.py`` and
+    # ``docs/sft_plan/09_action_head_lora_phase1.md``).
+    #
+    # Default 0.0 keeps SFT byte-identical to V3/V4 baseline; the kernel
+    # module is only imported when the weight is > 0.
+    action_consistency_weight: float = 0.0
+    # Run the consistency forward every N optimizer steps (1 = every step).
+    action_consistency_every_n_steps: int = 8
+    # Number of rows from the SFT batch that participate in the consistency
+    # forward; the policy forward is the dominant per-step cost on a single
+    # GPU, so we keep this small by default.
+    action_consistency_max_microbatch: int = 1
+    # When True, only feed rows whose ``position_type == "image_patch"``
+    # into the consistency forward. This matches the steering placement
+    # (image_patch_all) so the training-time loss is faithful to the
+    # eval-time intervention.
+    action_consistency_image_patch_only: bool = True
+    # Path to a frozen GR00T checkpoint that gets used for the policy
+    # forward.  Required when ``action_consistency_weight > 0``.
+    action_consistency_policy_path: str | None = None
+    # GR00T embodiment tag for the policy loader (e.g. "LIBERO_PANDA").
+    action_consistency_embodiment_tag: str | None = None
+    # JSON mapping ``{"<suite>": "<lerobot_dataset_root>"}`` (use the empty
+    # string as the suite key for single-suite dumps without a prefix).
+    action_consistency_dataset_roots: dict[str, str] | None = None
+    # Where to cache the replay manifest JSONL (defaults to
+    # ``<output_dir>/aux/replay_manifest.jsonl``).
+    action_consistency_manifest_cache: str | None = None
+
 
 def _setup_outputs(out_dir: Path) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -448,6 +478,89 @@ def _evaluate(
     return metrics
 
 
+def _build_action_consistency_kernel(cfg: SFTConfig, ar, out_dir: Path):
+    """Build the action-head consistency kernel when enabled.
+
+    Returns ``None`` when the consistency loss is disabled so the train loop
+    can skip every related branch in O(1). Imports the kernel module lazily so
+    that ``run_sft`` doesn't pull in GR00T-adjacent code when the auxiliary
+    objective is off.
+    """
+    if cfg.action_consistency_weight <= 0.0:
+        return None
+    if not cfg.action_consistency_policy_path:
+        raise ValueError(
+            "action_consistency_weight > 0 requires --action-consistency-policy-path "
+            "to point at a frozen GR00T checkpoint."
+        )
+    if not cfg.action_consistency_dataset_roots:
+        raise ValueError(
+            "action_consistency_weight > 0 requires --action-consistency-dataset-roots "
+            "(JSON mapping suite -> LeRobot dataset root)."
+        )
+
+    from nla.training.action_head_consistency import (
+        ActionConsistencyConfig,
+        ActionConsistencyKernel,
+    )
+    from nla.training.replay_manifest import build_replay_manifest
+
+    cache = (
+        Path(cfg.action_consistency_manifest_cache)
+        if cfg.action_consistency_manifest_cache
+        else out_dir / "aux" / "replay_manifest.jsonl"
+    )
+    roots: dict[str | None, str] = {}
+    for k, v in (cfg.action_consistency_dataset_roots or {}).items():
+        # Treat the empty string as "no suite prefix" (single-suite dumps).
+        roots[None if not k else str(k)] = str(v)
+    manifest = build_replay_manifest(
+        cfg.activations_root, roots, cache_path=cache,
+    )
+
+    # Defer GR00T import to the policy loader so we can fail loudly only if
+    # the kernel actually fires.
+    def _policy_loader():
+        from nla.steering.sim_policy_wrapper import _load_gr00t_modules  # type: ignore[attr-defined]
+        # The eval/sim entrypoints already centralize policy construction;
+        # we reuse the public surface (``Gr00tPolicy``) here.
+        from gr00t.experiment.data_config import DATA_CONFIG_MAP
+        from gr00t.model.policy import Gr00tPolicy
+
+        modality_configs = DATA_CONFIG_MAP[cfg.action_consistency_embodiment_tag].modality_config()
+        return Gr00tPolicy(
+            model_path=cfg.action_consistency_policy_path,
+            embodiment_tag=cfg.action_consistency_embodiment_tag,
+            modality_config=modality_configs,
+            modality_transform=DATA_CONFIG_MAP[cfg.action_consistency_embodiment_tag]
+                .transform(),
+            device=cfg.device,
+        )
+
+    def _obs_builder(entry):  # pragma: no cover -- exercised only with real policy
+        raise NotImplementedError(
+            "obs_builder needs a per-suite LeRobotEpisodeLoader; wire one in "
+            "before running --action-consistency-weight > 0 on real data. "
+            "Phase B scaffolding only ships the kernel + manifest; the obs "
+            "builder closure is intentionally left as a follow-up so we can "
+            "validate the kernel with FakePolicy in tests first."
+        )
+
+    return ActionConsistencyKernel(
+        ActionConsistencyConfig(
+            weight=float(cfg.action_consistency_weight),
+            every_n_steps=int(cfg.action_consistency_every_n_steps),
+            max_microbatch_per_step=int(cfg.action_consistency_max_microbatch),
+            image_patch_rows_only=bool(cfg.action_consistency_image_patch_only),
+        ),
+        manifest=manifest,
+        policy_loader=_policy_loader,
+        obs_builder=_obs_builder,
+        ar_module=ar,
+        device=cfg.device,
+    )
+
+
 def run_sft(cfg: SFTConfig) -> dict[str, Any]:
     out_dir = Path(cfg.output_dir)
     paths = _setup_outputs(out_dir)
@@ -459,6 +572,16 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
         raise RuntimeError("No labeled training examples; check labels.jsonl.")
 
     av, ar = _build_models(cfg)
+    consistency_kernel = _build_action_consistency_kernel(cfg, ar, out_dir)
+    if consistency_kernel is not None:
+        logger.info(
+            "Action-head consistency ENABLED: weight=%.3f cadence=every_%d_steps "
+            "microbatch=%d image_patch_only=%s",
+            cfg.action_consistency_weight,
+            cfg.action_consistency_every_n_steps,
+            cfg.action_consistency_max_microbatch,
+            cfg.action_consistency_image_patch_only,
+        )
 
     trainable_params = [
         p for p in list(av.parameters()) + list(ar.parameters()) if p.requires_grad
@@ -551,7 +674,21 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
             else:
                 qw = torch.ones((), device=acts.device)
 
+            consistency_loss_t = torch.zeros((), device=acts.device)
+            consistency_diag = None
+            if (
+                consistency_kernel is not None
+                and step % cfg.action_consistency_every_n_steps == 0
+            ):
+                consistency_loss_t, consistency_diag = consistency_kernel.consistency_loss(
+                    descriptions=descs,
+                    example_ids=batch["example_id"],
+                    position_types=ptypes,
+                )
+
             loss = qw * (cfg.av_weight * ce + cfg.ar_weight * ar_term)
+            if consistency_kernel is not None and consistency_diag is not None and consistency_diag.n_rows > 0:
+                loss = loss + cfg.action_consistency_weight * consistency_loss_t
             (loss / max(1, cfg.grad_accum_steps)).backward()
             accum_count += 1
 
@@ -575,6 +712,12 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                     "p_av": float(p_av),
                     "ar_mix_used": 1 if ar_input_src == "av" else 0,
                 }
+                if consistency_diag is not None:
+                    row["action_consistency_loss"] = float(consistency_diag.loss)
+                    row["action_consistency_n_rows"] = int(consistency_diag.n_rows)
+                    row["action_consistency_delta_norm"] = float(consistency_diag.delta_action_norm)
+                    row["action_consistency_cache_hits"] = int(consistency_diag.baseline_cache_hits)
+                    row["action_consistency_cache_misses"] = int(consistency_diag.baseline_cache_misses)
                 _write_jsonl_row(paths["metrics"], row)
                 if tb is not None:
                     tb.add_scalar("train/ce", row["ce"], step)
@@ -585,6 +728,13 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                     tb.add_scalar("train/lr", row["lr"], step)
                     tb.add_scalar("train/p_av", row["p_av"], step)
                     tb.add_scalar("train/ar_mix_used", row["ar_mix_used"], step)
+                    if consistency_diag is not None and consistency_diag.n_rows > 0:
+                        tb.add_scalar("train/action_consistency_loss", row["action_consistency_loss"], step)
+                        tb.add_scalar(
+                            "train/action_consistency_delta_norm",
+                            row["action_consistency_delta_norm"],
+                            step,
+                        )
 
             if step > 0 and step % cfg.eval_every == 0:
                 metrics = _evaluate(

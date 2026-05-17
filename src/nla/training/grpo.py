@@ -154,6 +154,36 @@ class GRPOConfig:
     # flat ``{source_id}__{key}.jpg`` cache layout works with arbitrary tokens.
     judge_video_keys: list[str] = field(default_factory=list)
 
+    # Optional sim-success reward (Framing B sim-GRPO).  When
+    # ``sim_reward_weight > 0`` we encode each AV rollout text with the AR,
+    # dispatch a short LIBERO rollout per (activation, text) pair against a
+    # long-running NlaSteerGr00tPolicy server, score the rollout with the
+    # custom predicate + dense shaping in nla.eval.steerability.predicates,
+    # and blend the result into the reward as a third term. Default 0 = pure
+    # reconstruction / judge (byte-identical to pre-sim runs; the new fields
+    # are hidden from the saved ``config.json``).
+    sim_reward_weight: float = 0.0
+    sim_counterfactual_pairs_path: str | None = None
+    sim_policy_host: str = "localhost"
+    sim_policy_port: int = 5555
+    sim_n_workers: int = 4
+    sim_max_steps: int = 100
+    sim_placement: str = "image_patch"
+    sim_blend: float = 1.0
+    sim_cache_path: str | None = None
+    sim_rollout_python: str | None = None
+    sim_rollout_script: str | None = None
+    sim_timeout_s: float = 240.0
+    # Seed used to derive per-rollout sim seeds. The actual per-rollout seed
+    # is ``sim_seed_base + step * 9973 + i`` so each step + rollout-index
+    # gets a unique but reproducible env reset.
+    sim_seed_base: int = 0
+    # When True, AV rollouts are conditioned on the per-row target intent
+    # text from the counterfactual pairs file (uses
+    # AV_PROMPT_INTENT_CONDITIONED_TEMPLATE). Set to False for pure
+    # reconstruction GRPO where the AV describes the activation freely.
+    use_intent_conditioned_prompt: bool = True
+
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -168,6 +198,15 @@ def _serialize_config(cfg: GRPOConfig) -> dict[str, Any]:
         for k in (
             "judge_reward_weight", "judge_concurrency", "judge_model",
             "judge_cache_path", "frames_cache", "judge_video_keys",
+        ):
+            d.pop(k, None)
+    if cfg.sim_reward_weight <= 0.0:
+        for k in (
+            "sim_reward_weight", "sim_counterfactual_pairs_path",
+            "sim_policy_host", "sim_policy_port", "sim_n_workers",
+            "sim_max_steps", "sim_placement", "sim_blend",
+            "sim_cache_path", "sim_rollout_python", "sim_rollout_script",
+            "sim_timeout_s", "sim_seed_base", "use_intent_conditioned_prompt",
         ):
             d.pop(k, None)
     return d
@@ -289,6 +328,68 @@ def _blend_rewards(
     std = r_recon.std().clamp_min(1e-6)
     r_recon_norm = (r_recon - mean) / std
     return (1.0 - weight) * r_recon_norm + weight * r_judge.to(r_recon)
+
+
+def _zscore(x: torch.Tensor) -> torch.Tensor:
+    if x.numel() <= 1:
+        return x - x.mean()
+    return (x - x.mean()) / x.std().clamp_min(1e-6)
+
+
+def _blend_multi_rewards(
+    r_recon: torch.Tensor,
+    *,
+    r_judge: torch.Tensor | None = None,
+    judge_weight: float = 0.0,
+    r_sim: torch.Tensor | None = None,
+    sim_weight: float = 0.0,
+) -> torch.Tensor:
+    """Blend up to three reward terms (recon + judge + sim).
+
+    Behavior contract -- in priority order:
+
+      * Both weights == 0  →  return ``r_recon`` untouched (byte-identical to
+        pre-judge/pre-sim code; this is what unit-tested baseline runs hit).
+      * Only judge weight > 0  →  legacy ``_blend_rewards(r_recon, r_judge, judge_weight)``
+        path (recon z-scored, judge in its native ±1.5 scale).
+      * Sim weight > 0  →  three-way convex blend over z-scored terms:
+
+            (1 - judge_weight - sim_weight) * z(r_recon)
+              + judge_weight * z(r_judge or 0)
+              + sim_weight   * z(r_sim)
+
+        We z-score the sim term too because its raw scale (predicate ∈ {0,1}
+        + ≈[0,1] dense shaping) is incommensurable with recon (negative MSE
+        on alpha-scaled activations). Group-relative advantages survive this
+        z-scoring, and the resulting term sits in the same numerical regime
+        as the other two so a single LR works for all three blends.
+    """
+    if judge_weight <= 0.0 and sim_weight <= 0.0:
+        return r_recon
+
+    # Legacy two-way blend path.
+    if sim_weight <= 0.0:
+        assert r_judge is not None
+        return _blend_rewards(r_recon, r_judge, judge_weight)
+
+    base = (1.0 - judge_weight - sim_weight)
+    if base < 0.0:
+        # Caller weights sum to >1; clamp & warn (still numerically sane).
+        logger.warning(
+            "judge_weight (%.3f) + sim_weight (%.3f) > 1; recon weight "
+            "clamped to 0",
+            judge_weight, sim_weight,
+        )
+        base = 0.0
+
+    out = base * _zscore(r_recon)
+    if judge_weight > 0.0:
+        if r_judge is None:
+            raise ValueError("judge_weight > 0 requires r_judge")
+        out = out + judge_weight * _zscore(r_judge.to(r_recon))
+    if sim_weight > 0.0:
+        out = out + sim_weight * _zscore(r_sim.to(r_recon))
+    return out
 
 
 async def _grade_rollouts_async(
@@ -485,6 +586,15 @@ def grpo_step(
     judge_model: str | None = None,
     judge_concurrency: int = 8,
     judge_grade_fn=None,
+    target_intent_texts: list[str] | None = None,
+    target_tasks: list[str] | None = None,
+    target_env_names: list[str] | None = None,
+    sim_reward_weight: float = 0.0,
+    sim_worker=None,                # SimRewardWorker | None
+    sim_seeds: list[int] | None = None,
+    sim_max_steps: int = 100,
+    sim_placement: str = "image_patch",
+    sim_blend: float = 1.0,
 ) -> dict:
     """One GRPO update worth of forward computation (no optimizer step here).
 
@@ -508,6 +618,13 @@ def grpo_step(
     # ----- 1. Expand each activation K times for grouped rollouts ------------
     acts_rep = activations.repeat_interleave(K, dim=0).to(device)        # (B*K, H)
     ptypes_rep: list[str] = [p for p in position_types for _ in range(K)]
+    intents_rep: list[str] | None = None
+    if target_intent_texts is not None:
+        if len(target_intent_texts) != B:
+            raise ValueError(
+                f"len(target_intent_texts)={len(target_intent_texts)} != B={B}"
+            )
+        intents_rep = [t for t in target_intent_texts for _ in range(K)]
 
     # ----- 2. Rollout under current policy (no grad) -------------------------
     policy_av.eval()
@@ -520,6 +637,7 @@ def grpo_step(
             top_p=rollout_top_p,
             do_sample=True,
             return_logprobs=False,
+            target_intent_texts=intents_rep,
         )
     gen_ids = rollout["token_ids"]                                       # (B*K, T_gen)
     gen_mask = _build_gen_mask(gen_ids, eos_id=eos_id, pad_id=pad_id)
@@ -547,6 +665,7 @@ def grpo_step(
     # Default weight=0.0 short-circuits before any judge work; baseline runs
     # are byte-identical to pre-judge code.
     judge_rewards_list: list[float] | None = None
+    r_judge_tensor: torch.Tensor | None = None
     if judge_reward_weight > 0.0 and frames_cache is not None:
         if source_example_ids is None:
             raise ValueError(
@@ -578,7 +697,79 @@ def grpo_step(
         r_judge_tensor = torch.tensor(
             judge_rewards_list, dtype=rewards.dtype, device=rewards.device,
         )
-        rewards = _blend_rewards(rewards, r_judge_tensor, judge_reward_weight)
+
+    # ----- 3c. Optional sim-success reward (Framing B sim-GRPO) --------------
+    # Default weight=0.0 short-circuits before any sim work; baseline runs are
+    # byte-identical to pre-sim code. When enabled, we encode each rollout
+    # text through the *frozen* AR -> backbone-space steer vector ``hhat``,
+    # then dispatch a LIBERO rollout per row via ``sim_worker``.
+    sim_results = None
+    r_sim_tensor: torch.Tensor | None = None
+    if sim_reward_weight > 0.0:
+        if sim_worker is None:
+            raise ValueError("sim_reward_weight > 0 requires sim_worker")
+        if not target_tasks or len(target_tasks) != B:
+            raise ValueError(
+                "sim_reward_weight > 0 requires target_tasks of length B"
+            )
+        if not target_env_names or len(target_env_names) != B:
+            raise ValueError(
+                "sim_reward_weight > 0 requires target_env_names of length B"
+            )
+        if not source_example_ids or len(source_example_ids) != B:
+            raise ValueError(
+                "sim_reward_weight > 0 requires source_example_ids of length B"
+            )
+        if sim_seeds is None or len(sim_seeds) != B * K:
+            raise ValueError(
+                f"sim_seeds must have length B*K={B * K}, got "
+                f"{None if sim_seeds is None else len(sim_seeds)}"
+            )
+
+        # Replicate per-activation metadata K times to align with rollout_texts.
+        target_tasks_rep = [t for t in target_tasks for _ in range(K)]
+        envs_rep = [e for e in target_env_names for _ in range(K)]
+        src_rep = [s for s in source_example_ids for _ in range(K)]
+
+        # Encode every rollout text into a backbone-space steer vector with
+        # the *frozen* AR (so the gradient never flows through the sim
+        # subprocess, which obviously cannot be backproped).
+        from nla.training.sim_reward import (
+            assemble_jobs,
+            encode_texts_with_ar,
+        )
+        with torch.no_grad():
+            steer_vecs = encode_texts_with_ar(ar, rollout_texts, device=device)
+
+        jobs = assemble_jobs(
+            rollout_texts=rollout_texts,
+            steer_vecs=steer_vecs,
+            target_tasks=target_tasks_rep,
+            target_env_names=envs_rep,
+            source_ids=src_rep,
+            seeds=sim_seeds,
+            sim_max_steps=sim_max_steps,
+            placement=sim_placement,
+            blend=sim_blend,
+        )
+        sim_results = sim_worker.compute(jobs)
+        r_sim_tensor = torch.tensor(
+            [r.r_sim for r in sim_results],
+            dtype=rewards.dtype, device=rewards.device,
+        )
+
+    # ----- 3d. Blend recon + (optional) judge + (optional) sim ---------------
+    # Effective judge weight is 0 when the judge block was silently skipped
+    # (e.g. frames_cache=None) so we don't accidentally claim a judge term
+    # that was never computed.
+    eff_judge_weight = judge_reward_weight if r_judge_tensor is not None else 0.0
+    rewards = _blend_multi_rewards(
+        rewards,
+        r_judge=r_judge_tensor,
+        judge_weight=eff_judge_weight,
+        r_sim=r_sim_tensor,
+        sim_weight=sim_reward_weight,
+    )
 
     # ----- 4. Group-relative advantage ---------------------------------------
     rewards_grp = rewards.view(B, K)
@@ -592,11 +783,17 @@ def grpo_step(
 
     # ----- 5. Score under current policy (with grad) and frozen ref (no grad)
     policy_av.train()
-    new_logprobs = policy_av.score_tokens(acts_rep, ptypes_rep, gen_ids, gen_mask)
+    new_logprobs = policy_av.score_tokens(
+        acts_rep, ptypes_rep, gen_ids, gen_mask,
+        target_intent_texts=intents_rep,
+    )
 
     with torch.no_grad():
         ref_av.eval()
-        ref_logprobs = ref_av.score_tokens(acts_rep, ptypes_rep, gen_ids, gen_mask)
+        ref_logprobs = ref_av.score_tokens(
+            acts_rep, ptypes_rep, gen_ids, gen_mask,
+            target_intent_texts=intents_rep,
+        )
 
     mask = gen_mask.to(new_logprobs.dtype)
     token_counts = mask.sum(dim=1).clamp_min(1)                          # (B*K,)
@@ -636,6 +833,22 @@ def grpo_step(
             jt = torch.tensor(judge_rewards_list, dtype=torch.float32)
             diagnostics["judge_reward_mean"] = float(jt.mean().item())
             diagnostics["judge_reward_pos_frac"] = float((jt > 0).float().mean().item())
+        if sim_results is not None:
+            sr = torch.tensor([r.r_sim for r in sim_results], dtype=torch.float32)
+            pred = torch.tensor([r.predicate for r in sim_results], dtype=torch.float32)
+            succ = torch.tensor([float(r.success_any) for r in sim_results], dtype=torch.float32)
+            n_cached = sum(1 for r in sim_results if r.cached)
+            n_err = sum(1 for r in sim_results if r.error is not None)
+            n_early = sum(1 for r in sim_results if r.early_stopped)
+            elapsed = torch.tensor([r.elapsed_s for r in sim_results], dtype=torch.float32)
+            diagnostics["sim_reward_mean"] = float(sr.mean().item())
+            diagnostics["sim_reward_best"] = float(sr.max().item())
+            diagnostics["sim_predicate_pos_frac"] = float((pred > 0).float().mean().item())
+            diagnostics["sim_success_any_frac"] = float(succ.mean().item())
+            diagnostics["sim_early_stop_frac"] = float(n_early) / max(1, len(sim_results))
+            diagnostics["sim_cache_hit_frac"] = float(n_cached) / max(1, len(sim_results))
+            diagnostics["sim_error_frac"] = float(n_err) / max(1, len(sim_results))
+            diagnostics["sim_elapsed_s_mean"] = float(elapsed.mean().item())
 
     return {
         "loss": total_loss,
@@ -647,6 +860,7 @@ def grpo_step(
         "rollout_texts": rollout_texts,
         "gen_ids": gen_ids.detach(),
         "gen_mask": gen_mask.detach(),
+        "sim_results": sim_results,
         "diagnostics": diagnostics,
     }
 
@@ -800,8 +1014,31 @@ def _validate_judge_config(cfg: GRPOConfig) -> None:
         )
 
 
+def _validate_sim_config(cfg: GRPOConfig) -> None:
+    """Fail fast when sim-reward GRPO is requested but its prerequisites are missing."""
+    if cfg.sim_reward_weight <= 0.0:
+        return
+    if not cfg.sim_counterfactual_pairs_path:
+        raise ValueError(
+            "sim_reward_weight > 0 requires --sim-counterfactual-pairs-path "
+            "(JSONL produced by scripts/training/mine_grpo_counterfactual_pairs.py)."
+        )
+    if not Path(cfg.sim_counterfactual_pairs_path).exists():
+        raise ValueError(
+            f"sim_counterfactual_pairs_path does not exist: "
+            f"{cfg.sim_counterfactual_pairs_path}"
+        )
+    if cfg.sim_n_workers < 1:
+        raise ValueError("sim_n_workers must be >= 1")
+    if not (0.0 <= cfg.sim_blend <= 1.0):
+        raise ValueError(f"sim_blend must be in [0, 1]; got {cfg.sim_blend}")
+    if cfg.sim_max_steps < 1:
+        raise ValueError(f"sim_max_steps must be >= 1; got {cfg.sim_max_steps}")
+
+
 def run_grpo(cfg: GRPOConfig) -> dict:
     _validate_judge_config(cfg)
+    _validate_sim_config(cfg)
     out_dir = Path(cfg.output_dir)
     paths = _setup_outputs(out_dir)
     paths["config"].write_text(json.dumps(_serialize_config(cfg), indent=2))
@@ -855,6 +1092,35 @@ def run_grpo(cfg: GRPOConfig) -> dict:
             cfg.judge_model or "(default)", len(judge_cache), cfg.judge_cache_path,
         )
 
+    sim_worker = None
+    cf_sampler = None
+    if cfg.sim_reward_weight > 0.0:
+        from nla.training.counterfactual_data import CounterfactualPairSampler
+        from nla.training.sim_reward import SimRewardWorker
+        cf_sampler = CounterfactualPairSampler(
+            cfg.sim_counterfactual_pairs_path, seed=cfg.seed,
+        )
+        sim_worker = SimRewardWorker(
+            policy_host=cfg.sim_policy_host,
+            policy_port=cfg.sim_policy_port,
+            n_workers=cfg.sim_n_workers,
+            sim_max_steps=cfg.sim_max_steps,
+            placement=cfg.sim_placement,
+            blend=cfg.sim_blend,
+            rollout_python=cfg.sim_rollout_python,
+            rollout_script=cfg.sim_rollout_script,
+            cache_path=cfg.sim_cache_path,
+            timeout_s=cfg.sim_timeout_s,
+        )
+        logger.info(
+            "Sim reward enabled (weight=%.3f, n_workers=%d, max_steps=%d, "
+            "placement=%s, blend=%.2f); counterfactual pairs loaded from %s "
+            "(%d source_ids covered)",
+            cfg.sim_reward_weight, cfg.sim_n_workers, cfg.sim_max_steps,
+            cfg.sim_placement, cfg.sim_blend, cfg.sim_counterfactual_pairs_path,
+            len(cf_sampler),
+        )
+
     while step < cfg.total_steps:
         for batch in train_loader:
             if step >= cfg.total_steps:
@@ -865,7 +1131,61 @@ def run_grpo(cfg: GRPOConfig) -> dict:
 
             acts = batch["activations"].to(cfg.device, non_blocking=True)
             ptypes = batch["position_type"]
-            source_ids = batch.get("example_id") if cfg.judge_reward_weight > 0.0 else None
+            # source_ids are needed whenever the judge OR sim reward is on,
+            # plus any other downstream lookups (counterfactual mining).
+            needs_source_ids = (
+                cfg.judge_reward_weight > 0.0 or cfg.sim_reward_weight > 0.0
+            )
+            source_ids = batch.get("example_id") if needs_source_ids else None
+
+            # Look up a fresh counterfactual (intent, env_name, target_task)
+            # per activation. cf_sampler.sample_for(...) returns None when an
+            # activation has no eligible pairs; we drop the sim signal for the
+            # whole step in that case (safer than partial-step blends).
+            target_intent_texts = None
+            target_tasks = None
+            target_env_names = None
+            sim_seeds = None
+            effective_sim_weight = cfg.sim_reward_weight
+            if cfg.sim_reward_weight > 0.0 and cf_sampler is not None:
+                if not source_ids:
+                    raise RuntimeError(
+                        "sim_reward_weight > 0 needs batch['example_id']; "
+                        "got an empty/None list -- check dataset wiring."
+                    )
+                pairs = cf_sampler.sample_for(source_ids)
+                # ``sample_for`` returns a sentinel pair (empty target_task /
+                # env_name) for ids missing from the JSONL. Treat those as
+                # "no eligible pair" so we never hand the sim subprocess a
+                # blank task id.
+                missing_idx = [i for i, p in enumerate(pairs) if not p.target_task or not p.target_env_name]
+                if missing_idx:
+                    missing = [source_ids[i] for i in missing_idx[:3]]
+                    logger.warning(
+                        "[step %d] %d/%d batch rows have no counterfactual pair "
+                        "in %s; skipping sim term this step. First few missing: %s",
+                        step, len(missing_idx), len(source_ids),
+                        cfg.sim_counterfactual_pairs_path, missing,
+                    )
+                    effective_sim_weight = 0.0
+                else:
+                    target_intent_texts = [p.target_intent for p in pairs]
+                    target_tasks = [p.target_task for p in pairs]
+                    target_env_names = [p.target_env_name for p in pairs]
+                    K = cfg.rollouts_per_activation
+                    sim_seeds = [
+                        cfg.sim_seed_base + step * 9973 + i
+                        for i in range(len(pairs) * K)
+                    ]
+
+            # The intent-conditioned AV prompt is independent of sim rollouts:
+            # it's how the policy AV learns to *write* intent-targeted text in
+            # the first place. We pass intents whenever the cfg switch is on
+            # AND we managed to look them up; otherwise fall back to the
+            # legacy descriptive prompt.
+            av_intent_texts = (
+                target_intent_texts if cfg.use_intent_conditioned_prompt else None
+            )
 
             out = grpo_step(
                 policy_av, ref_av, ar,
@@ -888,6 +1208,15 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                 judge_cache_path=cfg.judge_cache_path,
                 judge_model=cfg.judge_model,
                 judge_concurrency=cfg.judge_concurrency,
+                target_intent_texts=av_intent_texts,
+                target_tasks=target_tasks,
+                target_env_names=target_env_names,
+                sim_reward_weight=effective_sim_weight,
+                sim_worker=sim_worker,
+                sim_seeds=sim_seeds,
+                sim_max_steps=cfg.sim_max_steps,
+                sim_placement=cfg.sim_placement,
+                sim_blend=cfg.sim_blend,
             )
             loss = out["loss"]
             (loss / max(1, cfg.grad_accum_steps)).backward()

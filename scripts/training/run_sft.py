@@ -20,6 +20,7 @@ MSE and the closed-loop FVE.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 
@@ -159,6 +160,60 @@ def _build_parser() -> argparse.ArgumentParser:
         default=200,
         help="Log one truncated AV-mix caption every N steps when mixing fires (0=off).",
     )
+    p.add_argument(
+        "--action-consistency-weight",
+        type=float,
+        default=0.0,
+        help="If >0, add an action-head consistency loss (||π(h_real) - π(AR(z))||²) "
+             "to the SFT objective. Requires --action-consistency-policy-path and "
+             "--action-consistency-dataset-roots. Default 0 keeps SFT untouched.",
+    )
+    p.add_argument(
+        "--action-consistency-every-n-steps",
+        type=int,
+        default=8,
+        help="Cadence for the consistency forward (1 = every step). The policy "
+             "forward dominates per-step cost so the default skips most steps.",
+    )
+    p.add_argument(
+        "--action-consistency-max-microbatch",
+        type=int,
+        default=1,
+        help="Number of batch rows fed into the consistency forward per active step. "
+             "Defaults to 1 because the frozen GR00T forward is VRAM-heavy.",
+    )
+    p.add_argument(
+        "--action-consistency-image-patch-only",
+        action="store_true",
+        default=True,
+        help="If set (default), only feed rows whose position_type == 'image_patch' "
+             "into the consistency forward, matching the steering placement.",
+    )
+    p.add_argument(
+        "--action-consistency-policy-path",
+        default=None,
+        help="Path to a frozen GR00T checkpoint used for the consistency forward. "
+             "Required when --action-consistency-weight > 0.",
+    )
+    p.add_argument(
+        "--action-consistency-embodiment-tag",
+        default=None,
+        help="GR00T embodiment tag for the policy loader (e.g. LIBERO_PANDA). "
+             "Required when --action-consistency-weight > 0.",
+    )
+    p.add_argument(
+        "--action-consistency-dataset-roots",
+        default=None,
+        help="JSON mapping {\"suite\": \"<lerobot_dataset_root>\"} used to replay the "
+             "original observation per labeled row. Use \"\" as the suite key for "
+             "single-suite dumps. Required when --action-consistency-weight > 0.",
+    )
+    p.add_argument(
+        "--action-consistency-manifest-cache",
+        default=None,
+        help="Where to cache the replay manifest JSONL. Defaults to "
+             "<output_dir>/aux/replay_manifest.jsonl.",
+    )
     p.add_argument("--no-episode-split-fallback", action="store_true",
                    help="When --split-by=episode but the dump has <2 distinct "
                         "episode_index values, fail with RuntimeError instead of "
@@ -257,6 +312,17 @@ def main(argv: list[str] | None = None) -> int:
         ar_av_mix_log_text_every=args.ar_av_mix_log_text_every,
         image_patch_pooling=args.image_patch_pooling,
         image_patch_pooling_strided_k=args.image_patch_pooling_strided_k,
+        action_consistency_weight=args.action_consistency_weight,
+        action_consistency_every_n_steps=args.action_consistency_every_n_steps,
+        action_consistency_max_microbatch=args.action_consistency_max_microbatch,
+        action_consistency_image_patch_only=args.action_consistency_image_patch_only,
+        action_consistency_policy_path=args.action_consistency_policy_path,
+        action_consistency_embodiment_tag=args.action_consistency_embodiment_tag,
+        action_consistency_dataset_roots=(
+            json.loads(args.action_consistency_dataset_roots)
+            if args.action_consistency_dataset_roots else None
+        ),
+        action_consistency_manifest_cache=args.action_consistency_manifest_cache,
     )
     summary = run_sft(cfg)
     logging.info("SFT done. %s", summary)
