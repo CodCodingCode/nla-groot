@@ -14,7 +14,7 @@ Example (LIBERO, recon-only)::
         --sft-dir          data/sft/libero_goal_pilot_v3 \\
         --activations-root data/activations/libero_goal_pilot \\
         --output-dir       data/grpo/libero_goal_pilot_b002 \\
-        --beta 0.02 --total-steps 200 --rollouts-per-activation 4
+        --beta 0.02 --total-steps 200 --rollouts-per-activation 8
 
 Example (LIBERO, recon + multimodal-judge blend)::
 
@@ -22,7 +22,7 @@ Example (LIBERO, recon + multimodal-judge blend)::
         --sft-dir          data/sft/libero_goal_pilot_v3 \\
         --activations-root data/activations/libero_goal_pilot \\
         --output-dir       data/grpo/libero_goal_pilot_b002_judge \\
-        --beta 0.02 --total-steps 200 --rollouts-per-activation 4 \\
+        --beta 0.02 --total-steps 200 --rollouts-per-activation 8 \\
         --judge-reward-weight 0.5 \\
         --frames-cache       data/labels/libero_goal_pilot/frames_cache \\
         --judge-video-keys   image wrist_image
@@ -40,7 +40,7 @@ Example (LIBERO, sim-success steerability GRPO)::
         --sft-dir          data/sft/libero_4suite_v3 \\
         --activations-root data/activations/libero_4suite_combined \\
         --output-dir       data/grpo/libero_4suite_v3_sim \\
-        --beta 0.02 --total-steps 200 --rollouts-per-activation 4 \\
+        --beta 0.02 --total-steps 200 --rollouts-per-activation 8 \\
         --sim-reward-weight 0.5 \\
         --sim-counterfactual-pairs-path data/grpo/cf_pairs.jsonl \\
         --sim-policy-host localhost --sim-policy-port 5555 \\
@@ -51,6 +51,7 @@ Example (LIBERO, sim-success steerability GRPO)::
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -65,8 +66,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--batch-size", type=int, default=4,
                    help="Distinct activations per step (B).")
-    p.add_argument("--rollouts-per-activation", type=int, default=4,
-                   help="K: rollouts per activation, the GRPO group size.")
+    p.add_argument("--rollouts-per-activation", type=int, default=8,
+                   help="K: rollouts per activation, the GRPO group size "
+                        "(matches GRPOConfig V3 default; pass 4 for legacy).")
     p.add_argument("--rollout-max-new-tokens", type=int, default=160)
     p.add_argument("--rollout-temperature", type=float, default=1.0)
     p.add_argument("--rollout-top-p", type=float, default=0.95)
@@ -74,6 +76,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--beta", type=float, default=0.02,
                    help="KL coefficient (paper sweep: {0.01, 0.02, 0.05}).")
     p.add_argument("--no-advantage-normalize", action="store_true")
+    p.add_argument(
+        "--no-reward-normalize-groupwise",
+        action="store_true",
+        help="After mean-centering rewards within each GRPO group, skip dividing "
+             "advantages by the group's reward std (keeps centering only). "
+             "Default ON: divide by per-group std when --no-advantage-normalize "
+             "is not set.",
+    )
     p.add_argument("--advantage-clip", type=float, default=None)
     p.add_argument("--ar-co-train-weight", type=float, default=0.0,
                    help="If >0, unfreeze AR and add ar_weight * MSE(AR(rollouts), h/alpha) to the loss.")
@@ -102,6 +112,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         "episode_index values, fail with RuntimeError instead of "
                         "silently falling back to a row split. Use for paper / "
                         "generalization runs where the val split must be honest.")
+    p.add_argument(
+        "--position-mix-json",
+        default=None,
+        metavar="JSON",
+        help="Optional JSON object of position-type weights for SampledPositionDataset "
+             '(e.g. \'{"last_text":0.4,"image_patch":0.4,"anchor":0.2}\'). '
+             "Omit to use nla.layer_spec.POSITION_MIX.",
+    )
     p.add_argument("--eval-temperatures", default="0.0,0.7,1.0",
                    help="Comma-separated rollout temperatures for evaluation.  The "
                         "gap between greedy (0.0) and sampled FVE is itself a "
@@ -118,7 +136,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--judge-model", default=None,
                    help="Override OPENAI_GRADER_MODEL (default: gpt-5.1).")
     p.add_argument("--judge-cache-path", default=None,
-                   help="JSONL cache of judge verdicts keyed by sha1(source_id:text). "
+                   help="JSONL cache of judge verdicts keyed by "
+                        "sha1(source_id:text:grader_model). "
                         "Read on startup, appended to as new (source_id, rollout) "
                         "pairs are scored.")
     p.add_argument("--frames-cache", default=None,
@@ -145,9 +164,32 @@ def _build_parser() -> argparse.ArgumentParser:
                         "with dense shaping from "
                         "nla.eval.steerability.predicates.")
     p.add_argument("--sim-counterfactual-pairs-path", default=None,
-                   help="JSONL of {source_example_id, target_intent, "
-                        "target_task, target_env_name, ...} rows produced by "
-                        "scripts/training/mine_grpo_counterfactual_pairs.py.")
+                   help="JSONL of {source_example_id, example_id, "
+                        "target_intent, target_task, target_env_name, ...} "
+                        "rows produced by "
+                        "scripts/training/mine_grpo_counterfactual_pairs.py. "
+                        "The sampler indexes each row under BOTH "
+                        "``source_example_id`` and ``example_id`` so it "
+                        "resolves whichever flavor the activation dataset "
+                        "yields per batch.")
+    p.add_argument("--sim-counterfactual-pairs-path-extra", default=[],
+                   action="append",
+                   help="Optional extra CF pairs JSONL(s) merged into the "
+                        "primary sampler index. Repeat the flag to add "
+                        "multiple files. Rows are deduped per id-bucket on "
+                        "(source_example_id, target_intent, target_task, "
+                        "target_env_name) so a row appearing in multiple "
+                        "files isn't double-weighted.")
+    p.add_argument("--sim-require-full-batch-cf",
+                   dest="sim_require_full_batch_cf",
+                   action="store_true", default=False,
+                   help="Restore the legacy all-or-nothing batch gate: if "
+                        "any row in a batch is missing a valid CF pair, "
+                        "skip the sim term for the whole step. Default OFF "
+                        "enables per-row sim eligibility (sim is computed "
+                        "for rows that have a pair and skipped for those "
+                        "that don't, so partial-coverage batches still "
+                        "learn from sim).")
     p.add_argument("--sim-policy-host", default="localhost")
     p.add_argument("--sim-policy-port", type=int, default=5555,
                    help="ZMQ port the NlaSteerGr00tPolicy server is listening "
@@ -196,6 +238,55 @@ def _build_parser() -> argparse.ArgumentParser:
                         "task. Pass this to fall back to the descriptive prompt "
                         "for ablations.")
 
+    # ---- SimpleVLA-RL-inspired knobs (off / auto by default) -----------
+    p.add_argument(
+        "--dynamic-sampling", dest="dynamic_sampling",
+        action="store_const", const=True, default=None,
+        help="Drop GRPO groups whose reward std is below "
+             "--dynamic-sampling-threshold (the advantage collapses to 0 "
+             "anyway; SimpleVLA-RL §3.1). Default: auto -> ON when "
+             "--sim-reward-weight > 0 (binary-ish sim rewards collapse "
+             "often), OFF otherwise.")
+    p.add_argument(
+        "--no-dynamic-sampling", dest="dynamic_sampling",
+        action="store_const", const=False,
+        help="Force dynamic sampling OFF, overriding the auto-rule.")
+    p.add_argument(
+        "--dynamic-sampling-threshold", type=float, default=1e-4,
+        help="Per-group reward std below which the group is masked from "
+             "the PG, KL, and reward-stat aggregates. Default 1e-4.")
+
+    p.add_argument(
+        "--use-ppo-clip", dest="use_ppo_clip",
+        action="store_true", default=False,
+        help="Apply PPO-style importance-ratio clipping with asymmetric "
+             "low/high bounds (SimpleVLA-RL clip-higher). Note: our "
+             "trainer takes one gradient step per rollout, so the ratio "
+             "is identically 1 at the gradient eval point and the clip "
+             "is a no-op for one-step updates -- it becomes meaningful "
+             "if/when we add multi-epoch updates per rollout.")
+    p.add_argument(
+        "--no-use-ppo-clip", dest="use_ppo_clip", action="store_false",
+        help="Disable PPO clip (default).")
+    p.add_argument(
+        "--clip-eps-low", type=float, default=0.2,
+        help="PPO clip lower bound when --use-ppo-clip is set (1 - eps_low).")
+    p.add_argument(
+        "--clip-eps-high", type=float, default=0.28,
+        help="PPO clip upper bound when --use-ppo-clip is set (1 + eps_high).")
+
+    p.add_argument(
+        "--disable-kl-anchor", action="store_true",
+        help="Skip the KL anchor entirely: don't load the frozen "
+             "reference AV (saves a policy-AV-sized memory) and drop "
+             "the KL term from the loss (SimpleVLA-RL ablation).")
+
+    p.add_argument(
+        "--rollout-temperature-high", type=float, default=None,
+        help="Override --rollout-temperature with this value when set. "
+             "Hook for a future SimpleVLA-RL-style temperature curriculum; "
+             "for now it is a single-value override.")
+
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--log-level", default="INFO")
@@ -238,6 +329,15 @@ def main(argv: list[str] | None = None) -> int:
             "(produced by scripts/training/mine_grpo_counterfactual_pairs.py)."
         )
 
+    position_mix = None
+    if args.position_mix_json:
+        try:
+            position_mix = json.loads(args.position_mix_json)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"--position-mix-json: invalid JSON: {e}") from e
+        if not isinstance(position_mix, dict):
+            raise SystemExit("--position-mix-json must be a JSON object (dictionary).")
+
     cfg = GRPOConfig(
         sft_dir=args.sft_dir,
         activations_root=args.activations_root,
@@ -251,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
         rollout_top_p=args.rollout_top_p,
         beta=args.beta,
         advantage_normalize=not args.no_advantage_normalize,
+        reward_normalize_groupwise=not args.no_reward_normalize_groupwise,
         advantage_clip=args.advantage_clip,
         ar_co_train_weight=args.ar_co_train_weight,
         grad_accum_steps=args.grad_accum_steps,
@@ -265,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         eval_max_examples=args.eval_max_examples,
         gradient_checkpointing=args.gradient_checkpointing,
         held_out_fraction=args.held_out_fraction,
+        position_mix=position_mix,
         split_by=args.split_by,
         allow_episode_split_row_fallback=not args.no_episode_split_fallback,
         eval_temperatures=eval_temps,
@@ -276,6 +378,10 @@ def main(argv: list[str] | None = None) -> int:
         judge_video_keys=list(args.judge_video_keys) if args.judge_video_keys else [],
         sim_reward_weight=args.sim_reward_weight,
         sim_counterfactual_pairs_path=args.sim_counterfactual_pairs_path,
+        sim_counterfactual_pairs_paths_extra=list(
+            args.sim_counterfactual_pairs_path_extra or []
+        ),
+        sim_require_full_batch_cf=args.sim_require_full_batch_cf,
         sim_policy_host=args.sim_policy_host,
         sim_policy_port=args.sim_policy_port,
         sim_n_workers=args.sim_n_workers,
@@ -288,6 +394,13 @@ def main(argv: list[str] | None = None) -> int:
         sim_timeout_s=args.sim_timeout_s,
         sim_seed_base=args.sim_seed_base,
         use_intent_conditioned_prompt=not args.no_intent_conditioned_prompt,
+        dynamic_sampling=args.dynamic_sampling,
+        dynamic_sampling_threshold=args.dynamic_sampling_threshold,
+        use_ppo_clip=args.use_ppo_clip,
+        clip_eps_low=args.clip_eps_low,
+        clip_eps_high=args.clip_eps_high,
+        disable_kl_anchor=args.disable_kl_anchor,
+        rollout_temperature_high=args.rollout_temperature_high,
     )
     summary = run_grpo(cfg)
     logging.info("GRPO done. %s", summary)

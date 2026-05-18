@@ -184,10 +184,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--action-consistency-image-patch-only",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
         help="If set (default), only feed rows whose position_type == 'image_patch' "
-             "into the consistency forward, matching the steering placement.",
+             "into the consistency forward, matching the steering placement. "
+             "Pass --no-action-consistency-image-patch-only to include all "
+             "position types (slower, currently has no eval-time counterpart).",
     )
     p.add_argument(
         "--action-consistency-policy-path",
@@ -213,6 +215,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Where to cache the replay manifest JSONL. Defaults to "
              "<output_dir>/aux/replay_manifest.jsonl.",
+    )
+    p.add_argument(
+        "--action-consistency-suites",
+        nargs="+",
+        default=None,
+        help="Optional whitelist of suite names; only labeled rows whose "
+             "suite is in this list participate in the consistency forward. "
+             "All other suites still flow through the regular SFT losses. "
+             "Default: no filter (use every suite in --action-consistency-dataset-roots).",
     )
     p.add_argument("--no-episode-split-fallback", action="store_true",
                    help="When --split-by=episode but the dump has <2 distinct "
@@ -323,6 +334,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.action_consistency_dataset_roots else None
         ),
         action_consistency_manifest_cache=args.action_consistency_manifest_cache,
+        action_consistency_suites=(
+            tuple(args.action_consistency_suites)
+            if args.action_consistency_suites else None
+        ),
     )
     summary = run_sft(cfg)
     logging.info("SFT done. %s", summary)

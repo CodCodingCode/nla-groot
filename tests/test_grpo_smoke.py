@@ -226,3 +226,18 @@ def test_grpo_step_advantages_have_zero_mean_within_group():
     adv_grp = out["advantages"].view(B, K)
     # Each row of advantages should sum to ~0 (centered within group).
     assert torch.allclose(adv_grp.sum(dim=1), torch.zeros(B), atol=1e-4), adv_grp
+
+
+def test_metrics_closed_greedy_aliases_for_scorecard():
+    from nla.training.grpo import _metrics_with_closed_greedy_aliases
+
+    metrics = {
+        "cosine/temp=0.0": 0.55,
+        "fve/position=image_patch/temp=0.0": 0.12,
+        "cosine/temp=0.7": 0.40,
+    }
+    out = _metrics_with_closed_greedy_aliases(metrics, greedy_temperature=0.0)
+    assert out["closed_greedy/cosine"] == 0.55
+    assert out["closed_greedy/fve/position=image_patch"] == 0.12
+    assert "closed_greedy/cosine/temp=0.7" not in out
+    assert out["cosine/temp=0.7"] == 0.40

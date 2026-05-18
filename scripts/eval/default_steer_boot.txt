@@ -1,0 +1,3 @@
+- scene: LIBERO goal benchmark tabletop with articulated panda manipulation.
+- plan: Serve policy actions conditioned on the embodied instruction for the episode.
+- note: Startup placeholder text; GRPO/sim requests override steering per rollout.

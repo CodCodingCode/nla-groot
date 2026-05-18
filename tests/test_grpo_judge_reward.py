@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from nla.labeling.grader import DEFAULT_GRADER_MODEL
 from nla.training.grpo import (
     GRPOConfig,
     _blend_rewards,
@@ -130,7 +131,7 @@ def test_cache_hit_skips_grader(tmp_path):
     _touch_frames(frames, "src1")
     cache_path = tmp_path / "cache.jsonl"
     text = "a small red cube on the table"
-    key = _judge_cache_key("src1", text)
+    key = _judge_cache_key("src1", text, grader_model=DEFAULT_GRADER_MODEL)
     cache = {key: {"key": key, "r_judge": 1.5,
                    "verdict_b": "specific", "verdict_c": "appropriate"}}
 
@@ -175,7 +176,7 @@ def test_cache_miss_writes_entry(tmp_path):
     assert rewards == [1.5], rewards
     assert grade_fn.state["calls"] == 1  # type: ignore[attr-defined]
 
-    expected_key = _judge_cache_key("src2", text)
+    expected_key = _judge_cache_key("src2", text, grader_model=DEFAULT_GRADER_MODEL)
     assert expected_key in cache
     assert cache[expected_key]["verdict_b"] == "specific"
     assert cache[expected_key]["verdict_c"] == "appropriate"
@@ -274,3 +275,5 @@ def test_cache_key_is_deterministic_and_sensitive():
     assert k1 == k2
     assert _judge_cache_key("src", "hello world") != _judge_cache_key("src", "hello world!")
     assert _judge_cache_key("a", "x") != _judge_cache_key("b", "x")
+    assert _judge_cache_key("s", "t", grader_model="m1") != _judge_cache_key("s", "t", grader_model="m2")
+    assert _judge_cache_key("s", "t", grader_model="") == _judge_cache_key("s", "t")

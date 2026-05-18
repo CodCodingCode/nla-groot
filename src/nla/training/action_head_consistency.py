@@ -48,6 +48,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
@@ -177,6 +179,12 @@ PolicyLike = Any
 # An observation-builder maps a ``ReplayEntry`` -> observation dict.
 ObsBuilder = Callable[[ReplayEntry], dict[str, Any]]
 
+# A factory that, given the loaded policy, returns an ``ObsBuilder``. The
+# factory pattern exists because the real LeRobot-backed obs_builder needs
+# ``policy.modality_configs`` to construct ``LeRobotEpisodeLoader``, and the
+# policy is loaded lazily inside the kernel.
+ObsBuilderFactory = Callable[[PolicyLike], ObsBuilder]
+
 # A policy-loader is a thunk that returns the frozen policy on first call.
 PolicyLoader = Callable[[], PolicyLike]
 
@@ -196,6 +204,12 @@ class ActionConsistencyConfig:
     image_patch_rows_only: bool = True
     # Cache the baseline action per example_id so the policy forward only
     # runs once per row across the whole run.
+    #
+    # TODO(action-consistency-cache-bound): the cache is unbounded — at scale
+    # (~100k unique example_ids in V4) it grows host-RAM monotonically. Cap or
+    # switch to LRU before turning the flag on in long jobs. Each entry is
+    # O(action_dim) floats on CPU so the absolute cost is small, but the
+    # design intent should be explicit.
     cache_baseline_actions: bool = True
 
 
@@ -290,8 +304,9 @@ class ActionConsistencyKernel:
         *,
         manifest: ReplayManifest,
         policy_loader: PolicyLoader,
-        obs_builder: ObsBuilder,
         ar_module: torch.nn.Module,
+        obs_builder: ObsBuilder | None = None,
+        obs_builder_factory: ObsBuilderFactory | None = None,
         device: torch.device | str = "cuda",
         on_baseline_compute: Callable[[str, dict[str, torch.Tensor]], None] | None = None,
     ) -> None:
@@ -301,10 +316,18 @@ class ActionConsistencyKernel:
             raise ValueError("every_n_steps must be >= 1")
         if cfg.max_microbatch_per_step <= 0:
             raise ValueError("max_microbatch_per_step must be >= 1")
+        if obs_builder is None and obs_builder_factory is None:
+            raise ValueError(
+                "ActionConsistencyKernel needs either obs_builder (eager; "
+                "used in tests with FakePolicy) or obs_builder_factory "
+                "(lazy; resolved inside ensure_loaded once the real "
+                "policy.modality_configs is available)."
+            )
         self.cfg = cfg
         self.manifest = manifest
         self._policy_loader = policy_loader
-        self._obs_builder = obs_builder
+        self._obs_builder: ObsBuilder | None = obs_builder
+        self._obs_builder_factory = obs_builder_factory
         self.ar = ar_module
         self.device = torch.device(device)
         self._policy: PolicyLike | None = None
@@ -335,6 +358,13 @@ class ActionConsistencyKernel:
                 if hasattr(mod, "eval"):
                     mod.eval()
         self._policy = policy
+        # Resolve the obs_builder now that we have a live policy. The factory
+        # path is used in production (real Gr00tPolicy + LeRobot loaders);
+        # the eager path is kept for tests with FakePolicy.
+        if self._obs_builder is None:
+            assert self._obs_builder_factory is not None  # constructor checks
+            logger.info("[action_consistency] building obs_builder from factory.")
+            self._obs_builder = self._obs_builder_factory(policy)
         logger.info("[action_consistency] policy loaded.")
 
     # -- candidate selection ----------------------------------------------
@@ -359,16 +389,73 @@ class ActionConsistencyKernel:
     # -- baseline actions -------------------------------------------------
 
     def _compute_baseline(self, entry: ReplayEntry) -> dict[str, torch.Tensor]:
+        """Baseline forward without steer, returning the same shape as steered.
+
+        We mirror ``_steered_action``'s surrogate (``action_pred`` in
+        normalized space) so the MSE downstream is well-defined. Baseline
+        runs under ``inference_mode`` because we don't need its gradient.
+
+        For the in-process FakePolicy (no GR00T install), we fall back to
+        the legacy ``policy.get_action(obs)`` surface; that path is used
+        only in tests.
+        """
+        assert self._obs_builder is not None, "ensure_loaded() must run first"
         obs = self._obs_builder(entry)
-        with torch.inference_mode():
-            raw = self.policy.get_action(obs)
-        flat = _flatten_action_dict(raw)
-        # Detach + move to CPU for cache stability; consumer moves to device.
-        cached = {
-            k: v.detach().to("cpu", dtype=torch.float32).contiguous()
-            for k, v in flat.items()
-            if isinstance(v, torch.Tensor)
-        }
+        policy = self.policy
+        model = getattr(policy, "model", None)
+        has_real_groot = (
+            model is not None
+            and hasattr(model, "action_head")
+            and hasattr(model, "prepare_input")
+            and hasattr(model.action_head, "get_action_with_features")
+        )
+
+        if has_real_groot:
+            from gr00t.data.types import MessageType
+            from gr00t.policy.gr00t_policy import _rec_to_dtype
+
+            with torch.inference_mode():
+                unbatched = policy._unbatch_observation(obs)
+                processed_inputs = []
+                for o in unbatched:
+                    vla_step = policy._to_vla_step_data(o)
+                    messages = [{"type": MessageType.EPISODE_STEP.value, "content": vla_step}]
+                    processed_inputs.append(policy.processor(messages))
+                collated = policy.collate_fn(processed_inputs)
+                collated = _rec_to_dtype(collated, dtype=torch.bfloat16)
+                inner = collated["inputs"] if "inputs" in collated else collated
+                backbone_inputs, action_inputs = model.prepare_input(dict(inner))
+                backbone_outputs = model.backbone(backbone_inputs)
+                features = model.action_head._encode_features(
+                    backbone_outputs, action_inputs,
+                )
+                action_outputs = model.action_head.get_action_with_features(
+                    backbone_features=features.backbone_features,
+                    state_features=features.state_features,
+                    embodiment_id=action_inputs.embodiment_id,
+                    backbone_output=backbone_outputs,
+                    action_input=action_inputs,
+                    options=None,
+                )
+            action_pred = action_outputs["action_pred"].clone()
+            flat = {"action_pred": action_pred}
+        else:
+            with torch.inference_mode():
+                raw = policy.get_action(obs)
+            flat = _flatten_action_dict(raw)
+
+        cached: dict[str, torch.Tensor] = {}
+        for k, v in flat.items():
+            if isinstance(v, torch.Tensor):
+                t = v
+            else:
+                try:
+                    t = torch.as_tensor(v)
+                except Exception:
+                    continue
+            if not torch.is_floating_point(t):
+                t = t.float()
+            cached[k] = t.detach().to("cpu", dtype=torch.float32).contiguous().reshape(-1)
         if self._on_baseline_compute is not None:
             self._on_baseline_compute(entry.example_id, cached)
         return cached
@@ -389,12 +476,118 @@ class ActionConsistencyKernel:
         entry: ReplayEntry,
         steer_vec: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
+        """Run a differentiable steered forward against the frozen policy.
+
+        ``Gr00tPolicy.get_action`` wraps the whole model forward in
+        ``torch.inference_mode``, and ``Gr00tN1d7ActionHead.get_action``
+        carries a ``@torch.no_grad`` decorator. Either is sufficient to
+        sever the autograd graph between ``steer_vec`` and the predicted
+        action, defeating the purpose of action-head consistency.
+
+        We bypass both by:
+          1. Running the policy's preprocessing path explicitly (cheap,
+             gradient-irrelevant) to obtain the same ``collated_inputs``
+             that ``_get_action`` would build.
+          2. Calling ``model.backbone`` directly under our differentiable
+             steer hook so the hook's writes participate in autograd.
+          3. Calling ``action_head.get_action_with_features`` directly
+             (NOT ``action_head.get_action``) so the ``@torch.no_grad``
+             decorator is sidestepped while reusing the same flow-matching
+             denoising loop.
+
+        Returns ``{"action_pred": <torch.Tensor[A]>}`` flattened over the
+        batch + horizon dims so downstream MSE has a well-defined shape.
+        """
+        assert self._obs_builder is not None, "ensure_loaded() must run first"
+
         obs = self._obs_builder(entry)
+        policy = self.policy
+        model = getattr(policy, "model", None)
+        backbone = model.backbone
+
+        has_real_groot = (
+            hasattr(model, "action_head")
+            and hasattr(model, "prepare_input")
+            and hasattr(model.action_head, "get_action_with_features")
+        )
+        if not has_real_groot:
+            # FakePolicy path (tests only). The fake policy returns a
+            # differentiable tensor through plain ``get_action(obs)``.
+            spec = SteerSpec(placement=self.cfg.placement, blend=self.cfg.blend)
+            with attach_differentiable_backbone_steer(backbone, steer_vec, spec):
+                raw = policy.get_action(obs)
+            return _flatten_action_dict(raw)
+
+        # Real GR00T path: GR00T imports are only needed when the kernel
+        # actually fires on a real policy.
+        from gr00t.data.types import MessageType
+        from gr00t.policy.gr00t_policy import _rec_to_dtype
+
+        # Preprocess (no autograd needed here; outputs are then used
+        # as inputs to the gradient-bearing backbone forward).
+        with torch.inference_mode():
+            unbatched = policy._unbatch_observation(obs)
+            processed_inputs = []
+            for o in unbatched:
+                vla_step = policy._to_vla_step_data(o)
+                messages = [{"type": MessageType.EPISODE_STEP.value, "content": vla_step}]
+                processed_inputs.append(policy.processor(messages))
+            collated = policy.collate_fn(processed_inputs)
+            collated = _rec_to_dtype(collated, dtype=torch.bfloat16)
+            # ``collator.__call__`` wraps the real batch dict under
+            # ``"inputs"``; ``_get_action`` then calls
+            # ``model.get_action(**collated)`` which expands the wrapper.
+            # We need the inner dict for ``model.prepare_input``.
+            inner = collated["inputs"] if "inputs" in collated else collated
+
+        # Inference tensors can't escape inference_mode; clone the entries
+        # so the autograd-enabled forward sees regular tensors. Non-tensor
+        # values (action_input dicts, attention masks, etc.) flow through.
+        def _materialize(node):
+            if isinstance(node, torch.Tensor):
+                return node.detach().clone()
+            if isinstance(node, dict):
+                return {k: _materialize(v) for k, v in node.items()}
+            if isinstance(node, list):
+                return [_materialize(v) for v in node]
+            return node
+
+        inner = _materialize(dict(inner))
+
         spec = SteerSpec(placement=self.cfg.placement, blend=self.cfg.blend)
-        backbone = self.policy.model.backbone
-        with attach_differentiable_backbone_steer(backbone, steer_vec, spec):
-            raw = self.policy.get_action(obs)
-        return _flatten_action_dict(raw)
+        with torch.enable_grad():
+            with attach_differentiable_backbone_steer(backbone, steer_vec, spec):
+                backbone_inputs, action_inputs = model.prepare_input(inner)
+                backbone_outputs = backbone(backbone_inputs)
+                # Bypass the ``@torch.no_grad`` on
+                # ``Gr00tN1d7ActionHead.get_action_with_features`` by
+                # calling the underlying ``__wrapped__`` function
+                # (functools.wraps puts the original there). This preserves
+                # autograd from ``steer_vec`` -> ``action_pred`` through
+                # the diffusion denoising loop.
+                features = model.action_head._encode_features(
+                    backbone_outputs, action_inputs,
+                )
+                head_cls = type(model.action_head)
+                raw_get_action = getattr(
+                    head_cls.get_action_with_features, "__wrapped__",
+                    head_cls.get_action_with_features,
+                )
+                action_outputs = raw_get_action(
+                    model.action_head,
+                    backbone_features=features.backbone_features,
+                    state_features=features.state_features,
+                    embodiment_id=action_inputs.embodiment_id,
+                    backbone_output=backbone_outputs,
+                    action_input=action_inputs,
+                    options=None,
+                )
+
+        action_pred = action_outputs["action_pred"]
+        # action_pred is [B, horizon, action_dim]. Flatten to a single
+        # action vector per batch for MSE; we treat the whole future
+        # action chunk as the consistency target.
+        return {"action_pred": action_pred.reshape(-1)}
 
     # -- core entrypoint --------------------------------------------------
 
@@ -447,10 +640,12 @@ class ActionConsistencyKernel:
             row_loss = F.mse_loss(steer_t, base_t)
             total = total + row_loss
             diag.n_rows += 1
-            # Per-key Δaction max-abs for telemetry.
+            # Per-key Δaction max-abs for telemetry. Coerce both sides via
+            # torch.as_tensor since steered values come back as numpy on the
+            # real GR00T action heads.
             for k in sorted(set(baseline) & set(steered)):
-                a = baseline[k].detach().to("cpu", dtype=torch.float32)
-                b = steered[k].detach().to("cpu", dtype=torch.float32)
+                a = torch.as_tensor(baseline[k]).detach().to("cpu", dtype=torch.float32)
+                b = torch.as_tensor(steered[k]).detach().to("cpu", dtype=torch.float32)
                 if a.shape != b.shape:
                     continue
                 v = float((b - a).abs().max().item())
@@ -464,6 +659,112 @@ class ActionConsistencyKernel:
         diag.delta_action_norm = float(loss.detach().sqrt().item())
         diag.per_key_delta_max_abs = per_key_max
         return loss, diag
+
+
+# ---------------------------------------------------------------------------
+# Real LeRobot-backed obs_builder factory (used in production via
+# ``_build_action_consistency_kernel`` in sft.py). Imports gr00t lazily so
+# tests that exercise FakePolicy don't need the GR00T install.
+# ---------------------------------------------------------------------------
+
+def make_lerobot_obs_builder(
+    policy: PolicyLike,
+    dataset_roots_by_suite: Mapping[str, str | Path],
+    embodiment_tag: Any,
+    *,
+    traj_cache_size: int = 32,
+    video_backend: str = "torchcodec",
+) -> ObsBuilder:
+    """Return an ``ObsBuilder`` that replays the original LeRobot observation.
+
+    Parameters
+    ----------
+    policy :
+        A loaded ``Gr00tPolicy`` (or compatible). The builder reads
+        ``policy.modality_configs`` to construct LeRobot loaders and to
+        identify the language modality keys.
+    dataset_roots_by_suite :
+        Mapping ``{suite_name: dataset_root}``. The ``suite`` of each
+        ``ReplayEntry`` is looked up here; missing suites raise a
+        ``KeyError`` on the first row of that suite (failure is loud, not
+        silent). Use the suite map you constructed for ``build_replay_manifest``.
+    embodiment_tag :
+        Either the GR00T enum member or a string (``"LIBERO_PANDA"``,
+        ``"libero_sim"``, etc.). Resolved through ``EmbodimentTag.resolve``.
+    traj_cache_size :
+        Number of distinct trajectories held in an in-memory LRU cache.
+        Each LeRobot trajectory load opens a parquet file; SFT batches
+        randomise rows, so caching the recently-touched trajectories keeps
+        per-row obs build under a few ms after warmup.
+    video_backend :
+        Forwarded to ``LeRobotEpisodeLoader``. ``torchcodec`` matches the
+        eval scripts (``scripts/eval/nla_steer_groot_action.py``).
+    """
+    # Lazy gr00t imports — only required when the factory is invoked, which
+    # happens inside ``ActionConsistencyKernel.ensure_loaded()`` and never in
+    # tests.
+    from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
+    from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
+    from gr00t.data.embodiment_tags import EmbodimentTag
+
+    from nla.steering.groot_obs import build_observation_for_step
+
+    if isinstance(embodiment_tag, str):
+        et = EmbodimentTag.resolve(embodiment_tag)
+    else:
+        et = embodiment_tag
+
+    # Mirror the extraction / eval setup: pop the action modality so we only
+    # parse observation channels.
+    modality_configs = deepcopy(policy.modality_configs)
+    modality_configs.pop("action", None)
+    language_keys = list(policy.modality_configs["language"].modality_keys)
+
+    loaders: dict[str, Any] = {}
+    traj_cache: "OrderedDict[tuple[str, int], Any]" = OrderedDict()
+
+    def _get_loader(suite: str) -> Any:
+        if suite not in loaders:
+            if suite not in dataset_roots_by_suite:
+                raise KeyError(
+                    f"make_lerobot_obs_builder: no dataset_root for suite "
+                    f"{suite!r}; known suites: {sorted(dataset_roots_by_suite)}"
+                )
+            loaders[suite] = LeRobotEpisodeLoader(
+                dataset_path=str(dataset_roots_by_suite[suite]),
+                modality_configs=policy.modality_configs,
+                video_backend=video_backend,
+            )
+        return loaders[suite]
+
+    def _get_traj(suite: str, traj_idx: int) -> Any:
+        key = (suite, traj_idx)
+        if key in traj_cache:
+            traj_cache.move_to_end(key)
+            return traj_cache[key]
+        traj = _get_loader(suite)[traj_idx]
+        traj_cache[key] = traj
+        if len(traj_cache) > traj_cache_size:
+            traj_cache.popitem(last=False)
+        return traj
+
+    def _build(entry: ReplayEntry) -> dict[str, Any]:
+        if entry.suite is None:
+            raise ValueError(
+                "make_lerobot_obs_builder: ReplayEntry suite is None; the "
+                "LeRobot factory needs a per-suite dataset_root mapping."
+            )
+        traj = _get_traj(entry.suite, entry.traj_idx)
+        return build_observation_for_step(
+            traj,
+            entry.step_idx,
+            modality_configs,
+            et,
+            language_keys,
+            extract_step_data,
+        )
+
+    return _build
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +859,9 @@ __all__ = [
     "ActionConsistencyKernel",
     "DifferentiableBackboneSteerHook",
     "FakePolicy",
+    "ObsBuilder",
+    "ObsBuilderFactory",
     "attach_differentiable_backbone_steer",
     "make_dummy_obs_builder",
+    "make_lerobot_obs_builder",
 ]

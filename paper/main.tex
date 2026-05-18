@@ -10,9 +10,11 @@
 % target workshop's pack into this folder and switch \documentclass below
 % before submission.
 
+% arXiv-style preprint formatting (modeled after the kourgeorge
+% `arxiv.sty` template that dominates ML-on-arXiv).
 \documentclass[11pt]{article}
 
-\usepackage[margin=1in]{geometry}
+\usepackage[letterpaper, margin=1in]{geometry}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
@@ -25,27 +27,66 @@
 \usepackage{array}
 \usepackage{caption}
 \usepackage{subcaption}
-\usepackage[round,authoryear]{natbib}
-\usepackage{hyperref}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[colorlinks=true,
+            linkcolor=black,
+            citecolor=blue!50!black,
+            urlcolor=blue!40!black]{hyperref}
 \usepackage{url}
 \usepackage{tikz}
 \usetikzlibrary{positioning,arrows.meta,shapes.geometric,fit,backgrounds}
 \usepackage{listings}
 \usepackage{enumitem}
 \usepackage{titlesec}
+\usepackage{authblk}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
 
-\hypersetup{
-  colorlinks=true,
-  linkcolor=black,
-  citecolor=blue!50!black,
-  urlcolor=blue!40!black
+% --- arXiv-style headings: sans-serif bold, modest sizing -----------------
+\titleformat{\section}{\sffamily\large\bfseries}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\sffamily\normalsize\bfseries}{\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}{\sffamily\normalsize\itshape}{\thesubsubsection}{0.6em}{}
+\titleformat{\paragraph}[runin]{\sffamily\normalsize\bfseries}{}{0em}{}[.]
+\titlespacing*{\section}{0pt}{1.4ex plus 0.4ex minus 0.2ex}{0.8ex plus 0.2ex}
+\titlespacing*{\subsection}{0pt}{1.1ex plus 0.3ex minus 0.2ex}{0.6ex plus 0.2ex}
+
+% --- arXiv-style abstract: bold sans-serif label, indented body -----------
+\renewenvironment{abstract}
+  {\vskip 0.5em
+   \begin{center}{\sffamily\bfseries\large Abstract\par}\end{center}
+   \begin{quote}\small\noindent\ignorespaces}
+  {\par\end{quote}\vskip 1em}
+
+% --- arXiv-style running header --------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\sffamily\small\itshape A \textsc{Preprint} -- \today}
+\fancyhead[R]{\sffamily\small\thepage}
+\fancyfoot[C]{}
+
+% --- arXiv-style title: sans-serif, bold -----------------------------------
+\makeatletter
+\renewcommand{\maketitle}{%
+  \begingroup
+    \begin{center}
+      \vskip 0.5em
+      {\sffamily\bfseries\Large \@title \par}
+      \vskip 1.5em
+      {\normalsize\sffamily \@author \par}
+      \vskip 1em
+      {\small\@date \par}
+    \end{center}
+    \vskip 1em
+  \endgroup
 }
+\makeatother
 
 \graphicspath{{figures/}{../data/eval/steerability_v1_vs_v3/figures/}}
 
 \newcommand{\todo}[1]{{\color{red}\textbf{[TODO: #1]}}}
-\newcommand{\AV}{\textsc{AV}}
-\newcommand{\AR}{\textsc{AR}}
+\newcommand{\AV}{\ensuremath{\mathrm{AV}}}
+\newcommand{\AR}{\ensuremath{\mathrm{AR}}}
 \newcommand{\hvec}{\mathbf{h}}
 \newcommand{\hhat}{\hat{\mathbf{h}}}
 \newcommand{\code}[1]{\texttt{\small #1}}
@@ -62,138 +103,142 @@
   showstringspaces=false
 }
 
-\title{\texorpdfstring{\textbf{Talking to a Robot's Hidden State:}\\
-       Natural Language Autoencoders on a\\
-       Vision--Language--Action Backbone}{Talking to a Robot's Hidden State: Natural Language Autoencoders on a Vision-Language-Action Backbone}}
+\title{Natural Language Autoencoders Read and Steer\\
+       Vision-Language-Action Policy Backbones}
 
-\author{
-  Anonymous Authors\\
-  \textit{Submitted draft. Target: NeurIPS 2026 workshop track.}
+\author{%
+  Anonymous Author(s)\\
+  \small Affiliation\\
+  \small \texttt{email@institution.edu}
 }
 
-\date{}
+\date{\today}
 
 \begin{document}
 \maketitle
 
+\thispagestyle{fancy}
+
 \begin{abstract}
-Vision--language--action (VLA) policies such as NVIDIA's GR00T expose a
-high-dimensional Qwen3-VL backbone hidden state \(\hvec\) that is causally
-upstream of the action head, yet there is no agreed-upon way to read
+Vision-language-action (VLA) policies such as NVIDIA's GR00T expose a
+high-dimensional Qwen3-VL backbone hidden state \(\hvec\) that is
+causally upstream of the action head. There is no standard way to read
 \(\hvec\) out as natural language or to write back into it from
-language. We adapt the recently proposed Natural Language Autoencoder
-(NLA) recipe~\citep{frasertaliente2026nla} to this setting and release
-\code{nla-groot}, an open implementation that (i) extracts per-token
-activations from GR00T's backbone, (ii) trains a paired \emph{activation
-verbalizer} \AV{} (\(\hvec \to y\)) and \emph{activation reconstructor}
-\AR{} (\(y \to \hhat\)) with joint supervised fine-tuning plus an optional
-GRPO phase that uses \AR{} as a learned reconstruction reward, and (iii)
-injects \AR{}'s output back into the live policy server as a backbone
-steering perturbation in LIBERO closed-loop simulation. We propose a
-three-axis evaluation harness---offline reconstruction, multimodal LLM
-grounding judge, and closed-loop steerability A/B---and report a
-\emph{negative-result-rich} pilot on LIBERO Goal: our V3 checkpoint
-attains a healthy retrieval margin (\(0.124\)) and \(100\%\) caption
-\emph{appropriateness} but only \(8.3\%\) anti-template specificity,
-\(41.7\%\) grounding, and a zero correct-minus-wrong steering gap on the
-single tested task. Reconstruction-only metrics would have called this a
-success; the harness does not. We argue this evaluation pattern, and the
-``shorthand template collapse'' failure mode it surfaces, are a
-prerequisite for any future NLA-style interpretability work on VLA
-policies.
+language. We adapt the Natural Language Autoencoder (NLA)
+recipe~\citep{frasertaliente2026nla} to this setting and release
+\code{nla-groot}, an open-source implementation that (i) extracts
+per-token activations from GR00T's backbone, (ii) trains a paired
+\emph{activation verbalizer} \AV{} (\(\hvec \to y\)) and
+\emph{activation reconstructor} \AR{} (\(y \to \hhat\)) with joint
+supervised fine-tuning, with an optional GRPO phase that uses \AR{} as
+a learned reconstruction reward, and (iii) injects \AR{}'s output back
+into the live policy server as a backbone steering perturbation in
+LIBERO closed-loop simulation. We propose a three-axis evaluation
+protocol that combines offline reconstruction, a multimodal LLM
+grounding judge, and a closed-loop steerability A/B test. We report a
+pilot study on LIBERO Goal in which our V3 checkpoint attains a
+retrieval margin of \(0.124\) and \(100\%\) caption
+\emph{appropriateness}, but only \(8.3\%\) anti-template specificity,
+\(41.7\%\) grounding, and a zero correct-minus-wrong steering gap on
+the single task tested. Reconstruction metrics alone would call this
+run a success; the full protocol does not. We propose this protocol,
+together with the ``shorthand template collapse'' failure mode it
+surfaces, as a prerequisite for future NLA-style interpretability work
+on VLA policies.
 \end{abstract}
 
 \section{Introduction}
 \label{sec:intro}
 
-Recent vision--language--action (VLA) models pair a Vision-Language
+Recent vision-language-action (VLA) models pair a vision-language
 backbone with a diffusion or flow-matching action head and act
 end-to-end on physical robots~\citep{nvidia2025gr00t,
-brohan2023rt2,kim2024openvla}. As capabilities scale, an old question
-returns in a new form: \emph{what does the model \textbf{think} it is
-about to do, expressed in a representation a human can audit and
-edit?} Mechanistic interpretability tooling for language
-models---probes~\citep{alain2017linear,belinkov2022probing}, sparse
+brohan2023rt2,kim2024openvla}. As these models scale, a question
+becomes pressing: what does the policy represent internally about the
+task it is about to execute, in a form that a human can read and
+modify? Interpretability tooling for language models, including
+probes~\citep{alain2017linear,belinkov2022probing}, sparse
 autoencoders~\citep{cunningham2023sparseautoencoders,bricken2023monosemanticity},
-and activation steering~\citep{turner2023actadd,zou2023repe}---has not
+and activation steering~\citep{turner2023actadd,zou2023repe}, has not
 yet been adapted to the policy setting, where downstream behavior is
-itself an evaluation modality.
+itself an evaluation signal.
 
-\paragraph{The NLA recipe, on a VLA.}
-\citet{frasertaliente2026nla} showed that an LM's hidden state can be
-``round-tripped'' through natural language: a small \emph{activation
+\paragraph{The NLA recipe applied to a VLA.}
+\citet{frasertaliente2026nla} show that an LM hidden state can be
+encoded into text and decoded back: a small \emph{activation
 verbalizer} (\AV) is trained to caption an injected activation, and a
 paired \emph{activation reconstructor} (\AR) is trained to invert the
-caption back into activation space, providing both an interpretability
-artifact (the caption) and a causal handle (the reconstructed vector).
-This paper asks whether the same recipe transfers to a VLA backbone,
-where the hidden state is intended to carry scene-and-task semantics
-that the action head consumes.
+caption back into activation space. This produces both an
+interpretability artifact (the caption) and a causal handle (the
+reconstructed vector). We ask whether the same recipe transfers to a
+VLA backbone, in which the hidden state is intended to carry scene and
+task information that the action head consumes.
 
 \paragraph{Contributions.}
 \begin{enumerate}[topsep=2pt,itemsep=2pt,leftmargin=*]
-  \item \textbf{System:} an end-to-end open implementation
+  \item \textbf{System.} An open-source implementation
     (\code{nla-groot}) that extracts GR00T backbone activations
     (Qwen3-VL, 16-layer truncation, \(d{=}2048\)), labels them with a
-    multimodal teacher, jointly SFT-trains \AV{}/\AR{} on top of a
+    multimodal teacher, jointly trains \AV{} and \AR{} on top of a
     Qwen3-4B-Instruct base, and exposes \AR{}'s output as a live
     backbone steering vector in the official GR00T LIBERO policy
     server (\S\ref{sec:method}).
-  \item \textbf{Evaluation harness:} three complementary axes---offline
-    reconstruction (FVE/cosine/retrieval), multimodal LLM judge on
-    cached frames (axes B/C), and closed-loop sim A/B with matched-,
-    mismatched-, and null-caption arms---wired into a single PASS/WARN/FAIL
-    \emph{scorecard}~(\S\ref{sec:eval}).
-  \item \textbf{Pilot findings:} on a LIBERO 4-suite combined corpus,
-    our best checkpoint passes reconstruction-style metrics but
-    \emph{fails} grounding and steering. We characterize this
-    ``shorthand template collapse'' failure mode, show that retrieval
-    margin and reconstruction cosine alone are insufficient as a
-    workshop-grade success criterion, and surface a train--deploy
-    distribution gap that limits behavioral
-    steering~(\S\ref{sec:results}).
+  \item \textbf{Evaluation protocol.} Three complementary axes:
+    offline reconstruction (FVE, cosine, retrieval), a multimodal LLM
+    judge on cached frames (axes B and C), and a closed-loop sim A/B
+    test with matched, mismatched, and null caption arms. Results are
+    aggregated into a single PASS/WARN/FAIL scorecard
+    (\S\ref{sec:eval}).
+  \item \textbf{Pilot study.} On a LIBERO 4-suite combined corpus, our
+    best checkpoint passes reconstruction metrics but fails grounding
+    and steering. We characterize this ``shorthand template collapse''
+    failure mode, show that retrieval margin and reconstruction cosine
+    alone are insufficient as a success criterion, and document a
+    train-deploy distribution gap that limits behavioral steering
+    (\S\ref{sec:results}).
 \end{enumerate}
 
-\paragraph{Thesis.} \emph{NLA-style autoencoding is a credible
-direction for VLA interpretability, but only behind a multi-axis
-harness; reconstruction metrics in isolation are misleading.}
+\paragraph{Thesis.} \emph{NLA-style autoencoding is a viable approach
+to VLA interpretability, but only behind a multi-axis protocol;
+reconstruction metrics in isolation are misleading.}
 
 \section{Background and related work}
 \label{sec:related}
 
-\paragraph{Vision--language--action policies.}
+\paragraph{Vision-language-action policies.}
 GR00T~\citep{nvidia2025gr00t} couples a Cosmos-Reason2-2B / Qwen3-VL
-backbone with a diffusion action head; only the first
-\code{SELECT\_LAYER}\(=\!16\) decoder layers are retained at deployment,
-so the policy effectively reads a 2048-d hidden state at layer 16.
-Related VLAs include RT-2~\citep{brohan2023rt2},
+backbone with a diffusion action head. Only the first
+\code{SELECT\_LAYER}\(=\!16\) decoder layers are retained at
+deployment, so the policy reads a 2048-dimensional hidden state at
+layer 16. Related VLAs include RT-2~\citep{brohan2023rt2},
 OpenVLA~\citep{kim2024openvla}, and Octo~\citep{octo2024}. We focus on
-GR00T because its backbone--head split is explicit and its checkpoints
-are public.
+GR00T because its backbone-head split is explicit and its checkpoints
+are publicly available.
 
 \paragraph{Activation interpretability.}
-Linear probes recover task-relevant subspaces~\citep{alain2017linear};
-sparse autoencoders~\citep{cunningham2023sparseautoencoders,
-bricken2023monosemanticity, templeton2024scaling} factor activations
-into monosemantic features. NLA~\citep{frasertaliente2026nla}
-complements these by producing \emph{free-text} explanations
-\(y=\AV(\hvec)\) and a faithfulness anchor
-\(\hhat=\AR(y)\). \code{nla-groot} ports the recipe to a VLA backbone.
+Linear probes recover task-relevant subspaces~\citep{alain2017linear},
+and sparse autoencoders factor activations into approximately
+monosemantic features~\citep{cunningham2023sparseautoencoders,
+bricken2023monosemanticity, templeton2024scaling}. NLA
+\citep{frasertaliente2026nla} complements these methods by producing
+free-text explanations \(y=\AV(\hvec)\) together with a faithfulness
+anchor \(\hhat=\AR(y)\). \code{nla-groot} ports this recipe to a VLA
+backbone.
 
 \paragraph{Activation steering.}
-Activation editing has demonstrated controllable behavior in LMs via
-linear directions~\citep{turner2023actadd, zou2023repe,
-liu2024incontext, panickssery2024steering}. In robotics, behavioral
-steering is rarer; closed-loop sim is the appropriate validation modality
-when the model is a policy. We treat \AR{}'s output as a candidate
-steering vector and \emph{measure} whether it changes downstream
-behavior on LIBERO.
+Activation editing has produced controllable behavior in language
+models via linear directions~\citep{turner2023actadd, zou2023repe,
+liu2024incontext, panickssery2024steering}. Behavioral steering of
+robot policies is less studied, and closed-loop simulation is the
+appropriate validation setting when the model is a policy. We treat
+\AR{}'s output as a candidate steering vector and measure whether it
+changes downstream behavior on LIBERO.
 
 \paragraph{Robotic simulation benchmarks.}
 LIBERO~\citep{liu2023libero} is a suite of MuJoCo-based manipulation
-tasks with public assets; GR00T ships posttrained checkpoints per LIBERO
-sub-suite (e.g.\ \code{libero\_goal}). We use these as the closed-loop
-ground truth.
+tasks with public assets. GR00T provides posttrained checkpoints per
+LIBERO sub-suite (e.g.\ \code{libero\_goal}), which we use as the
+closed-loop ground truth.
 
 \section{Method}
 \label{sec:method}
@@ -201,14 +246,15 @@ ground truth.
 \subsection{Data: extraction and labeling}
 
 Per-token backbone activations are captured by a forward hook on the
-GR00T \code{backbone\_features} tensor, before the post-VL LayerNorm and
-the cross-attention to the action head (canonicalized in
-\code{src/nla/layer\_spec.py}). For each LeRobot episode and step we
-record \(\hvec_i \in \mathbb{R}^{2048}\) at three position types (text,
-image-patch, image-summary; see~\citet{frasertaliente2026nla}). A
-multimodal teacher (GPT-class) is shown the raw camera frame(s),
-instruction, and token-position metadata, and emits a structured
-bullet-point caption that we treat as gold for SFT.
+GR00T \code{backbone\_features} tensor, before the post-VL LayerNorm
+and the cross-attention to the action head (the layer spec is
+documented in \code{src/nla/layer\_spec.py}). For each LeRobot episode
+and step we record \(\hvec_i \in \mathbb{R}^{2048}\) at three position
+types (text, image-patch, image-summary; see
+\citet{frasertaliente2026nla}). A multimodal teacher (GPT-class) is
+given the raw camera frame(s), instruction, and token-position
+metadata, and emits a structured bullet-point caption that we treat as
+the gold target for supervised training.
 
 A per-corpus scalar \(\alpha\) is estimated as the 75th percentile of
 \(\|\hvec\|_2\) and used for both volumetric calibration of injection
@@ -240,13 +286,14 @@ contrastive term with mined hard negatives (top-\(k\) cosine, \(k{=}4\)).
 \subsection{Training}
 
 \paragraph{Joint SFT.}
-\AV{} and \AR{} are updated on the same batches, so \AR{} sees \AV{}'s
-gold-text targets and \AV{} cannot drift independently. The headline
-recipe (run \code{libero\_4suite\_v3}) uses 15{,}000 steps at
-batch~\(=\!4\), lr~\(=\!10^{-4}\), 500-step warmup, cosine schedule,
-\(\mathrm{ar\_av\_mix\_max}=0.4\) (scheduled AR-on-\AV{}-sampled-text
-mixing past 30\% of training to close the train--deploy text gap), and
-held-out fraction~\(=\!0.05\) episode-split.
+\AV{} and \AR{} are updated on the same batches, so that \AR{} sees
+\AV{}'s gold-text targets and \AV{} cannot drift independently. The
+main configuration (run \code{libero\_4suite\_v3}) uses 15{,}000 steps
+with batch size \(4\), learning rate \(10^{-4}\), 500-step warmup,
+cosine schedule, \(\mathrm{ar\_av\_mix\_max}=0.4\) (scheduled mixing of
+AR-on-AV-sampled-text past 30\% of training, used to close the
+train-deploy text gap), and held-out fraction \(0.05\) with an
+episode-level split.
 
 \paragraph{Optional GRPO phase.}
 After SFT, \AV{} can be further trained by GRPO with the frozen \AR{} as
@@ -277,60 +324,63 @@ features on every \code{get\_action} call.
   \label{fig:overview}
 \end{figure}
 
-\section{Evaluation harness}
+\section{Evaluation protocol}
 \label{sec:eval}
 
-We deliberately decline to call any one number ``the score''. Instead,
-each checkpoint is graded on three axes; a single scorecard
-(\code{scripts/eval/build\_v3\_scorecard.py}) emits PASS/WARN/FAIL per
-metric against pre-registered thresholds.
+We evaluate each checkpoint on three independent axes. A single
+scorecard (\code{scripts/eval/build\_v3\_scorecard.py}) emits
+PASS/WARN/FAIL per metric against pre-registered thresholds.
 
-\subsection{Axis 1 -- Offline reconstruction and discriminability}
+\subsection{Axis 1: Offline reconstruction and discriminability}
 
 \begin{itemize}[topsep=2pt,itemsep=2pt,leftmargin=*]
   \item \textbf{Closed-loop cosine}: \(\cos(\hvec,
-    \AR(\AV(\hvec)))\) (rather than teacher-forced), to penalize \AV{}
-    captions that \AR{} cannot invert.
+    \AR(\AV(\hvec)))\), computed without teacher forcing, in order to
+    penalize \AV{} captions that \AR{} cannot invert.
   \item \textbf{Retrieval margin} and \textbf{retrieval@\(K\)}: matched
-    vs.\ cross-pair cosine on \(\AR(\AV(\hvec))\) against a held-out
-    pool; catches non-discriminative \(\hhat\) (template collapse).
+    versus cross-pair cosine on \(\AR(\AV(\hvec))\) against a held-out
+    pool. These metrics detect non-discriminative \(\hhat\), i.e.\
+    template collapse.
 \end{itemize}
 
-\subsection{Axis 2 -- Multimodal LLM judge}
+\subsection{Axis 2: Multimodal LLM judge}
 
-\code{scripts/eval/llm\_judge\_av\_captions.py} re-renders the original
-frame, hands the multimodal judge the \emph{frame} + caption, and
-scores three rubrics: (A)~format/length, (B)~\emph{grounding} (does the
-caption describe what is in the picture, not a generic template), and
-(C)~\emph{appropriateness} (is it the right kind of caption for this
-position type). Gold (teacher) captions on the same frames give a
-calibration ceiling; we report both gold and \AV{} pass rates and their
-gap.
+The script \code{scripts/eval/llm\_judge\_av\_captions.py} re-renders
+the original frame, supplies the multimodal judge with both the frame
+and the caption, and scores three rubrics: (A) format and length,
+(B) \emph{grounding} (does the caption describe what is in the image,
+rather than a generic template), and (C) \emph{appropriateness}
+(does the caption have the expected type for this position). Gold
+(teacher) captions on the same frames define a calibration ceiling.
+We report both gold and \AV{} pass rates and the gap between them.
 
-\subsection{Axis 3 -- Closed-loop steerability A/B}
+\subsection{Axis 3: Closed-loop steerability A/B}
 
-Hardware-grounded: a steerability A/B (\code{scripts/eval/closed\_loop\_sim\_ab.py}
-and \code{scripts/eval/steerability\_eval.py}) runs LIBERO Goal episodes
-on the official GR00T checkpoint under three caption arms per task:
-\emph{baseline} (no steer), \emph{correct} (caption that matches the
-scene/instruction), and \emph{wrong} (a contradictory caption). The
-headline number is \(\Delta_{cw} = \mathrm{succ}_{\text{correct}} -
-\mathrm{succ}_{\text{wrong}}\); we target \(\Delta_{cw} \geq +5\)pp as
-PASS. Per-object displacement and minimum end-effector distance are
-logged for failure analysis.
+A closed-loop steerability A/B test
+(\code{scripts/eval/closed\_loop\_sim\_ab.py} and
+\code{scripts/eval/steerability\_eval.py}) runs LIBERO Goal episodes on
+the official GR00T checkpoint under three caption arms per task:
+\emph{baseline} (no steering), \emph{correct} (caption that matches
+the scene and instruction), and \emph{wrong} (a contradictory
+caption). The primary metric is \(\Delta_{cw} =
+\mathrm{succ}_{\text{correct}} - \mathrm{succ}_{\text{wrong}}\); we
+register \(\Delta_{cw} \geq +5\)pp as the PASS threshold. Per-object
+displacement and minimum end-effector distance are logged for failure
+analysis.
 
 \section{Experiments and results}
 \label{sec:results}
 
 \subsection{Setup}
 
-The headline checkpoint, \code{libero\_4suite\_v3}, is trained on a
+The main checkpoint, \code{libero\_4suite\_v3}, is trained on a
 combined LIBERO Goal/Spatial/Object/10 activation corpus with the
-hyperparameters of \S\ref{sec:method}. Closed-loop sim is run against
-\code{nvidia/GR00T-N1.7-LIBERO/libero\_goal} (embodiment
+hyperparameters in \S\ref{sec:method}. Closed-loop simulation is run
+against \code{nvidia/GR00T-N1.7-LIBERO/libero\_goal} (embodiment
 \code{LIBERO\_PANDA}) on the single task
-\code{put\_the\_bowl\_on\_the\_plate}, three seeds \(\{0,1,2\}\),
-\code{max\_episode\_steps}\(=300\), eight action steps per chunk.
+\code{put\_the\_bowl\_on\_the\_plate}, with three seeds
+\(\{0,1,2\}\), \code{max\_episode\_steps}\(=300\), and eight action
+steps per chunk.
 
 \subsection{Scorecard}
 
@@ -370,14 +420,14 @@ sim\_correct\_minus\_wrong           & 0.000 & 0.05 & 0.00 & WARN \\
 because \emph{both} arms have zero success.
 \end{table}
 
-\subsection{AV captions vs.\ teacher (judge)}
+\subsection{AV captions versus teacher (judge)}
 
 Table~\ref{tab:av-judge} reports judge pass rates on a 24-row held-out
-sample (verbatim from \code{av\_metrics.json}). The gap to gold is the
-honest signal: 25--50pp on grounding, 33--42pp on anti-template
-specificity. The gold ceiling itself is 75--83\%, which sets an upper
-bound a workshop reviewer should expect a \emph{credible} \AV{} to
-approach.
+sample, taken verbatim from \code{av\_metrics.json}. The gap between
+\AV{} and the gold ceiling is the key result: 25 to 50 percentage
+points on grounding, and 33 to 42 percentage points on anti-template
+specificity. The gold ceiling itself is 75 to 83\%, which sets an
+upper bound that a competitive \AV{} should approach.
 
 \begin{table}[t]
 \centering
@@ -407,22 +457,22 @@ rates on a 24-row held-out sample per dataset. Numbers from
 
 \subsection{Closed-loop steerability}
 
-Across three steer prompts \(\times\) two AR variants
-(\code{libero\_goal\_pilot} and \code{libero\_4suite\_v3}) \(\times\) 3
+We sweep three steering prompts and two AR variants
+(\code{libero\_goal\_pilot} and \code{libero\_4suite\_v3}) across three
 seeds (Table~\ref{tab:steer}, distilled from
-\code{data/eval/steerability\_v1\_vs\_v3/metrics.json}), the baseline
+\code{data/eval/steerability\_v1\_vs\_v3/metrics.json}). The baseline
 policy solves the task on every seed
-(\code{success\_any\_rate}\(=1.0\)) and every steering condition
-\emph{stops} it from doing so (\code{success\_any\_rate}\(=0.0\)). This
-is a robust behavioral effect---steer-on does change behavior---but it
-is symmetric: the correct (\code{bowl\_plate}) and contradictory
-(\code{wine\_rack}, \code{bowl\_stove}) prompts both block the task,
-giving \(\Delta_{cw}=0\) and disqualifying any semantic claim from this
-pilot. The \emph{per-object} displacement and end-effector traces
-(Figure~\ref{fig:displacement}) reveal that all steered conditions
-collapse the bowl's per-object displacement to \(\approx 0.07\)m versus
-\(0.145\)m at baseline---i.e.\ steering reduces motion uniformly rather
-than redirecting it to the prompted object.
+(\code{success\_any\_rate}\(=1.0\)). Every steering condition prevents
+task completion (\code{success\_any\_rate}\(=0.0\)). Steering therefore
+has a consistent behavioral effect, but the effect is symmetric: the
+correct prompt (\code{bowl\_plate}) and the contradictory prompts
+(\code{wine\_rack}, \code{bowl\_stove}) both block the task. This
+gives \(\Delta_{cw}=0\) and rules out any semantic claim from this
+pilot. The per-object displacement and end-effector traces in
+Figure~\ref{fig:displacement} show that all steered conditions collapse
+the bowl's displacement to approximately \(0.07\)m, compared with
+\(0.145\)m at baseline. In other words, steering reduces motion
+uniformly rather than redirecting it toward the prompted object.
 
 \begin{table}[t]
 \centering
@@ -465,81 +515,85 @@ steer\_bowl\_stove (v3 AR)       & 0.00 & 0.072 (bowl) & 1.00 \\
   \label{fig:displacement}
 \end{figure}
 
-\subsection{Reading the results}
+\subsection{Discussion of results}
 
-Three observations dominate.
+We summarize three findings.
 
 \paragraph{(i) Reconstruction passes; behavior does not.}
-The retrieval margin and appropriateness rate would, on their own,
-read as a successful training run. The judge's grounding and
-anti-template scores, and the symmetric LIBERO-Goal failure, contradict
-that read directly. This validates the harness: had we shipped only the
-reconstruction-style metrics we would have over-claimed.
+The retrieval margin and appropriateness rate, considered in
+isolation, would read as a successful training run. The grounding and
+anti-template scores from the judge, together with the symmetric
+LIBERO-Goal failure, contradict this reading. The protocol therefore
+serves its purpose: reporting reconstruction metrics alone would have
+led to an overclaim.
 
 \paragraph{(ii) Shorthand template collapse persists in V3.}
-The 8.3\% anti-template rate on the 4-suite holdout means \(\AV{}\)
-captions are mostly indistinguishable from a corpus-mean template. This
-is the same failure mode reported for the earlier
-\code{droid\_100ep\_v2\_nce} run (V2 post-mortem,
-\code{docs/sft\_plan/06\_v2\_postmortem\_v3\_rerun.md}); V3's mitigations
-(\code{ar\_av\_mix\_max}, InfoNCE hard negatives, episode-split)
-narrowed the gap but did not close it.
+The 8.3\% anti-template rate on the 4-suite holdout means that
+\(\AV{}\) captions are largely indistinguishable from a corpus-mean
+template. This is the same failure mode reported for the earlier
+\code{droid\_100ep\_v2\_nce} run (V2 post-mortem in
+\code{docs/sft\_plan/06\_v2\_postmortem\_v3\_rerun.md}). The V3
+mitigations (\code{ar\_av\_mix\_max}, InfoNCE hard negatives, and an
+episode-level split) narrow the gap but do not close it.
 
-\paragraph{(iii) Steering bites, but is not yet semantic.}
-Every steered condition blocks task completion---so there is energy in
-the perturbation---but the prompt's identity does not appear to choose
-\emph{what} the policy attends to. We attribute this to (a) the
-AR's train--deploy distribution gap (it is trained on gold-style
-bullet captions and deployed on hand-written ones), and (b) the
-\code{image\_patch\_all} placement at blend~\(=\!1.0\) being a coarse
-intervention (consistent with the open-loop probe in
-\code{scripts/eval/nla\_steer\_quant\_probe.py}).
+\paragraph{(iii) Steering changes behavior, but not yet semantically.}
+Every steered condition blocks task completion, so the perturbation
+clearly has effect, but the identity of the prompt does not appear to
+determine what the policy attends to. We attribute this to two
+factors: (a) the train-deploy distribution gap for \AR{}, which is
+trained on gold-style bullet captions and deployed on hand-written
+ones; and (b) the \code{image\_patch\_all} placement at
+\code{blend}\(=\!1.0\), which is a coarse intervention, consistent
+with the open-loop probe in
+\code{scripts/eval/nla\_steer\_quant\_probe.py}.
 
 \section{Limitations}
 \label{sec:limitations}
 
 \begin{itemize}[topsep=2pt,itemsep=2pt,leftmargin=*]
-  \item \textbf{Single task, small \(n\).} The closed-loop sim numbers
-    above are three seeds on one LIBERO Goal task. We frame them as
-    feasibility, not a benchmark; a multi-task LIBERO sweep with
-    per-prompt affordance scoring is required before any quantitative
-    semantic-steering claim.
-  \item \textbf{Teacher--$\hvec$ confound.} The multimodal teacher sees
-    the original frame and may mention scene facts that are only
-    weakly present in \(\hvec\), so SFT loss does not strictly equal
-    ``what \(\hvec\) encodes''. This is inherited from the NLA recipe
-    and motivates the judge's grounding axis.
-  \item \textbf{AR train--deploy gap.} \AR{} is trained on gold-style
-    bullet captions; user-written steer prompts are out of
-    distribution. The \code{ar\_av\_mix\_max} schedule reduces but
-    does not eliminate this gap.
+  \item \textbf{Single task, small sample.} The closed-loop simulation
+    numbers above cover three seeds on one LIBERO Goal task. We treat
+    them as a feasibility study rather than a benchmark. A multi-task
+    LIBERO sweep with per-prompt affordance scoring would be required
+    before any quantitative claim about semantic steering.
+  \item \textbf{Teacher and $\hvec$ confound.} The multimodal teacher
+    sees the original frame and may describe scene attributes that are
+    only weakly present in \(\hvec\). The SFT loss therefore does not
+    correspond exactly to ``what \(\hvec\) encodes''. This is
+    inherited from the NLA recipe and motivates the judge's grounding
+    axis.
+  \item \textbf{AR train-deploy gap.} \AR{} is trained on gold-style
+    bullet captions, whereas user-written steering prompts are
+    out-of-distribution. The \code{ar\_av\_mix\_max} schedule reduces
+    but does not eliminate this gap.
   \item \textbf{Single backbone, single layer.} Activations are
-    extracted at layer 16 (\code{SELECT\_LAYER}) before the
-    post-VL LayerNorm. Other choices (\code{vl\_embeds},
-    DiT mid-block) are documented in \code{src/nla/layer\_spec.py} but
-    not ablated here.
-  \item \textbf{Judge as oracle.} The grounding judge is itself a large
-    multimodal model and inherits its own miscalibrations; we mitigate
-    by pairing every \AV{} score with a gold score on identical
-    frames.
+    extracted at layer 16 (\code{SELECT\_LAYER}) before the post-VL
+    LayerNorm. Other choices (\code{vl\_embeds}, DiT mid-block) are
+    documented in \code{src/nla/layer\_spec.py} but are not ablated
+    here.
+  \item \textbf{Judge as oracle.} The grounding judge is itself a
+    large multimodal model and may be miscalibrated. We partially
+    address this by pairing every \AV{} score with a gold score on
+    identical frames.
 \end{itemize}
 
 \section{Discussion and outlook}
 \label{sec:discussion}
 
-\code{nla-groot} establishes that the NLA recipe is implementable on a
-production VLA backbone and that the resulting checkpoint can be put
-in the loop of a public closed-loop simulator. The principal
-contribution of this short paper is the harness, not the headline
-number: a multi-axis scorecard with pre-registered thresholds and a
-behavioral arm is, in our experience, what separates an apparently
-successful run from an actually successful one.
+\code{nla-groot} shows that the NLA recipe is implementable on a
+production VLA backbone, and that the resulting checkpoint can be
+placed in the loop of a public closed-loop simulator. The principal
+contribution of this paper is the evaluation protocol rather than any
+single result. A multi-axis scorecard with pre-registered thresholds
+and a behavioral arm distinguishes apparently successful runs from
+genuinely successful ones.
 
 A natural next step is the GRPO phase against the AR-as-reward signal,
-which we have plumbed (\code{scripts/training/run\_grpo.py}) but do not
-report here. We expect GRPO with judge-blended reward to attack the
-template-collapse mode head-on, since judge rewards penalize generic
-captions in a way the supervised cross-entropy does not.
+for which the supporting code is in place
+(\code{scripts/training/run\_grpo.py}) but no results are reported
+here. GRPO with a judge-blended reward should directly address
+template collapse, since judge rewards penalize generic captions in a
+way that the supervised cross-entropy objective does not.
 
 \section*{Reproducibility}
 
@@ -549,7 +603,7 @@ commands appear in App.~\ref{app:repro}. Seeds: SFT and steerability
 rollouts both default to \code{seed=0}; the closed-loop sim numbers
 reported here use seeds \(\{0,1,2\}\).
 
-\bibliographystyle{plainnat}
+\bibliographystyle{unsrtnat}
 \bibliography{refs}
 
 \clearpage

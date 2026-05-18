@@ -7,10 +7,21 @@ counterfactual) target intent + target LIBERO BDDL env name.
 
 At training time we want one such pair per activation in a GRPO batch. The
 existing :class:`SampledPositionDataset` only yields ``(activation,
-position_type)`` so this module adds a *parallel index* keyed by the
-``source_example_id`` that the dataset already carries on its batches.
-``CounterfactualPairSampler`` then returns a list of target intents +
-env_names matched to a batch.
+position_type)`` so this module adds a *parallel index* keyed by both:
+
+* the JSONL row's ``source_example_id`` (the activation-shard id), AND
+* the JSONL row's ``example_id`` (the label id, often used by datasets
+  that hand back the label-side id instead of the activation-shard id).
+
+Either key resolves to the same candidate list, so callers can mix
+datasets that emit ``source_example_id``-style ids
+(e.g. ``goal__traj000218_step000020``) with those that emit
+``example_id``-style ids without hand-merging the JSONL beforehand. The
+sampler can also stitch together multiple pairs JSONLs via the
+``additional_paths`` constructor argument; rows are appended into the
+same candidate lists, dropping exact-duplicate ``(source_example_id,
+target_intent, target_task, target_env_name)`` tuples so a row that
+appears in two files isn't double-counted by ``random.choice``.
 
 The sampler is intentionally stateless w.r.t. activation extraction: it
 only reads the pairs JSONL and lets the GRPO trainer keep its own
@@ -25,7 +36,7 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Sequence
 
 
 logger = logging.getLogger(__name__)
@@ -64,21 +75,42 @@ class CounterfactualPairSampler:
         seed: int = 0,
         fallback_intent: str = "(no labeled intent)",
         fallback_env_name: str | None = None,
+        additional_paths: Iterable[str | Path] | None = None,
     ) -> None:
         self.pairs_path = Path(pairs_path)
+        self.additional_paths: list[Path] = [Path(p) for p in (additional_paths or [])]
         self.seed = int(seed)
         self.fallback_intent = fallback_intent
         self.fallback_env_name = fallback_env_name
         self._by_id: dict[str, list[CounterfactualPair]] = defaultdict(list)
+        # Per-bucket fingerprint set used to drop exact-duplicate pair rows
+        # so a pair that appears in multiple files (or under both id keys
+        # for the same row) is not double-weighted by ``random.choice``.
+        self._seen_per_bucket: dict[str, set[tuple]] = defaultdict(set)
         self._call_counter = 0
         self._load()
 
     def _load(self) -> None:
-        if not self.pairs_path.exists():
-            raise FileNotFoundError(f"counterfactual pairs file not found: {self.pairs_path}")
+        all_paths = [self.pairs_path, *self.additional_paths]
+        total_rows = 0
+        total_cf = 0
+        for path in all_paths:
+            n_rows, n_cf = self._load_one(path)
+            total_rows += n_rows
+            total_cf += n_cf
+        logger.info(
+            "CounterfactualPairSampler: loaded %d pairs across %d ids "
+            "(%.1f%% counterfactual) from %d file(s)",
+            total_rows, len(self._by_id),
+            100.0 * total_cf / max(1, total_rows), len(all_paths),
+        )
+
+    def _load_one(self, path: Path) -> tuple[int, int]:
+        if not path.exists():
+            raise FileNotFoundError(f"counterfactual pairs file not found: {path}")
         n_rows = 0
         n_cf = 0
-        with self.pairs_path.open() as f:
+        with path.open() as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -100,14 +132,39 @@ class CounterfactualPairSampler:
                     source_intent=str(obj.get("source_intent", "")),
                     source_task=str(obj.get("source_task", "")),
                 )
-                self._by_id[pair.source_example_id].append(pair)
+                # Index under BOTH the source-side id and the label-side id
+                # so a dataset that yields either flavor (see
+                # ``SampledPositionDataset.example_id`` vs the JSONL's
+                # ``source_example_id``) lands on the same candidate list.
+                # Dedup is per-bucket so a row that aliases itself
+                # (``example_id == source_example_id``) is only counted once
+                # per key.
+                keys: list[str] = [pair.source_example_id]
+                eid = obj.get("example_id")
+                if eid is not None:
+                    eid_s = str(eid)
+                    if eid_s != pair.source_example_id:
+                        keys.append(eid_s)
+                fp = (
+                    pair.source_example_id,
+                    pair.target_intent,
+                    pair.target_task,
+                    pair.target_env_name,
+                )
+                for key in keys:
+                    bucket_seen = self._seen_per_bucket[key]
+                    if fp in bucket_seen:
+                        continue
+                    bucket_seen.add(fp)
+                    self._by_id[key].append(pair)
                 n_rows += 1
                 if pair.is_counterfactual:
                     n_cf += 1
         logger.info(
-            "CounterfactualPairSampler: loaded %d pairs across %d ids (%.1f%% counterfactual) from %s",
-            n_rows, len(self._by_id), 100.0 * n_cf / max(1, n_rows), self.pairs_path,
+            "  %s: %d pairs (%.1f%% counterfactual)",
+            path, n_rows, 100.0 * n_cf / max(1, n_rows),
         )
+        return n_rows, n_cf
 
     def __len__(self) -> int:
         return len(self._by_id)

@@ -221,6 +221,10 @@ class SFTConfig:
     # Where to cache the replay manifest JSONL (defaults to
     # ``<output_dir>/aux/replay_manifest.jsonl``).
     action_consistency_manifest_cache: str | None = None
+    # Optional whitelist of suite names: when set, only manifest rows whose
+    # suite is in this set participate in the consistency forward (all other
+    # rows still go through the regular SFT objectives). ``None`` = no filter.
+    action_consistency_suites: tuple[str, ...] | None = None
 
 
 def _setup_outputs(out_dir: Path) -> dict[str, Path]:
@@ -493,6 +497,12 @@ def _build_action_consistency_kernel(cfg: SFTConfig, ar, out_dir: Path):
             "action_consistency_weight > 0 requires --action-consistency-policy-path "
             "to point at a frozen GR00T checkpoint."
         )
+    if not cfg.action_consistency_embodiment_tag:
+        raise ValueError(
+            "action_consistency_weight > 0 requires "
+            "--action-consistency-embodiment-tag (e.g. LIBERO_PANDA); the policy "
+            "loader needs it to resolve DATA_CONFIG_MAP."
+        )
     if not cfg.action_consistency_dataset_roots:
         raise ValueError(
             "action_consistency_weight > 0 requires --action-consistency-dataset-roots "
@@ -502,6 +512,7 @@ def _build_action_consistency_kernel(cfg: SFTConfig, ar, out_dir: Path):
     from nla.training.action_head_consistency import (
         ActionConsistencyConfig,
         ActionConsistencyKernel,
+        make_lerobot_obs_builder,
     )
     from nla.training.replay_manifest import build_replay_manifest
 
@@ -514,36 +525,63 @@ def _build_action_consistency_kernel(cfg: SFTConfig, ar, out_dir: Path):
     for k, v in (cfg.action_consistency_dataset_roots or {}).items():
         # Treat the empty string as "no suite prefix" (single-suite dumps).
         roots[None if not k else str(k)] = str(v)
+
+    # Optionally restrict the manifest to a whitelist of suites. This lets us
+    # run consistency on, e.g., libero_goal only while the other three suites
+    # still flow through the regular SFT objectives.
+    suite_whitelist: set[str] | None = None
+    if cfg.action_consistency_suites:
+        suite_whitelist = {str(s) for s in cfg.action_consistency_suites}
+        roots = {k: v for k, v in roots.items() if k in suite_whitelist}
+        if not roots:
+            raise ValueError(
+                "action_consistency_suites filtered the dataset_roots map to "
+                f"empty (whitelist={sorted(suite_whitelist)}, available="
+                f"{sorted(cfg.action_consistency_dataset_roots or {})}). "
+                "Either drop the filter or include at least one matching suite."
+            )
+
     manifest = build_replay_manifest(
         cfg.activations_root, roots, cache_path=cache,
     )
 
-    # Defer GR00T import to the policy loader so we can fail loudly only if
-    # the kernel actually fires.
-    def _policy_loader():
-        from nla.steering.sim_policy_wrapper import _load_gr00t_modules  # type: ignore[attr-defined]
-        # The eval/sim entrypoints already centralize policy construction;
-        # we reuse the public surface (``Gr00tPolicy``) here.
-        from gr00t.experiment.data_config import DATA_CONFIG_MAP
-        from gr00t.model.policy import Gr00tPolicy
-
-        modality_configs = DATA_CONFIG_MAP[cfg.action_consistency_embodiment_tag].modality_config()
-        return Gr00tPolicy(
-            model_path=cfg.action_consistency_policy_path,
-            embodiment_tag=cfg.action_consistency_embodiment_tag,
-            modality_config=modality_configs,
-            modality_transform=DATA_CONFIG_MAP[cfg.action_consistency_embodiment_tag]
-                .transform(),
-            device=cfg.device,
+    if not manifest:
+        raise RuntimeError(
+            "Replay manifest is empty after building from "
+            f"{cfg.activations_root} with suites={sorted(roots)}. The "
+            "consistency kernel will have no rows to operate on; either "
+            "broaden the suite filter or check that the activation example_ids "
+            "are parseable."
         )
 
-    def _obs_builder(entry):  # pragma: no cover -- exercised only with real policy
-        raise NotImplementedError(
-            "obs_builder needs a per-suite LeRobotEpisodeLoader; wire one in "
-            "before running --action-consistency-weight > 0 on real data. "
-            "Phase B scaffolding only ships the kernel + manifest; the obs "
-            "builder closure is intentionally left as a follow-up so we can "
-            "validate the kernel with FakePolicy in tests first."
+    # Defer GR00T import to the policy loader so we can fail loudly only if
+    # the kernel actually fires. We mirror the construction used elsewhere
+    # in the codebase (e.g. ``scripts/eval/run_gr00t_server_nla_steer.py``),
+    # which lets ``Gr00tPolicy`` auto-load modality configs from the
+    # checkpoint -- DATA_CONFIG_MAP doesn't exist on this gr00t version.
+    def _policy_loader():
+        from gr00t.policy.gr00t_policy import Gr00tPolicy
+
+        policy = Gr00tPolicy(
+            embodiment_tag=cfg.action_consistency_embodiment_tag,
+            model_path=cfg.action_consistency_policy_path,
+            device=cfg.device,
+        )
+        policy.model.eval()
+        return policy
+
+    # The LeRobot obs_builder needs ``policy.modality_configs`` to construct
+    # its loaders, which only exists after ``_policy_loader`` has run. The
+    # kernel resolves the factory inside ``ensure_loaded()`` for that reason.
+    roots_str_only: dict[str, str] = {
+        k: v for k, v in roots.items() if k is not None
+    }
+
+    def _obs_builder_factory(policy):
+        return make_lerobot_obs_builder(
+            policy,
+            roots_str_only,
+            cfg.action_consistency_embodiment_tag,
         )
 
     return ActionConsistencyKernel(
@@ -555,7 +593,7 @@ def _build_action_consistency_kernel(cfg: SFTConfig, ar, out_dir: Path):
         ),
         manifest=manifest,
         policy_loader=_policy_loader,
-        obs_builder=_obs_builder,
+        obs_builder_factory=_obs_builder_factory,
         ar_module=ar,
         device=cfg.device,
     )

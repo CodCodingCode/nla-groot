@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import torch
 from torch import nn
@@ -225,13 +225,18 @@ class ActivationVerbalizer(nn.Module):
         position_types: list[PositionType],
         target_texts: list[str] | None,
         device: torch.device | None = None,
-        target_intent_texts: list[str] | None = None,
+        target_intent_texts: Sequence[str | None] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
         """Tokenize each (prompt, optional target) pair.
 
         When ``target_intent_texts`` is provided (length must match B), the
         intent-conditioned AV template is used instead of the legacy
-        descriptive one. This is the path sim-success GRPO takes.
+        descriptive one. Individual entries may be ``None`` (per-row opt-out):
+        rows with ``target_intent_texts[b] is None`` fall back to the
+        descriptive prompt while sibling rows with a real string get the
+        intent-conditioned prompt. Partial-coverage sim-GRPO batches use
+        this to mix CF rows (intent-conditioned) with non-CF rows
+        (descriptive) in the same step.
 
         Returns
         -------
@@ -342,14 +347,16 @@ class ActivationVerbalizer(nn.Module):
         top_p: float | None = None,
         do_sample: bool = True,
         return_logprobs: bool = False,
-        target_intent_texts: list[str] | None = None,
+        target_intent_texts: Sequence[str | None] | None = None,
     ) -> dict:
         """Sampling rollout used both for inference and GRPO.
 
-        When ``target_intent_texts`` is provided (one string per row), the
+        When ``target_intent_texts`` is provided (one entry per row), the
         intent-conditioned AV prompt is used instead of the descriptive one.
-        This is the path sim-success GRPO uses to condition the rollout on
-        the target task the policy should learn to execute.
+        Per-row entries may be ``None`` to opt that row out of intent
+        conditioning (it falls back to the descriptive prompt); this is
+        what partial-coverage sim-GRPO batches use to mix rows that have a
+        CF pair (intent-conditioned) with rows that don't (descriptive).
         """
         max_new_tokens = max_new_tokens or self.cfg.max_new_tokens
         temperature = temperature if temperature is not None else self.cfg.generation_temperature
@@ -396,7 +403,7 @@ class ActivationVerbalizer(nn.Module):
         gen_token_ids: torch.Tensor,
         gen_attention_mask: torch.Tensor,
         *,
-        target_intent_texts: list[str] | None = None,
+        target_intent_texts: Sequence[str | None] | None = None,
     ) -> torch.Tensor:
         """Differentiable per-token log probs of ``gen_token_ids`` under this AV.
 
@@ -404,8 +411,10 @@ class ActivationVerbalizer(nn.Module):
         KL anchor (no grad). Activation injection follows the same single-slot
         recipe as ``forward_sft`` / ``generate``.
 
-        When ``target_intent_texts`` is provided (one string per row), the
-        intent-conditioned AV prompt is used. The caller MUST pass the same
+        When ``target_intent_texts`` is provided (one entry per row), the
+        intent-conditioned AV prompt is used. Per-row entries may be ``None``
+        for rows whose rollout was generated from the descriptive prompt
+        (partial-coverage sim-GRPO batches). The caller MUST pass the same
         ``target_intent_texts`` that ``generate`` used to produce
         ``gen_token_ids``, otherwise the score-time prompt won't match the
         rollout-time prompt and logprobs will be meaningless.

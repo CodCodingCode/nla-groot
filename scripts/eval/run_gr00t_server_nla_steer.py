@@ -28,6 +28,7 @@ See ``docs/evals/sim_steer_rollout.md`` for the two-terminal runbook.
 
 from __future__ import annotations
 
+import gc
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -156,8 +157,16 @@ def main(config: ServerConfig) -> None:
             f"{steer_text.strip().splitlines()[0][:80] if steer_text.strip() else '<empty>'}…"
         )
 
-        ar = load_ar_from_sft(Path(config.ar_dir), device=config.device, freeze=True)
+        # Load AR on CPU for the one-time bootstrap steer vector.  Keeping a
+        # second full Qwen+LoRA stack on the same GPU as GR00T caused silent
+        # aborts on some hosts (no Python traceback); CPU init is slower but
+        # reliable.  NlaSteerGr00tPolicy stores ``steer_vec`` on CPU anyway.
+        print("  AR load:        CPU (bootstrap steer only; GR00T stays on "
+              f"{config.device})", flush=True)
+        ar = load_ar_from_sft(Path(config.ar_dir), device="cpu", freeze=True)
         steer_vec = ar_text_to_backbone_vec(ar, steer_text)
+        del ar
+        gc.collect()
         spec = SteerSpec(
             placement=config.placement,
             blend=float(config.blend),

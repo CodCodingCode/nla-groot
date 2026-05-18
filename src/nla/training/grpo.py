@@ -91,7 +91,10 @@ class GRPOConfig:
     beta: float = 0.02             # KL coefficient (paper says sweep {0.01, 0.02, 0.05})
     advantage_normalize: bool = True
     advantage_clip: float | None = None   # optional advantage clipping
-    reward_normalize_groupwise: bool = True  # always group-relative; this gates std-norm
+    # When True (default), divide per-group advantages by the group's reward
+    # std (after mean-centering). When False, only mean-center within each
+    # group—useful when K is small or std estimates are unstable.
+    reward_normalize_groupwise: bool = True
     grad_accum_steps: int = 1
     grad_clip: float = 1.0
 
@@ -164,6 +167,20 @@ class GRPOConfig:
     # are hidden from the saved ``config.json``).
     sim_reward_weight: float = 0.0
     sim_counterfactual_pairs_path: str | None = None
+    # Optional extra CF pairs files merged into the primary sampler index.
+    # Useful when a run wants to plug in mined slices for additional shards
+    # (e.g. spatial + object atop a primary goal file) without having to
+    # hand-merge the JSONLs offline. Rows are deduped per id-bucket on
+    # ``(source_example_id, target_intent, target_task, target_env_name)``
+    # so a pair appearing in multiple files isn't double-weighted.
+    sim_counterfactual_pairs_paths_extra: list[str] = field(default_factory=list)
+    # When True, restore the legacy all-or-nothing batch sim gate: if any
+    # row in a batch is missing a valid ``(target_task, target_env_name)``
+    # CF pair, sim reward is zeroed for the entire step. Default False
+    # enables per-row sim eligibility: sim is computed for rows that do
+    # have a pair and skipped (z-mean only over eligible entries) for
+    # those that don't, so partial-coverage batches still learn from sim.
+    sim_require_full_batch_cf: bool = False
     sim_policy_host: str = "localhost"
     sim_policy_port: int = 5555
     sim_n_workers: int = 4
@@ -184,6 +201,56 @@ class GRPOConfig:
     # reconstruction GRPO where the AV describes the activation freely.
     use_intent_conditioned_prompt: bool = True
 
+    # ------------------------------------------------------------------
+    # SimpleVLA-RL-inspired knobs (all OFF/default for byte-identical
+    # baseline runs; the new fields are hidden from the saved
+    # ``config.json`` whenever they sit at their default values).
+    # ------------------------------------------------------------------
+    #
+    # 1) DYNAMIC SAMPLING. SimpleVLA-RL drops groups whose binary rollout
+    # rewards have zero variance (the GRPO advantage collapses to 0 anyway
+    # so they contribute no learning signal but still cost compute + KL
+    # mass). Our rewards are continuous (recon MSE, judge ±1.5, sim shape)
+    # so the analog is to drop any group whose per-group reward std is
+    # below ``dynamic_sampling_threshold``. The mask zeros out the row's
+    # contribution to PG loss, KL loss, and the reported reward stats so
+    # collapsed groups don't bias the diagnostics either. Default:
+    # ``None`` -> auto-enable when ``sim_reward_weight > 0`` (sim rewards
+    # are binary-ish and collapse often), otherwise OFF. Set explicitly
+    # to ``True`` / ``False`` from the CLI to override the auto-rule.
+    dynamic_sampling: bool | None = None
+    dynamic_sampling_threshold: float = 1e-4
+
+    # 2) CLIP-HIGHER. PPO-style importance-ratio clipping with separate
+    # low/high bounds (SimpleVLA-RL paper §3.2). Our trainer takes a
+    # single gradient step per rollout batch, so the importance ratio
+    # ``exp(new_logprobs - new_logprobs.detach())`` is identically 1 at
+    # the gradient eval point and the clip is a no-op for one-step
+    # updates. The form still matters when ``grad_accum_steps > 1`` (the
+    # ratio drifts from 1 within an accumulation window once the very
+    # first .backward() has flowed grad into the params -- though only
+    # after .step(), so even there the effect is tiny in our setup).
+    # We keep the surface for parity with SimpleVLA-RL and so we can
+    # later add multi-epoch updates per rollout without reshuffling
+    # the loss code. Default OFF preserves byte-identical loss math.
+    use_ppo_clip: bool = False
+    clip_eps_low: float = 0.2
+    clip_eps_high: float = 0.28
+
+    # 3) NO-KL MODE. SimpleVLA-RL ablates the KL anchor entirely on the
+    # premise that long-horizon policy entropy collapses anyway and the
+    # ref-AV memory + score_tokens forward is wasted. When True, we skip
+    # both the ref-policy logprob computation and the KL term in the
+    # loss; ``_build_models`` also avoids loading ``ref_av`` so we save
+    # the memory. Default False (keeps the paper-bible KL anchor).
+    disable_kl_anchor: bool = False
+
+    # 4) ROLLOUT TEMPERATURE OVERRIDE. SimpleVLA-RL anneals rollout
+    # temperature on a curriculum; for now we just expose a single high
+    # override: when set, ``grpo_step`` uses this value instead of
+    # ``rollout_temperature``. We can layer a curriculum on top later.
+    rollout_temperature_high: float | None = None
+
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -203,12 +270,40 @@ def _serialize_config(cfg: GRPOConfig) -> dict[str, Any]:
     if cfg.sim_reward_weight <= 0.0:
         for k in (
             "sim_reward_weight", "sim_counterfactual_pairs_path",
+            "sim_counterfactual_pairs_paths_extra",
+            "sim_require_full_batch_cf",
             "sim_policy_host", "sim_policy_port", "sim_n_workers",
             "sim_max_steps", "sim_placement", "sim_blend",
             "sim_cache_path", "sim_rollout_python", "sim_rollout_script",
             "sim_timeout_s", "sim_seed_base", "use_intent_conditioned_prompt",
         ):
             d.pop(k, None)
+    else:
+        # When sim is on, hide the extras/flag fields if they're at default
+        # so an old-style config.json stays comparable to existing logs.
+        if not cfg.sim_counterfactual_pairs_paths_extra:
+            d.pop("sim_counterfactual_pairs_paths_extra", None)
+        if not cfg.sim_require_full_batch_cf:
+            d.pop("sim_require_full_batch_cf", None)
+    # SimpleVLA-RL knobs are hidden whenever they sit at their defaults
+    # so a baseline run's config.json stays byte-identical to the
+    # pre-SimpleVLA layout. Each is dropped independently.
+    if cfg.dynamic_sampling is None:
+        d.pop("dynamic_sampling", None)
+    if cfg.dynamic_sampling_threshold == 1e-4:
+        d.pop("dynamic_sampling_threshold", None)
+    if not cfg.use_ppo_clip:
+        d.pop("use_ppo_clip", None)
+    if cfg.clip_eps_low == 0.2:
+        d.pop("clip_eps_low", None)
+    if cfg.clip_eps_high == 0.28:
+        d.pop("clip_eps_high", None)
+    if not cfg.disable_kl_anchor:
+        d.pop("disable_kl_anchor", None)
+    if cfg.rollout_temperature_high is None:
+        d.pop("rollout_temperature_high", None)
+    if cfg.reward_normalize_groupwise:
+        d.pop("reward_normalize_groupwise", None)
     return d
 
 
@@ -245,11 +340,24 @@ def _write_jsonl_row(path: Path, row: dict) -> None:
 # ----------------------------------------------------------------------------
 
 
-def _judge_cache_key(source_id: str, rollout_text: str) -> str:
+def _judge_cache_key(
+    source_id: str,
+    rollout_text: str,
+    grader_model: str = "",
+) -> str:
+    """SHA1 cache id for (source_id, text); include grader_model when set.
+
+    Appending the resolved judge model avoids reusing verdicts after changing
+    ``--judge-model`` / OPENAI_GRADER_MODEL. When ``grader_model`` is empty,
+    the hash matches the legacy two-field layout (tests / backward compat).
+    """
     h = hashlib.sha1()
     h.update(source_id.encode("utf-8"))
     h.update(b":")
     h.update(rollout_text.encode("utf-8"))
+    if grader_model:
+        h.update(b":")
+        h.update(grader_model.encode("utf-8"))
     return h.hexdigest()
 
 
@@ -343,6 +451,7 @@ def _blend_multi_rewards(
     judge_weight: float = 0.0,
     r_sim: torch.Tensor | None = None,
     sim_weight: float = 0.0,
+    sim_active: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Blend up to three reward terms (recon + judge + sim).
 
@@ -363,6 +472,16 @@ def _blend_multi_rewards(
         on alpha-scaled activations). Group-relative advantages survive this
         z-scoring, and the resulting term sits in the same numerical regime
         as the other two so a single LR works for all three blends.
+
+    When ``sim_active`` is provided (a 0/1 mask over ``r_sim`` indices), it
+    encodes per-row sim eligibility (partial-coverage sim-GRPO batches:
+    rows without a counterfactual pair get ``sim_active[i] = 0``). The
+    z-score of ``r_sim`` is then taken **only over active entries** so
+    inactive rows can't pollute the mean/std, and the per-index effective
+    sim weight is ``sim_weight * sim_active[i]`` — inactive rows fall back
+    to a pure (recon + judge) blend with the recon coefficient bumped back
+    up by the recovered sim slack. ``sim_active is None`` is byte-identical
+    to the pre-partial blend.
     """
     if judge_weight <= 0.0 and sim_weight <= 0.0:
         return r_recon
@@ -372,23 +491,74 @@ def _blend_multi_rewards(
         assert r_judge is not None
         return _blend_rewards(r_recon, r_judge, judge_weight)
 
-    base = (1.0 - judge_weight - sim_weight)
-    if base < 0.0:
-        # Caller weights sum to >1; clamp & warn (still numerically sane).
+    if r_sim is None:
+        raise ValueError("sim_weight > 0 requires r_sim")
+    if judge_weight > 0.0 and r_judge is None:
+        raise ValueError("judge_weight > 0 requires r_judge")
+
+    r_sim = r_sim.to(r_recon)
+    if r_judge is not None:
+        r_judge = r_judge.to(r_recon)
+
+    # Classic all-rows-active path. Keep the existing scalar arithmetic so
+    # baseline runs are byte-identical to the pre-partial implementation.
+    if sim_active is None:
+        base = 1.0 - judge_weight - sim_weight
+        if base < 0.0:
+            logger.warning(
+                "judge_weight (%.3f) + sim_weight (%.3f) > 1; recon weight "
+                "clamped to 0",
+                judge_weight, sim_weight,
+            )
+            base = 0.0
+        out = base * _zscore(r_recon)
+        if judge_weight > 0.0:
+            out = out + judge_weight * _zscore(r_judge)
+        out = out + sim_weight * _zscore(r_sim)
+        return out
+
+    # Partial-coverage path: sim contributes only on active rows; recon
+    # picks up the slack on inactive ones so total reward magnitude stays
+    # comparable across rows.
+    sim_active = sim_active.to(r_recon)
+    if sim_active.shape != r_sim.shape:
+        raise ValueError(
+            f"sim_active shape {tuple(sim_active.shape)} must match "
+            f"r_sim shape {tuple(r_sim.shape)}"
+        )
+
+    # Per-row effective sim coefficient + per-row base (recon) coefficient.
+    w_eff_sim = sim_weight * sim_active
+    base_per_row = torch.clamp(1.0 - judge_weight - w_eff_sim, min=0.0)
+    if (1.0 - judge_weight - sim_weight) < 0.0:
         logger.warning(
             "judge_weight (%.3f) + sim_weight (%.3f) > 1; recon weight "
-            "clamped to 0",
+            "clamped to 0 on active rows",
             judge_weight, sim_weight,
         )
-        base = 0.0
 
-    out = base * _zscore(r_recon)
+    # z-score sim only over active entries; inactive entries contribute 0
+    # to the sum because w_eff_sim is 0 there.
+    if sim_active.sum() > 0:
+        active_mask = sim_active.bool()
+        active_vals = r_sim[active_mask]
+        if active_vals.numel() > 1:
+            mu = active_vals.mean()
+            sigma = active_vals.std().clamp_min(1e-6)
+        else:
+            mu = active_vals.mean() if active_vals.numel() == 1 else torch.zeros((), device=r_recon.device, dtype=r_recon.dtype)
+            sigma = torch.ones((), device=r_recon.device, dtype=r_recon.dtype)
+        z_sim = (r_sim - mu) / sigma
+        # Sanitize inactive entries so downstream NaNs from cache hits or
+        # error sentinels never sneak in even when w_eff_sim is 0.
+        z_sim = torch.where(sim_active.bool(), z_sim, torch.zeros_like(z_sim))
+    else:
+        z_sim = torch.zeros_like(r_sim)
+
+    out = base_per_row * _zscore(r_recon)
     if judge_weight > 0.0:
-        if r_judge is None:
-            raise ValueError("judge_weight > 0 requires r_judge")
-        out = out + judge_weight * _zscore(r_judge.to(r_recon))
-    if sim_weight > 0.0:
-        out = out + sim_weight * _zscore(r_sim.to(r_recon))
+        out = out + judge_weight * _zscore(r_judge)
+    out = out + w_eff_sim * z_sim
     return out
 
 
@@ -458,7 +628,7 @@ def _compute_judge_rewards(
     for i, (text, src_id, ptype) in enumerate(
         zip(rollout_texts, source_example_ids, position_types)
     ):
-        key = _judge_cache_key(src_id, text)
+        key = _judge_cache_key(src_id, text, grader_model=model)
         cached = judge_cache.get(key)
         if cached is not None:
             rewards[i] = float(cached.get("r_judge", 0.0))
@@ -562,7 +732,7 @@ def _build_gen_mask(
 
 def grpo_step(
     policy_av: ActivationVerbalizer,
-    ref_av: ActivationVerbalizer,
+    ref_av: ActivationVerbalizer | None,
     ar: ActivationReconstructor,
     activations: torch.Tensor,
     position_types: list[str],
@@ -595,6 +765,15 @@ def grpo_step(
     sim_max_steps: int = 100,
     sim_placement: str = "image_patch",
     sim_blend: float = 1.0,
+    sim_cf_ok: list[bool] | None = None,
+    # ----- SimpleVLA-RL-inspired knobs (defaults preserve byte-identical loss math)
+    dynamic_sampling: bool = False,
+    dynamic_sampling_threshold: float = 1e-4,
+    use_ppo_clip: bool = False,
+    clip_eps_low: float = 0.2,
+    clip_eps_high: float = 0.28,
+    disable_kl_anchor: bool = False,
+    reward_normalize_groupwise: bool = True,
 ) -> dict:
     """One GRPO update worth of forward computation (no optimizer step here).
 
@@ -618,7 +797,7 @@ def grpo_step(
     # ----- 1. Expand each activation K times for grouped rollouts ------------
     acts_rep = activations.repeat_interleave(K, dim=0).to(device)        # (B*K, H)
     ptypes_rep: list[str] = [p for p in position_types for _ in range(K)]
-    intents_rep: list[str] | None = None
+    intents_rep: list[str | None] | None = None
     if target_intent_texts is not None:
         if len(target_intent_texts) != B:
             raise ValueError(
@@ -703,16 +882,23 @@ def grpo_step(
     # byte-identical to pre-sim code. When enabled, we encode each rollout
     # text through the *frozen* AR -> backbone-space steer vector ``hhat``,
     # then dispatch a LIBERO rollout per row via ``sim_worker``.
-    sim_results = None
+    #
+    # Per-row eligibility (``sim_cf_ok``) lets us partial-blend batches where
+    # only some activations have a counterfactual pair: ineligible rows still
+    # appear in ``target_tasks``/``target_env_names``/``source_example_ids``
+    # (placeholder strings are fine, they're only used by sim jobs) but are
+    # skipped at job assembly + masked out of the sim blend.
+    sim_results = None  # list of SimRewardResult, in original row-major order
     r_sim_tensor: torch.Tensor | None = None
+    sim_active_tensor: torch.Tensor | None = None
     if sim_reward_weight > 0.0:
         if sim_worker is None:
             raise ValueError("sim_reward_weight > 0 requires sim_worker")
-        if not target_tasks or len(target_tasks) != B:
+        if target_tasks is None or len(target_tasks) != B:
             raise ValueError(
                 "sim_reward_weight > 0 requires target_tasks of length B"
             )
-        if not target_env_names or len(target_env_names) != B:
+        if target_env_names is None or len(target_env_names) != B:
             raise ValueError(
                 "sim_reward_weight > 0 requires target_env_names of length B"
             )
@@ -726,14 +912,29 @@ def grpo_step(
                 f"{None if sim_seeds is None else len(sim_seeds)}"
             )
 
+        # Per-row sim eligibility (length B). Default: every row eligible
+        # (preserves legacy behavior when callers don't pass ``sim_cf_ok``).
+        if sim_cf_ok is None:
+            sim_cf_ok_b = [True] * B
+        else:
+            if len(sim_cf_ok) != B:
+                raise ValueError(
+                    f"len(sim_cf_ok)={len(sim_cf_ok)} != B={B}"
+                )
+            sim_cf_ok_b = list(sim_cf_ok)
+
         # Replicate per-activation metadata K times to align with rollout_texts.
         target_tasks_rep = [t for t in target_tasks for _ in range(K)]
         envs_rep = [e for e in target_env_names for _ in range(K)]
         src_rep = [s for s in source_example_ids for _ in range(K)]
+        sim_active_rep = [ok for ok in sim_cf_ok_b for _ in range(K)]
+        active_idx = [i for i, ok in enumerate(sim_active_rep) if ok]
 
         # Encode every rollout text into a backbone-space steer vector with
         # the *frozen* AR (so the gradient never flows through the sim
-        # subprocess, which obviously cannot be backproped).
+        # subprocess, which obviously cannot be backproped). We encode for
+        # ALL rows (cheap forward), but only build SimRewardJobs for the
+        # eligible ones.
         from nla.training.sim_reward import (
             assemble_jobs,
             encode_texts_with_ar,
@@ -741,20 +942,41 @@ def grpo_step(
         with torch.no_grad():
             steer_vecs = encode_texts_with_ar(ar, rollout_texts, device=device)
 
-        jobs = assemble_jobs(
-            rollout_texts=rollout_texts,
-            steer_vecs=steer_vecs,
-            target_tasks=target_tasks_rep,
-            target_env_names=envs_rep,
-            source_ids=src_rep,
-            seeds=sim_seeds,
-            sim_max_steps=sim_max_steps,
-            placement=sim_placement,
-            blend=sim_blend,
-        )
-        sim_results = sim_worker.compute(jobs)
+        if active_idx:
+            sub_steer = steer_vecs[active_idx]
+            sub_texts = [rollout_texts[i] for i in active_idx]
+            sub_tasks = [target_tasks_rep[i] for i in active_idx]
+            sub_envs = [envs_rep[i] for i in active_idx]
+            sub_src = [src_rep[i] for i in active_idx]
+            sub_seeds = [sim_seeds[i] for i in active_idx]
+            jobs = assemble_jobs(
+                rollout_texts=sub_texts,
+                steer_vecs=sub_steer,
+                target_tasks=sub_tasks,
+                target_env_names=sub_envs,
+                source_ids=sub_src,
+                seeds=sub_seeds,
+                sim_max_steps=sim_max_steps,
+                placement=sim_placement,
+                blend=sim_blend,
+            )
+            sub_results = sim_worker.compute(jobs)
+        else:
+            sub_results = []
+
+        # Scatter sub-results back into row-major order; ineligible rows
+        # carry ``None`` in ``sim_results`` (diagnostics treat them as
+        # skipped) and contribute 0 to the sim term via the mask below.
+        sim_results = [None] * (B * K)
+        r_sim_vec = [0.0] * (B * K)
+        for slot, res in zip(active_idx, sub_results):
+            sim_results[slot] = res
+            r_sim_vec[slot] = float(res.r_sim)
         r_sim_tensor = torch.tensor(
-            [r.r_sim for r in sim_results],
+            r_sim_vec, dtype=rewards.dtype, device=rewards.device,
+        )
+        sim_active_tensor = torch.tensor(
+            [1.0 if ok else 0.0 for ok in sim_active_rep],
             dtype=rewards.dtype, device=rewards.device,
         )
 
@@ -769,17 +991,34 @@ def grpo_step(
         judge_weight=eff_judge_weight,
         r_sim=r_sim_tensor,
         sim_weight=sim_reward_weight,
+        sim_active=sim_active_tensor,
     )
 
     # ----- 4. Group-relative advantage ---------------------------------------
     rewards_grp = rewards.view(B, K)
     adv_grp = rewards_grp - rewards_grp.mean(dim=1, keepdim=True)
-    if advantage_normalize and K > 1:
+    group_std = rewards_grp.std(dim=1)                                   # (B,) unmasked
+    if advantage_normalize and reward_normalize_groupwise and K > 1:
         std = rewards_grp.std(dim=1, keepdim=True).clamp_min(1e-8)
         adv_grp = adv_grp / std
     advantages = adv_grp.view(B * K)
     if advantage_clip is not None:
         advantages = advantages.clamp(-advantage_clip, advantage_clip)
+
+    # ----- 4b. Dynamic-sampling row mask -------------------------------------
+    # SimpleVLA-RL: drop groups with ~zero reward variance (their advantages
+    # collapse to 0 anyway; keeping them just dilutes the KL/PG signal and
+    # corrupts the per-step reward stats). We do this at the row level
+    # (B*K,) as a multiplicative loss mask + a stats mask, instead of
+    # poking ``gen_mask`` directly so token_counts stay honest for the
+    # per-row mean.
+    row_keep = torch.ones(B * K, dtype=rewards.dtype, device=rewards.device)
+    drop_frac = 0.0
+    if dynamic_sampling:
+        keep_grp = (group_std >= dynamic_sampling_threshold).to(rewards.dtype)
+        # Expand (B,) -> (B*K,)
+        row_keep = keep_grp.unsqueeze(1).expand(B, K).reshape(B * K)
+        drop_frac = float((1.0 - row_keep).mean().item())
 
     # ----- 5. Score under current policy (with grad) and frozen ref (no grad)
     policy_av.train()
@@ -788,67 +1027,154 @@ def grpo_step(
         target_intent_texts=intents_rep,
     )
 
-    with torch.no_grad():
-        ref_av.eval()
-        ref_logprobs = ref_av.score_tokens(
-            acts_rep, ptypes_rep, gen_ids, gen_mask,
-            target_intent_texts=intents_rep,
-        )
+    # When the KL anchor is disabled, skip the ref forward entirely (saves
+    # ~one full policy-AV forward pass per step + the ref's GPU memory in
+    # ``run_grpo``). ``use_kl`` is the legacy ablation switch that gates
+    # only the loss term while still running the ref forward + reporting
+    # ``kl_token_mean`` as a diagnostic; ``disable_kl_anchor`` is the
+    # stricter SimpleVLA-RL-style "don't even compute the ref logprobs"
+    # knob and necessarily zeroes the KL diagnostic too.
+    skip_ref = disable_kl_anchor or ref_av is None
+    if skip_ref:
+        ref_logprobs = None
+    else:
+        with torch.no_grad():
+            ref_av.eval()
+            ref_logprobs = ref_av.score_tokens(
+                acts_rep, ptypes_rep, gen_ids, gen_mask,
+                target_intent_texts=intents_rep,
+            )
 
     mask = gen_mask.to(new_logprobs.dtype)
     token_counts = mask.sum(dim=1).clamp_min(1)                          # (B*K,)
 
     # ----- 6. Policy-gradient loss + KL --------------------------------------
-    # PG: maximize E[A * log pi(y)]; loss is negative.
-    pg_per_token = -advantages.detach().unsqueeze(-1) * new_logprobs * mask
-    pg_loss = (pg_per_token.sum(dim=1) / token_counts).mean() if use_pg else torch.zeros((), device=device)
+    if use_pg:
+        if use_ppo_clip:
+            # PPO clip-higher (SimpleVLA-RL §3.2): split the symmetric PPO
+            # clip into asymmetric eps_low / eps_high. Note: our trainer
+            # takes one gradient step per rollout batch, so
+            # ``new_logprobs.detach()`` IS the "old logprobs" of that step
+            # -> ``ratio = exp(0) = 1`` identically at the gradient eval
+            # point. The clip therefore is a no-op for one-step updates;
+            # we still write the loss in this form so when we later add
+            # multi-epoch updates per rollout (the regime where SimpleVLA-RL
+            # actually uses clip-higher) the math is already wired up.
+            log_ratio_new = new_logprobs - new_logprobs.detach()
+            ratio = torch.exp(log_ratio_new)
+            adv = advantages.detach().unsqueeze(-1)
+            surr1 = ratio * adv
+            surr2 = torch.clamp(ratio, 1.0 - clip_eps_low, 1.0 + clip_eps_high) * adv
+            pg_per_token = -torch.min(surr1, surr2) * mask
+        else:
+            # Vanilla GRPO PG: -E[A * log pi(y)].
+            pg_per_token = -advantages.detach().unsqueeze(-1) * new_logprobs * mask
+        pg_per_row = pg_per_token.sum(dim=1) / token_counts              # (B*K,)
+        pg_per_row = pg_per_row * row_keep
+        denom = row_keep.sum().clamp_min(1.0) if dynamic_sampling else float(B * K)
+        pg_loss = pg_per_row.sum() / denom
+    else:
+        pg_loss = torch.zeros((), device=device)
 
-    log_ratio = new_logprobs - ref_logprobs                              # log pi/pi_ref
-    log_ratio = log_ratio * mask
-    # k3 estimator: nonneg, unbiased for KL(pi || pi_ref).
-    kl_per_token = (torch.exp(log_ratio) - 1.0 - log_ratio) * mask
-    kl_loss = (kl_per_token.sum(dim=1) / token_counts).mean() if use_kl else torch.zeros((), device=device)
+    if ref_logprobs is not None:
+        log_ratio = new_logprobs - ref_logprobs                          # log pi/pi_ref
+        log_ratio = log_ratio * mask
+        # k3 estimator: nonneg, unbiased for KL(pi || pi_ref).
+        kl_per_token = (torch.exp(log_ratio) - 1.0 - log_ratio) * mask
+        if use_kl:
+            kl_per_row = kl_per_token.sum(dim=1) / token_counts          # (B*K,)
+            kl_per_row = kl_per_row * row_keep
+            denom = row_keep.sum().clamp_min(1.0) if dynamic_sampling else float(B * K)
+            kl_loss = kl_per_row.sum() / denom
+        else:
+            kl_loss = torch.zeros((), device=device)
+    else:
+        kl_per_token = torch.zeros_like(new_logprobs)
+        kl_loss = torch.zeros((), device=device)
 
     total_loss = pg_loss + beta * kl_loss + ar_train_weight * ar_mse
 
     # ----- 7. Diagnostics ----------------------------------------------------
     with torch.no_grad():
         n_tok = mask.sum().clamp_min(1)
+        # When dynamic sampling drops groups, the row-keep mask also gates
+        # the reward stats so the reported reward_mean/std/best/worst
+        # reflect only the rows that actually contributed gradient. Falls
+        # back to the original full-batch stats when sampling is off.
+        if dynamic_sampling and row_keep.sum().item() > 0:
+            keep_bool = row_keep.bool()
+            kept = rewards[keep_bool]
+            reward_mean = float(kept.mean().item())
+            reward_std = (
+                float(kept.std(unbiased=False).item()) if kept.numel() > 1 else 0.0
+            )
+            reward_best = float(kept.max().item())
+            reward_worst = float(kept.min().item())
+            advantage_abs_mean = float((advantages.abs() * row_keep).sum().item()
+                                       / max(1.0, float(row_keep.sum().item())))
+        else:
+            reward_mean = float(rewards.mean().item())
+            reward_std = (
+                float(rewards.std(unbiased=False).item()) if rewards.numel() > 1 else 0.0
+            )
+            reward_best = float(rewards.max().item())
+            reward_worst = float(rewards.min().item())
+            advantage_abs_mean = float(advantages.abs().mean().item())
+
         diagnostics = {
             "loss": float(total_loss.item()),
             "pg_loss": float(pg_loss.item()) if use_pg else 0.0,
             "kl_loss": float(kl_loss.item()) if use_kl else 0.0,
             "ar_mse": float(ar_mse.item()) if ar_train_weight > 0.0 else 0.0,
-            "reward_mean": float(rewards.mean().item()),
-            "reward_std": float(rewards.std(unbiased=False).item()) if rewards.numel() > 1 else 0.0,
-            "reward_best": float(rewards.max().item()),
-            "reward_worst": float(rewards.min().item()),
-            "advantage_abs_mean": float(advantages.abs().mean().item()),
+            "reward_mean": reward_mean,
+            "reward_std": reward_std,
+            "reward_best": reward_best,
+            "reward_worst": reward_worst,
+            "advantage_abs_mean": advantage_abs_mean,
             "kl_token_mean": float((kl_per_token.sum() / n_tok).item()),
             "logp_new_mean": float((new_logprobs * mask).sum().item() / float(n_tok.item())),
-            "logp_ref_mean": float((ref_logprobs * mask).sum().item() / float(n_tok.item())),
+            "logp_ref_mean": (
+                float((ref_logprobs * mask).sum().item() / float(n_tok.item()))
+                if ref_logprobs is not None else 0.0
+            ),
             "gen_len_mean": float(token_counts.float().mean().item()),
         }
+        if dynamic_sampling:
+            diagnostics["dynamic_sampling_drop_frac"] = drop_frac
         if judge_rewards_list is not None:
             jt = torch.tensor(judge_rewards_list, dtype=torch.float32)
             diagnostics["judge_reward_mean"] = float(jt.mean().item())
             diagnostics["judge_reward_pos_frac"] = float((jt > 0).float().mean().item())
         if sim_results is not None:
-            sr = torch.tensor([r.r_sim for r in sim_results], dtype=torch.float32)
-            pred = torch.tensor([r.predicate for r in sim_results], dtype=torch.float32)
-            succ = torch.tensor([float(r.success_any) for r in sim_results], dtype=torch.float32)
-            n_cached = sum(1 for r in sim_results if r.cached)
-            n_err = sum(1 for r in sim_results if r.error is not None)
-            n_early = sum(1 for r in sim_results if r.early_stopped)
-            elapsed = torch.tensor([r.elapsed_s for r in sim_results], dtype=torch.float32)
-            diagnostics["sim_reward_mean"] = float(sr.mean().item())
-            diagnostics["sim_reward_best"] = float(sr.max().item())
-            diagnostics["sim_predicate_pos_frac"] = float((pred > 0).float().mean().item())
-            diagnostics["sim_success_any_frac"] = float(succ.mean().item())
-            diagnostics["sim_early_stop_frac"] = float(n_early) / max(1, len(sim_results))
-            diagnostics["sim_cache_hit_frac"] = float(n_cached) / max(1, len(sim_results))
-            diagnostics["sim_error_frac"] = float(n_err) / max(1, len(sim_results))
-            diagnostics["sim_elapsed_s_mean"] = float(elapsed.mean().item())
+            # Active rows are those where ``sim_results[i]`` is a real
+            # SimRewardResult; ineligible rows are stored as ``None``
+            # placeholders so the row-index alignment with ``r_sim_vec``
+            # / ``sim_active_tensor`` is preserved. Diagnostics aggregate
+            # only over the active entries; we additionally report
+            # ``sim_active_frac`` so dashboards can see how much of the
+            # batch contributed to the sim term this step.
+            active_results = [r for r in sim_results if r is not None]
+            n_total = len(sim_results)
+            n_active = len(active_results)
+            diagnostics["sim_active_frac"] = float(n_active) / max(1, n_total)
+            if active_results:
+                sr = torch.tensor([r.r_sim for r in active_results], dtype=torch.float32)
+                pred = torch.tensor([r.predicate for r in active_results], dtype=torch.float32)
+                succ = torch.tensor(
+                    [float(r.success_any) for r in active_results], dtype=torch.float32,
+                )
+                n_cached = sum(1 for r in active_results if r.cached)
+                n_err = sum(1 for r in active_results if r.error is not None)
+                n_early = sum(1 for r in active_results if r.early_stopped)
+                elapsed = torch.tensor([r.elapsed_s for r in active_results], dtype=torch.float32)
+                diagnostics["sim_reward_mean"] = float(sr.mean().item())
+                diagnostics["sim_reward_best"] = float(sr.max().item())
+                diagnostics["sim_predicate_pos_frac"] = float((pred > 0).float().mean().item())
+                diagnostics["sim_success_any_frac"] = float(succ.mean().item())
+                diagnostics["sim_early_stop_frac"] = float(n_early) / n_active
+                diagnostics["sim_cache_hit_frac"] = float(n_cached) / n_active
+                diagnostics["sim_error_frac"] = float(n_err) / n_active
+                diagnostics["sim_elapsed_s_mean"] = float(elapsed.mean().item())
 
     return {
         "loss": total_loss,
@@ -868,6 +1194,29 @@ def grpo_step(
 # ----------------------------------------------------------------------------
 # Evaluation: FVE on greedy AV rollouts
 # ----------------------------------------------------------------------------
+
+
+def _metrics_with_closed_greedy_aliases(
+    metrics: dict[str, float],
+    *,
+    greedy_temperature: float = 0.0,
+) -> dict[str, float]:
+    """Mirror SFT ``closed_greedy/*`` keys so ``build_v3_scorecard`` can read GRPO val rows.
+
+    SFT logs ``closed_{tag}/{metric}`` from :func:`nla.training.sft._evaluate` with
+    ``tag="greedy"`` when ``temperature <= 0``.  GRPO's :func:`_evaluate_fve` emits
+    ``{metric}/temp=0.0`` instead.  We duplicate greedy-temperature scalars under
+    ``closed_greedy/{metric}`` (including stratified keys like
+    ``fve/position=image_patch`` → ``closed_greedy/fve/position=image_patch``).
+    """
+    suffix = f"/temp={greedy_temperature}"
+    out = dict(metrics)
+    for k, v in metrics.items():
+        if not k.endswith(suffix):
+            continue
+        stem = k[: -len(suffix)]
+        out[f"closed_greedy/{stem}"] = v
+    return out
 
 
 @torch.no_grad()
@@ -972,8 +1321,20 @@ def _build_models(cfg: GRPOConfig):
     sft_dir = Path(cfg.sft_dir)
     logger.info("Loading policy AV from %s", sft_dir / "av")
     policy_av = load_av_from_sft(sft_dir / "av", device=cfg.device, freeze=False)
-    logger.info("Loading reference AV (frozen) from %s", sft_dir / "av")
-    ref_av = load_av_from_sft(sft_dir / "av", device=cfg.device, freeze=True)
+
+    # KL_ENABLED: when ``disable_kl_anchor`` is True we skip loading the
+    # reference AV entirely (saves the second policy-sized weight set in
+    # GPU memory + the per-step ref forward). All KL-touching code paths
+    # below check ``ref_av is None`` so this is safe.
+    if cfg.disable_kl_anchor:
+        logger.info(
+            "disable_kl_anchor=True; skipping reference AV load (saves a "
+            "policy-AV-sized memory + the per-step ref forward)."
+        )
+        ref_av = None
+    else:
+        logger.info("Loading reference AV (frozen) from %s", sft_dir / "av")
+        ref_av = load_av_from_sft(sft_dir / "av", device=cfg.device, freeze=True)
 
     ar_frozen = cfg.ar_co_train_weight <= 0.0
     logger.info(
@@ -1028,6 +1389,11 @@ def _validate_sim_config(cfg: GRPOConfig) -> None:
             f"sim_counterfactual_pairs_path does not exist: "
             f"{cfg.sim_counterfactual_pairs_path}"
         )
+    for extra in cfg.sim_counterfactual_pairs_paths_extra:
+        if not Path(extra).exists():
+            raise ValueError(
+                f"sim_counterfactual_pairs_paths_extra entry does not exist: {extra}"
+            )
     if cfg.sim_n_workers < 1:
         raise ValueError("sim_n_workers must be >= 1")
     if not (0.0 <= cfg.sim_blend <= 1.0):
@@ -1092,13 +1458,49 @@ def run_grpo(cfg: GRPOConfig) -> dict:
             cfg.judge_model or "(default)", len(judge_cache), cfg.judge_cache_path,
         )
 
+    # Resolve SimpleVLA-RL knobs that depend on other config values.
+    # ``dynamic_sampling=None`` (the cfg default) means "auto": ON when
+    # the sim reward is in the blend (binary-ish rewards collapse often)
+    # and OFF otherwise. Explicit True/False overrides the auto-rule.
+    dynamic_sampling_eff = (
+        bool(cfg.dynamic_sampling)
+        if cfg.dynamic_sampling is not None
+        else (cfg.sim_reward_weight > 0.0)
+    )
+    rollout_temp_eff = (
+        cfg.rollout_temperature_high
+        if cfg.rollout_temperature_high is not None
+        else cfg.rollout_temperature
+    )
+    if cfg.rollout_temperature_high is not None:
+        logger.info(
+            "Using rollout_temperature_high=%.3f override (was %.3f)",
+            cfg.rollout_temperature_high, cfg.rollout_temperature,
+        )
+    if dynamic_sampling_eff:
+        logger.info(
+            "Dynamic sampling ON (threshold=%.2e); groups with reward std "
+            "below threshold are dropped from PG/KL/reward-stats.",
+            cfg.dynamic_sampling_threshold,
+        )
+    if cfg.use_ppo_clip:
+        logger.info(
+            "PPO clip-higher ON (eps_low=%.3f, eps_high=%.3f). Note: a "
+            "no-op for one-step updates per rollout (ratio == 1).",
+            cfg.clip_eps_low, cfg.clip_eps_high,
+        )
+    if cfg.disable_kl_anchor:
+        logger.info("KL anchor disabled (no ref-AV scoring, no KL term in loss).")
+
     sim_worker = None
     cf_sampler = None
     if cfg.sim_reward_weight > 0.0:
         from nla.training.counterfactual_data import CounterfactualPairSampler
         from nla.training.sim_reward import SimRewardWorker
         cf_sampler = CounterfactualPairSampler(
-            cfg.sim_counterfactual_pairs_path, seed=cfg.seed,
+            cfg.sim_counterfactual_pairs_path,
+            seed=cfg.seed,
+            additional_paths=cfg.sim_counterfactual_pairs_paths_extra or None,
         )
         sim_worker = SimRewardWorker(
             policy_host=cfg.sim_policy_host,
@@ -1139,13 +1541,17 @@ def run_grpo(cfg: GRPOConfig) -> dict:
             source_ids = batch.get("example_id") if needs_source_ids else None
 
             # Look up a fresh counterfactual (intent, env_name, target_task)
-            # per activation. cf_sampler.sample_for(...) returns None when an
-            # activation has no eligible pairs; we drop the sim signal for the
-            # whole step in that case (safer than partial-step blends).
+            # per activation. ``sample_for`` returns a sentinel pair (empty
+            # target_task / env_name) for ids missing from the JSONL. We
+            # build a per-row ``sim_cf_ok`` mask so partial-coverage
+            # batches still learn from sim on the rows that do have a
+            # pair; ``sim_require_full_batch_cf`` (CLI flag) restores the
+            # legacy all-or-nothing batch gate.
             target_intent_texts = None
             target_tasks = None
             target_env_names = None
             sim_seeds = None
+            sim_cf_ok: list[bool] | None = None
             effective_sim_weight = cfg.sim_reward_weight
             if cfg.sim_reward_weight > 0.0 and cf_sampler is not None:
                 if not source_ids:
@@ -1154,29 +1560,60 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                         "got an empty/None list -- check dataset wiring."
                     )
                 pairs = cf_sampler.sample_for(source_ids)
-                # ``sample_for`` returns a sentinel pair (empty target_task /
-                # env_name) for ids missing from the JSONL. Treat those as
-                # "no eligible pair" so we never hand the sim subprocess a
-                # blank task id.
-                missing_idx = [i for i, p in enumerate(pairs) if not p.target_task or not p.target_env_name]
-                if missing_idx:
-                    missing = [source_ids[i] for i in missing_idx[:3]]
-                    logger.warning(
-                        "[step %d] %d/%d batch rows have no counterfactual pair "
-                        "in %s; skipping sim term this step. First few missing: %s",
-                        step, len(missing_idx), len(source_ids),
-                        cfg.sim_counterfactual_pairs_path, missing,
-                    )
+                sim_cf_ok = [
+                    bool(p.target_task and p.target_env_name) for p in pairs
+                ]
+                n_ok = sum(sim_cf_ok)
+                n_missing = len(sim_cf_ok) - n_ok
+                if n_missing:
+                    missing_ids = [
+                        source_ids[i] for i, ok in enumerate(sim_cf_ok) if not ok
+                    ][:3]
+                    if cfg.sim_require_full_batch_cf:
+                        logger.warning(
+                            "[step %d] %d/%d batch rows have no counterfactual "
+                            "pair in %s; sim_require_full_batch_cf=True so "
+                            "the sim term is skipped this step. First few "
+                            "missing: %s",
+                            step, n_missing, len(sim_cf_ok),
+                            cfg.sim_counterfactual_pairs_path, missing_ids,
+                        )
+                        effective_sim_weight = 0.0
+                    else:
+                        logger.info(
+                            "[step %d] %d/%d batch rows missing a CF pair; "
+                            "computing sim on the remaining %d rows "
+                            "(partial blend). First few missing: %s",
+                            step, n_missing, len(sim_cf_ok), n_ok, missing_ids,
+                        )
+
+                # Always plumb full-length B lists into ``grpo_step``; rows
+                # without a CF pair get placeholders that the per-row mask
+                # ignores. Intent is ``None`` per-row so AV falls back to
+                # the descriptive prompt for those rows.
+                target_intent_texts = [
+                    p.target_intent if ok else None
+                    for p, ok in zip(pairs, sim_cf_ok)
+                ]
+                target_tasks = [
+                    p.target_task if ok else "" for p, ok in zip(pairs, sim_cf_ok)
+                ]
+                target_env_names = [
+                    p.target_env_name if ok else ""
+                    for p, ok in zip(pairs, sim_cf_ok)
+                ]
+                K = cfg.rollouts_per_activation
+                sim_seeds = [
+                    cfg.sim_seed_base + step * 9973 + i
+                    for i in range(len(pairs) * K)
+                ]
+
+                # If the entire batch lacks CF pairs (e.g. dataset
+                # completely misaligned with the JSONL), there's no work
+                # for the sim worker. Drop the sim term to avoid an empty
+                # batch.
+                if n_ok == 0:
                     effective_sim_weight = 0.0
-                else:
-                    target_intent_texts = [p.target_intent for p in pairs]
-                    target_tasks = [p.target_task for p in pairs]
-                    target_env_names = [p.target_env_name for p in pairs]
-                    K = cfg.rollouts_per_activation
-                    sim_seeds = [
-                        cfg.sim_seed_base + step * 9973 + i
-                        for i in range(len(pairs) * K)
-                    ]
 
             # The intent-conditioned AV prompt is independent of sim rollouts:
             # it's how the policy AV learns to *write* intent-targeted text in
@@ -1193,7 +1630,7 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                 K=cfg.rollouts_per_activation,
                 beta=cfg.beta,
                 rollout_max_new_tokens=cfg.rollout_max_new_tokens,
-                rollout_temperature=cfg.rollout_temperature,
+                rollout_temperature=rollout_temp_eff,
                 rollout_top_p=cfg.rollout_top_p,
                 advantage_normalize=cfg.advantage_normalize,
                 advantage_clip=cfg.advantage_clip,
@@ -1217,6 +1654,14 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                 sim_max_steps=cfg.sim_max_steps,
                 sim_placement=cfg.sim_placement,
                 sim_blend=cfg.sim_blend,
+                sim_cf_ok=sim_cf_ok,
+                dynamic_sampling=dynamic_sampling_eff,
+                dynamic_sampling_threshold=cfg.dynamic_sampling_threshold,
+                use_ppo_clip=cfg.use_ppo_clip,
+                clip_eps_low=cfg.clip_eps_low,
+                clip_eps_high=cfg.clip_eps_high,
+                disable_kl_anchor=cfg.disable_kl_anchor,
+                reward_normalize_groupwise=cfg.reward_normalize_groupwise,
             )
             loss = out["loss"]
             (loss / max(1, cfg.grad_accum_steps)).backward()
@@ -1252,6 +1697,9 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                     temperatures=cfg.eval_temperatures,
                 )
                 if eval_metrics:
+                    eval_metrics = _metrics_with_closed_greedy_aliases(
+                        eval_metrics, greedy_temperature=0.0,
+                    )
                     row = {
                         "step": step, "phase": "val",
                         **eval_metrics, "elapsed_s": time.time() - start,
@@ -1284,6 +1732,9 @@ def run_grpo(cfg: GRPOConfig) -> dict:
         temperatures=cfg.eval_temperatures,
     )
     if eval_metrics:
+        eval_metrics = _metrics_with_closed_greedy_aliases(
+            eval_metrics, greedy_temperature=0.0,
+        )
         row = {"step": step, "phase": "final", **eval_metrics, "elapsed_s": time.time() - start}
         _write_jsonl_row(paths["metrics"], row)
         logger.info("[final] val %s", "  ".join(f"{k}={v:.4f}" for k, v in eval_metrics.items()))

@@ -44,6 +44,14 @@ class ObjectStateLogger:
         # Track left + right finger tips so we can compute gripper width.
         self._left_finger = "gripper0_finger_joint1_tip"
         self._right_finger = "gripper0_finger_joint2_tip"
+        # Cache short-name -> resolved-MuJoCo-name. LIBERO/robosuite scenes
+        # register interactable bodies with a ``_main`` suffix on the root
+        # body (e.g. ``akita_black_bowl_1`` -> ``akita_black_bowl_1_main``)
+        # but our task tables and downstream predicate code key off the
+        # short name. We try the literal name first, then fall back to
+        # ``name + "_main"`` so trajectory dict keys stay unsuffixed and
+        # ``predicates._stack_xyz`` keeps working unchanged.
+        self._name_resolve_cache: dict[str, str] = {}
         self.reset()
 
     def reset(self) -> None:
@@ -74,12 +82,33 @@ class ObjectStateLogger:
     def _mj_data(self):
         return self._sim.data
 
+    def _resolve_body_name(self, name: str) -> str:
+        cached = self._name_resolve_cache.get(name)
+        if cached is not None:
+            return cached
+        candidates = [name]
+        if not name.endswith("_main"):
+            candidates.append(f"{name}_main")
+        last_err: Exception | None = None
+        for cand in candidates:
+            try:
+                self._mj_model.body_name2id(cand)
+            except (ValueError, KeyError) as e:
+                last_err = e
+                continue
+            self._name_resolve_cache[name] = cand
+            return cand
+        # No candidate worked; raise the last error so the caller can decide
+        # whether to fall back to NaN (see ``log_step``).
+        assert last_err is not None
+        raise last_err
+
     def _body_xyz(self, name: str) -> np.ndarray:
-        bid = self._mj_model.body_name2id(name)
+        bid = self._mj_model.body_name2id(self._resolve_body_name(name))
         return self._mj_data.body_xpos[bid].copy()
 
     def _body_xyzw(self, name: str) -> np.ndarray:
-        bid = self._mj_model.body_name2id(name)
+        bid = self._mj_model.body_name2id(self._resolve_body_name(name))
         return self._mj_data.body_xquat[bid].copy()
 
     def _gripper_width_now(self) -> float:
@@ -94,9 +123,20 @@ class ObjectStateLogger:
     # Public API
     # ------------------------------------------------------------------
     def capture_initial(self) -> None:
-        """Call once right after ``env.reset(...)`` to record t=0 positions."""
+        """Call once right after ``env.reset(...)`` to record t=0 positions.
+
+        Bodies that aren't present in the loaded BDDL (e.g. cross-task GRPO
+        where the steered policy is run inside a scene that doesn't contain
+        every tracked body) are silently skipped instead of aborting the
+        rollout — ``log_step`` already tolerates this and downstream
+        predicate code in ``predicates._stack_xyz`` already treats
+        missing-body trajectories as zero-displacement.
+        """
         for name in self.tracked_bodies:
-            self._initial_body_pos[name] = self._body_xyz(name)
+            try:
+                self._initial_body_pos[name] = self._body_xyz(name)
+            except (ValueError, KeyError):
+                continue
 
     def log_step(self, reward: float, info: dict) -> None:
         self._t.append(self.t)

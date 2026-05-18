@@ -129,6 +129,115 @@ def test_blend_multi_rewards_requires_r_judge_when_judge_weight_positive():
 
 
 # ---------------------------------------------------------------------------
+# Partial sim blending (per-row eligibility mask)
+# ---------------------------------------------------------------------------
+
+
+def test_blend_multi_rewards_sim_active_all_true_matches_classic_path():
+    # ``sim_active == 1`` everywhere should reproduce the byte-identical
+    # classic blend (modulo float associativity of the per-row vs scalar
+    # multiplies, which is exact at this scale).
+    torch.manual_seed(0)
+    r = torch.randn(6)
+    rs = torch.randn(6) * 1.5 + 0.5
+    classic = _blend_multi_rewards(r, r_sim=rs, sim_weight=0.4)
+    masked = _blend_multi_rewards(
+        r, r_sim=rs, sim_weight=0.4, sim_active=torch.ones(6),
+    )
+    assert torch.allclose(classic, masked, atol=1e-6), (classic, masked)
+
+
+def test_blend_multi_rewards_sim_active_all_false_collapses_to_recon():
+    # No active sim rows -> sim contribution is zero and recon picks up
+    # the full slack, so output is z(r_recon) (judge off).
+    r = torch.tensor([1.0, -1.0, 2.0, -2.0])
+    rs = torch.tensor([5.0, 5.0, 5.0, 5.0])  # would otherwise dominate
+    out = _blend_multi_rewards(
+        r, r_sim=rs, sim_weight=0.6, sim_active=torch.zeros(4),
+    )
+    expected = _zscore(r)
+    assert torch.allclose(out, expected)
+
+
+def test_blend_multi_rewards_sim_active_partial_zscores_only_active():
+    # Active rows: 0,2,3; inactive: 1. The inactive sim entry has a wild
+    # value (1000) that would blow up the mean/std if we let it through;
+    # confirm we don't.
+    r = torch.tensor([0.0, 0.0, 0.0, 0.0])
+    rs = torch.tensor([1.0, 1000.0, -1.0, 0.0])
+    active = torch.tensor([1.0, 0.0, 1.0, 1.0])
+    out = _blend_multi_rewards(
+        r, r_sim=rs, sim_weight=1.0, sim_active=active,
+    )
+    # Active z-score is taken over [1.0, -1.0, 0.0].
+    active_vals = torch.tensor([1.0, -1.0, 0.0])
+    mu, sd = active_vals.mean(), active_vals.std().clamp_min(1e-6)
+    z = (rs - mu) / sd
+    # Inactive row contributes 0 from the sim branch; recon is 0 already.
+    expected = torch.zeros_like(r)
+    expected[0] = z[0]
+    expected[2] = z[2]
+    expected[3] = z[3]
+    assert torch.allclose(out, expected, atol=1e-5)
+
+
+def test_blend_multi_rewards_sim_active_per_row_recovers_recon_slack():
+    # Inactive rows must keep their recon term at full strength (1.0 *
+    # z(r_recon)), while active rows pay the sim toll (base = 1 - sim_w).
+    torch.manual_seed(1)
+    r = torch.randn(8)
+    rs = torch.randn(8)
+    active = torch.tensor([1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0])
+    sim_w = 0.5
+    out = _blend_multi_rewards(
+        r, r_sim=rs, sim_weight=sim_w, sim_active=active,
+    )
+    z_r = _zscore(r)
+    # Inactive entries must equal z(r_recon) since judge off + sim off
+    # for those rows.
+    inactive_mask = active == 0.0
+    assert torch.allclose(out[inactive_mask], z_r[inactive_mask], atol=1e-6)
+    # No NaN anywhere.
+    assert not torch.isnan(out).any()
+
+
+def test_blend_multi_rewards_sim_active_with_judge_only_taxes_active_rows():
+    # judge_weight=0.3, sim_weight=0.4. On inactive sim rows the base
+    # (recon) coefficient should be 1 - 0.3 = 0.7; on active rows it
+    # should be 1 - 0.3 - 0.4 = 0.3.
+    r = torch.tensor([1.0, -1.0, 2.0, -2.0])
+    rj = torch.tensor([0.0, 0.0, 0.0, 0.0])
+    rs = torch.tensor([1.0, -1.0, 1.0, -1.0])
+    active = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    out = _blend_multi_rewards(
+        r,
+        r_judge=rj, judge_weight=0.3,
+        r_sim=rs, sim_weight=0.4,
+        sim_active=active,
+    )
+    z_r = _zscore(r)
+    # Build expected: inactive rows -> 0.7 * z(r); active rows -> 0.3 * z(r) + 0.4 * z(rs|active).
+    active_vals = rs[active.bool()]
+    mu = active_vals.mean()
+    sd = active_vals.std().clamp_min(1e-6)
+    z_s = (rs - mu) / sd
+    expected = torch.where(
+        active.bool(), 0.3 * z_r + 0.4 * z_s, 0.7 * z_r,
+    )
+    assert torch.allclose(out, expected, atol=1e-6)
+
+
+def test_blend_multi_rewards_sim_active_shape_mismatch_raises():
+    r = torch.tensor([1.0, 2.0, 3.0])
+    rs = torch.tensor([0.5, 0.5, 0.5])
+    with pytest.raises(ValueError, match="sim_active shape"):
+        _blend_multi_rewards(
+            r, r_sim=rs, sim_weight=0.5,
+            sim_active=torch.tensor([1.0, 0.0]),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Config validation + serialization
 # ---------------------------------------------------------------------------
 

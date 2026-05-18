@@ -26,11 +26,21 @@ to learn to redirect on).
 
 The GRPO trainer reads this file via
 :class:`nla.training.counterfactual_data.CounterfactualPairSampler` to draw
-``(activation, intent_text)`` pairs each step. The env name lets the
-sim worker spin up the appropriate BDDL — which we choose to be the
-*target* task so :code:`info["success"]` would fire if the policy actually
-executed the steered intent (a useful, free secondary signal even though
-our custom predicates run regardless of the loaded BDDL).
+``(activation, intent_text)`` pairs each step. Pairs are indexed under
+*both* ``source_example_id`` and ``example_id`` so a dataset that yields
+either flavor of id (the activation-shard id or the label-row id) lands
+on the same candidate list — no offline JSONL rewriting required. The
+env name lets the sim worker spin up the appropriate BDDL — which we
+choose to be the *target* task so :code:`info["success"]` would fire if
+the policy actually executed the steered intent (a useful, free secondary
+signal even though our custom predicates run regardless of the loaded
+BDDL).
+
+Note: dual indexing only fixes key aliasing. A cross-suite batch whose
+shards aren't covered by this miner (e.g. spatial/object/10 instead of
+goal) still won't get a CF row — mine the missing suites and either
+concatenate the JSONLs offline or pass them via
+``--sim-counterfactual-pairs-path-extra``.
 """
 
 from __future__ import annotations
@@ -139,6 +149,32 @@ def _canonical_to_instruction() -> dict[str, str]:
     }
 
 
+def _weighted_counterfactual_target(
+    *,
+    rng: random.Random,
+    src: str,
+    all_canon: list[str],
+    tgt_emit: Counter[str],
+) -> str:
+    """Pick a counterfactual target weighted inverse to current emit count.
+
+    Targets with lower current counts get exponentially more weight. This
+    rescues the long-tail tasks when uniform sampling would just track the
+    source-task imbalance.
+    """
+    options = [t for t in all_canon if t != src]
+    # Smoothed inverse-count weights; +1 in denom avoids div-by-zero.
+    weights = [1.0 / (1.0 + tgt_emit[t]) for t in options]
+    total = sum(weights)
+    r = rng.random() * total
+    acc = 0.0
+    for opt, w in zip(options, weights):
+        acc += w
+        if r <= acc:
+            return opt
+    return options[-1]
+
+
 def mine_pairs(
     labels_path: Path,
     *,
@@ -147,6 +183,9 @@ def mine_pairs(
     matching_fraction: float = 0.5,
     max_per_episode: int | None = None,
     max_total: int | None = None,
+    max_per_source_task: int | None = None,
+    balance_target_counts: bool = False,
+    shuffle: bool = True,
 ) -> dict:
     """Walk Goal labels and emit one (source, target) per row.
 
@@ -157,6 +196,17 @@ def mine_pairs(
     Pass ``max_per_episode`` to keep the file balanced across episodes when
     the corpus has highly imbalanced row counts per task. Pass ``max_total``
     to cap the output for smoke runs.
+
+    Two optional balance knobs (default off -> behavior is byte-identical to
+    the original miner):
+
+      * ``max_per_source_task``: hard cap rows per canonical source task.
+        Useful when the corpus is dominated by one task (e.g. >25% bowl-on-
+        plate) and uniform target sampling can't fix the source skew.
+      * ``balance_target_counts``: replace the uniform counterfactual target
+        sampler with one that inverse-weights by current target-task emit
+        count. Helps when source skew indirectly drags certain target tasks
+        below the gate floor.
     """
     rng = random.Random(seed)
     canon_to_instr = _canonical_to_instruction()
@@ -169,24 +219,44 @@ def mine_pairs(
     rows_per_episode: dict[int, int] = {}
     src_task_counts: Counter[str] = Counter()
     tgt_task_counts: Counter[str] = Counter()
+    src_task_emitted: Counter[str] = Counter()
     counterfactual_count = 0
     written = 0
 
+    # Materialize + shuffle the row stream so smoke-mining a small --max-total
+    # samples uniformly across the corpus rather than reading the head of the
+    # file (which is grouped by task). At ~25k Goal rows the load is ~5 MB.
+    # The reproducibility-critical RNG stays the same one used for target
+    # sampling so a given seed produces identical output.
+    row_stream = list(_iter_goal_label_rows(labels_path))
+    if shuffle:
+        rng.shuffle(row_stream)
+
     with out_path.open("w") as fout:
-        for row in _iter_goal_label_rows(labels_path):
+        for row in row_stream:
             ep = row["episode_index"]
             if max_per_episode is not None:
                 cur = rows_per_episode.get(ep, 0)
                 if cur >= max_per_episode:
                     continue
-                rows_per_episode[ep] = cur + 1
             src = row["source_task"]
+            if max_per_source_task is not None and src_task_emitted[src] >= max_per_source_task:
+                continue
+            if max_per_episode is not None:
+                rows_per_episode[ep] = rows_per_episode.get(ep, 0) + 1
+            src_task_emitted[src] += 1
             src_task_counts[src] += 1
             if rng.random() < matching_fraction:
                 tgt = src
                 is_cf = False
             else:
-                tgt = rng.choice([t for t in all_canon if t != src])
+                if balance_target_counts:
+                    tgt = _weighted_counterfactual_target(
+                        rng=rng, src=src, all_canon=all_canon,
+                        tgt_emit=tgt_task_counts,
+                    )
+                else:
+                    tgt = rng.choice([t for t in all_canon if t != src])
                 is_cf = True
             tgt_task_counts[tgt] += 1
             if is_cf:
@@ -245,6 +315,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-total", type=int, default=None,
         help="Optional cap on total rows (for smoke runs).",
     )
+    p.add_argument(
+        "--max-per-source-task", type=int, default=None,
+        help="Optional hard cap on rows per canonical source task. Used to "
+             "trim the head of an over-represented source task (e.g. when one "
+             "task hogs >25%% of the corpus). Default off preserves byte-"
+             "identical behavior.",
+    )
+    p.add_argument(
+        "--balance-target-counts", action="store_true",
+        help="Replace the uniform counterfactual target sampler with a "
+             "weighted one that inverse-weights by current target-task emit "
+             "count. Useful when source-task imbalance leaves some Goal tasks "
+             "below the audit gate's 5%% floor on the target side. Default "
+             "off preserves byte-identical behavior.",
+    )
+    p.add_argument(
+        "--no-shuffle", dest="shuffle", action="store_false", default=True,
+        help="Iterate Goal label rows in file order instead of shuffling. "
+             "Default is to shuffle (seeded by --seed) so a small --max-total "
+             "samples uniformly across the corpus instead of reading the head "
+             "of the JSONL (which is grouped by task).",
+    )
     p.add_argument("--log-level", default="INFO")
     return p
 
@@ -262,6 +354,9 @@ def main(argv: list[str] | None = None) -> int:
         matching_fraction=args.matching_fraction,
         max_per_episode=args.max_per_episode,
         max_total=args.max_total,
+        max_per_source_task=args.max_per_source_task,
+        balance_target_counts=bool(args.balance_target_counts),
+        shuffle=bool(args.shuffle),
     )
     return 0
 
