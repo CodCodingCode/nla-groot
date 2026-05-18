@@ -12,7 +12,9 @@ The **`droid_100ep_v2_nce`** SFT run showed **strong FVE / cosine** (teacher-for
 
 | Doc | Use |
 |-----|-----|
-| **`docs/sft_plan/06_v2_postmortem_v3_rerun.md`** | Canonical **V2 lessons**, overnight **V3** checklist, **GRPO / AR–AV mix**, **steering & time** |
+| **`docs/sft_plan/07_sft_recipe_dataset_agnostic.md`** | Operational **SFT recipe** (hard negs, AR–AV mix, closed-loop) |
+| **`docs/evals/v2_lessons_learned.md`** | **V2 DROID** postmortem depth + **GRPO** A/B cookbook |
+| **`docs/sft_plan/SFT_V5_NEXT.md`** | **V5** next steps (supersedes removed `v4_repair/V5_TODO.md`) |
 | **`docs/sft_plan/00_PLAN.md`** | End-to-end SFT preconditions + hyperparameter checklist |
 | **`docs/NLA_AGENT_KNOWLEDGE.md`** | Agent-oriented mechanics (α, SFT/GRPO, metrics matrix) |
 | **`docs/evals/v2_lessons_learned.md`** | Deeper post-mortem + **GRPO A/B** cookbook |
@@ -48,7 +50,7 @@ PYTHONPATH=src python scripts/training/run_sft.py \
   --batch-size 4 --total-steps 1000 --eval-every 250
 ```
 
-For production-scale runs, follow **`docs/sft_plan/00_PLAN.md`** and enable **closed-loop validation** (`--eval-closed-loop`, …) plus post-hoc **`scripts/eval/llm_judge_av_captions.py`** on serious checkpoints. See **`06_v2_postmortem_v3_rerun.md`** for flags that must not be dropped on overnight jobs.
+For production-scale runs, follow **`docs/sft_plan/00_PLAN.md`** and enable **closed-loop validation** (`--eval-closed-loop`, `--closed-loop-temps`, …) plus post-hoc **`scripts/eval/llm_judge_av_captions.py`** on serious checkpoints. See **`docs/sft_plan/07_sft_recipe_dataset_agnostic.md`** and **`docs/evals/v2_lessons_learned.md`** for flags and failure modes.
 
 **GRPO** (after SFT): `scripts/training/run_grpo.py` with activations only (no `labels.jsonl`).
 

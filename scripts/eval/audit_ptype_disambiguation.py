@@ -5,7 +5,7 @@ Measures how distinguishable ``image_patch`` captions are from ``last_text``
 captions in any labels.jsonl corpus. Used as the V4-vs-V3 regression gate
 for the LIBERO dataset repair (SA4 of the V4 repair plan).
 
-The V3 audit (`docs/sft_plan/v3_quality/agent4_bullet_informativeness.md`,
+The V3 audit (`docs/sft_plan/audit_reports/agent4_bullet_informativeness.md`,
 §5) found top-30 unigram Jaccard between ``last_text`` and ``image_patch``
 captions of 0.71-0.76 on the ``target:`` and ``scene:`` bullets — meaning
 the labeler produced near-identical captions regardless of which token

@@ -40,7 +40,7 @@ prompt-side ban list and the audit-side regex can never silently drift
 apart.
 
 By default writes the markdown report to
-``docs/sft_plan/v3_quality/agent2_prompt_hardening_regression.md`` and a
+``docs/sft_plan/audit_reports/agent2_prompt_hardening_regression.md`` and a
 JSON summary to ``data/eval/audit_prompt_hardening_summary.json``. SA10
 can regression-gate V4 against the frozen V3 baseline at
 ``data/eval/sa3_v3_baseline_summary.json``.
@@ -98,7 +98,7 @@ def _resolve_v2_droid_path() -> Path | None:
         if candidate.exists():
             return candidate
     return None
-DEFAULT_REPORT_PATH = REPO_ROOT / "docs/sft_plan/v3_quality/agent2_prompt_hardening_regression.md"
+DEFAULT_REPORT_PATH = REPO_ROOT / "docs/sft_plan/audit_reports/agent2_prompt_hardening_regression.md"
 DEFAULT_SUMMARY_PATH = REPO_ROOT / "data/eval/audit_prompt_hardening_summary.json"
 # Frozen V3-baseline JSON Agent 2 emitted before SA3's regression-gate
 # extensions; left untouched so the V3-era reports keep resolving to the
@@ -1103,7 +1103,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_REPORT_PATH,
         help=(
             "Path to write the markdown report. Default: "
-            "docs/sft_plan/v3_quality/agent2_prompt_hardening_regression.md."
+            "docs/sft_plan/audit_reports/agent2_prompt_hardening_regression.md."
         ),
     )
     parser.add_argument(

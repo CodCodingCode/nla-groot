@@ -343,7 +343,7 @@ differs significantly between the steered arm and baseline.
 ## Stage 7 — GRPO (optional, only if SFT plateaus)
 
 Reserved for post-V4 SFT. Reconstruction-only GRPO can reinforce template
-collapse per [`06_v2_postmortem_v3_rerun.md`](06_v2_postmortem_v3_rerun.md)
+collapse per [`docs/evals/v2_lessons_learned.md`](../evals/v2_lessons_learned.md)
 lines 81–88, so always include the judge reward path:
 
 ```bash

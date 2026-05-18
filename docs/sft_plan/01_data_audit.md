@@ -1,6 +1,6 @@
 # 01 – Warm-start label data audit (pre-SFT)
 
-> **Context:** Label statistics here do **not** guarantee AV outputs match cameras after SFT. For the **V2 failure mode** (high reconstruction but **generic templates**), grounding checks, and rerun checklist, see **`06_v2_postmortem_v3_rerun.md`**.
+> **Context:** Label statistics here do **not** guarantee AV outputs match cameras after SFT. For the **V2 failure mode** (high reconstruction but **generic templates**), see **`docs/evals/v2_lessons_learned.md`** and **`07_sft_recipe_dataset_agnostic.md`**.
 
 > **Cleanup status (2026-05-15):** `droid_100ep/labels.jsonl` has been rewritten
 > in place by two cleaning passes. Originals preserved as `labels.jsonl.bak*`.

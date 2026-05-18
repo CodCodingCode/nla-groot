@@ -16,7 +16,7 @@
 > — read the manifest at `data/_archive_droid/MANIFEST.txt` for the
 > origin → destination map.
 
-> **Start here for “what do we run next?”** [`docs/sft_plan/06_v2_postmortem_v3_rerun.md`](../sft_plan/06_v2_postmortem_v3_rerun.md) (overnight checklist, judge B, **`--ar-av-mix-max`**, GRPO). **SFT-plan sibling:** [`04_v2_lessons_learned.md`](../sft_plan/04_v2_lessons_learned.md) (same run, plan-folder wording). **Repo overview:** [`README.md`](../../README.md).
+> **Start here for “what do we run next?”** [`07_sft_recipe_dataset_agnostic.md`](../sft_plan/07_sft_recipe_dataset_agnostic.md) (operational recipe) and this file (V2 DROID numbers + GRPO A/B). **Repo overview:** [`README.md`](../../README.md).
 
 This note summarizes what **`data/sft/droid_100ep_v2_nce`** taught us (quantitative vs qualitative failure modes), what we changed in code afterward, how we evaluate honestly, and a **simple ~1-hour A/B** to test whether **GRPO** moves the needle on **template / “bag of phrases” collapse**.
 

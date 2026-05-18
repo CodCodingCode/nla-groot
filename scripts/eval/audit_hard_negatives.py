@@ -905,7 +905,7 @@ def write_markdown(out: dict, path: str) -> None:
     md.append("\n## 9. Recommendations\n")
     md.append(write_recommendations(out))
 
-    md.append("\n## 10. Cross-references to other v3_quality reports\n")
+    md.append("\n## 10. Cross-references to other audit_reports outputs\n")
     md.append(
         "- **Agent 1 (multimodal judge)**: B-axis grounding 91% (YELLOW), "
         "dragged down by `libero_spatial`. Implication for this audit: if "

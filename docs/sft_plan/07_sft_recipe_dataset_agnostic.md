@@ -2,7 +2,7 @@
 
 > **One-page summary**: everything joint AV+AR SFT runs taught us, written so the recipe ports to **any** LeRobot activation corpus. LIBERO is the canonical example; all commands use a `$DATASET` / `$VIDEO_KEYS` placeholder so a copy-paste swap suffices.
 >
-> **Companion docs**: [`04_v2_lessons_learned.md`](04_v2_lessons_learned.md) (V2-specific narrative), [`06_v2_postmortem_v3_rerun.md`](06_v2_postmortem_v3_rerun.md) (overnight checklist), [`docs/evals/v2_lessons_learned.md`](../evals/v2_lessons_learned.md) (eval-folder sibling). This doc is the **action-oriented recipe** distilled from all three plus today's GRPO postmortem.
+> **Companion docs**: [`00_PLAN.md`](00_PLAN.md) (checklist), [`v2_lessons_learned.md`](../evals/v2_lessons_learned.md) (V2 DROID detail + GRPO cookbook), [`SFT_V5_NEXT.md`](SFT_V5_NEXT.md) (next roadmap). This file is the **LIBERO-first operational recipe**.
 
 ---
 

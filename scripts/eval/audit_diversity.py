@@ -8,7 +8,7 @@ included as a historical reference *when its labels.jsonl is still
 reachable* (live tree first, then the archived path under
 ``data/_archive_droid/``); when DROID is gone the V2-DROID columns are
 silently dropped. Writes a markdown report to
-docs/sft_plan/v3_quality/agent3_diversity.md plus a JSON stats blob next to
+docs/sft_plan/audit_reports/agent3_diversity.md plus a JSON stats blob next to
 it for downstream agents.
 
 Run from repo root with `PYTHONPATH=src .venv/bin/python
@@ -53,7 +53,7 @@ def _resolve_droid_path() -> Path | None:
 V3_SUITES = ["libero_goal", "libero_spatial", "libero_object", "libero_10"]
 CANON_BULLETS = ["language", "target", "scene", "spatial", "plan"]
 
-OUT_DIR = REPO / "docs/sft_plan/v3_quality"
+OUT_DIR = REPO / "docs/sft_plan/audit_reports"
 REPORT_MD = OUT_DIR / "agent3_diversity.md"
 REPORT_JSON = OUT_DIR / "agent3_diversity_stats.json"
 

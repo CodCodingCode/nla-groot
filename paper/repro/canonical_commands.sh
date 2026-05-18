@@ -47,11 +47,11 @@ python scripts/training/run_sft.py \
   --stats-json       data/activations/libero_4suite_combined/stats.json \
   --batch-size 4 --grad-accum-steps 1 \
   --learning-rate 1e-4 --warmup-steps 500 --total-steps 15000 \
-  --ar-contrastive-weight 0.5 --nce-temperature 0.1 \
+  --ar-contrastive-weight 0.5 --ar-nce-temperature 0.1 \
   --ar-nce-hard-negatives-per-anchor 4 \
   --ar-av-mix-max 0.4 --ar-av-mix-warmup-frac 0.3 \
   --balance-position-mix --split-by episode --held-out-fraction 0.05 \
-  --eval-closed-loop --closed-loop-temperatures 0.0 0.7 \
+  --eval-closed-loop --closed-loop-temps 0.0 0.7 \
   --eval-every 500 --save-every 2500 --log-every 5 \
   --seed 0
 

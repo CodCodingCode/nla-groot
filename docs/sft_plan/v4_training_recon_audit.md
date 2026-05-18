@@ -43,7 +43,7 @@ is always **at least as large** as the per-dim baseline, so logged FVE is
 **Most likely non-label explanation for the ~0.36–0.39 cosine ceiling:**
 `last_text` activations are saturated and the V3 hard-negative miner is mining
 uniform noise on that half of the corpus. Agent 5's audit in
-[`docs/sft_plan/v3_quality/agent5_hard_negatives.md`](../sft_plan/v3_quality/agent5_hard_negatives.md)
+[`agent5_hard_negatives.md`](audit_reports/agent5_hard_negatives.md)
 at lines 39–42 and 673–677 measured mean mined cosine ≈ **0.9989** for
 `last_text` (random same-ptype pairs already at **0.9592**, so mining gains
 **+0.04** — effectively shuffle noise). That defeats the InfoNCE term on roughly
@@ -220,7 +220,7 @@ ordering by expected impact, not a substitute for an ablation grid)
 4. **Higher LoRA rank** for AR (or a small full-FT comparison) once data is
    clean.
 5. **Tune NCE temperature** per ptype if separate scales remain
-   ([`agent5_hard_negatives.md`](../sft_plan/v3_quality/agent5_hard_negatives.md)
+   ([`agent5_hard_negatives.md`](audit_reports/agent5_hard_negatives.md)
    line 677).
 6. **Longer training / different LR decay tail** — only after the above; LR
    schedule is warmup + half-cosine in [`sft.py`](../../src/nla/training/sft.py)
@@ -282,7 +282,7 @@ should beat AV-greedy→AR. The proximity says **template collapse is at play**
 — AV's greedy output and gold both pass through an AR that has co-adapted to
 templates, so the round-trip is not strongly discriminative. The V2 postmortem
 warned about exactly this in
-[`docs/sft_plan/06_v2_postmortem_v3_rerun.md`](06_v2_postmortem_v3_rerun.md)
+[`docs/evals/v2_lessons_learned.md`](../evals/v2_lessons_learned.md)
 at lines 11–34.
 
 ### 4.4 Qualitative read of `av_samples.jsonl`
@@ -355,13 +355,13 @@ test for steerability**, not just metric movement.
 
 | Rank | Risk | Symptom | Source | Mitigation |
 |-----:|------|---------|--------|------------|
-| 1 | Template / shorthand collapse | Cosine and FVE look fine; judge B and qualitative samples bad | [`06_v2_postmortem_v3_rerun.md`](06_v2_postmortem_v3_rerun.md) lines 11–34 | Run judge + qualitative every checkpoint; require axis B as scorecard gate |
-| 2 | `last_text` saturation + junk hard negs | Train NCE ticks; per-ptype `last_text` retrieval@1 ≈ 1% | [`agent5_hard_negatives.md`](v3_quality/agent5_hard_negatives.md) lines 39–42, 673–677 | Re-mine with `--per-position-type --last-text-strategy random_same_ptype --jaccard-cap 0.55 --top-k 8` per [`sa8_hardneg_miner.md`](v4_repair/sa8_hardneg_miner.md) lines 113–139 |
-| 3 | Gold vs AV text distribution mismatch | Teacher-forced > closed-loop; `p_av` stays 0 | [`06_v2_postmortem_v3_rerun.md`](06_v2_postmortem_v3_rerun.md) lines 17–34 | Keep `--ar-av-mix-max ≥ 0.3` with ramp; consider GRPO + `ar_co_train` after V4 SFT |
+| 1 | Template / shorthand collapse | Cosine and FVE look fine; judge B and qualitative samples bad | [`docs/evals/v2_lessons_learned.md`](../evals/v2_lessons_learned.md) | Run judge + qualitative every checkpoint; require axis B as scorecard gate |
+| 2 | `last_text` saturation + junk hard negs | Train NCE ticks; per-ptype `last_text` retrieval@1 ≈ 1% | [`agent5_hard_negatives.md`](audit_reports/agent5_hard_negatives.md) lines 39–42, 673–677 | Re-mine with `--per-position-type --last-text-strategy random_same_ptype --jaccard-cap 0.55 --top-k 8` per [`sa8_hardneg_miner.md`](v4_repair/sa8_hardneg_miner.md) lines 113–139 |
+| 3 | Gold vs AV text distribution mismatch | Teacher-forced > closed-loop; `p_av` stays 0 | [`docs/evals/v2_lessons_learned.md`](../evals/v2_lessons_learned.md) | Keep `--ar-av-mix-max ≥ 0.3` with ramp; consider GRPO + `ar_co_train` after V4 SFT |
 | 4 | Judge / sim skipped, scorecard looks better than reality | Overall WARN with judge_n = 0 (was true earlier today, now repaired) | scorecard config block | Judge + retrieval are CI gates before any "ship V4" claim |
 | 5 | V3+V4 corpus blend leaks V3 motor-imperative scaffolding | SA3 motor gate stays RED | [`sa6_relabel.md`](v4_repair/sa6_relabel.md) lines 124–157 | Prefer Option A full relabel (~$57); if budget-bound, accept WARN on motor gate and document it |
 | 6 | Retrieval margin passes while retrieval@1 stays low | Margin > 0.05 but @1 < 5%; "we have a signal but it's not discriminative" | V3 scorecard | Promote retrieval@1 and/or closed_greedy_cosine to required gates |
-| 7 | Small batch makes NCE noisy | `ar_nce` plateau near `ln(B)` | [`agent5_hard_negatives.md`](v3_quality/agent5_hard_negatives.md) line 677 | Raise `batch_size * grad_accum_steps` to ≥ 16 effective; sweep |
+| 7 | Small batch makes NCE noisy | `ar_nce` plateau near `ln(B)` | [`agent5_hard_negatives.md`](audit_reports/agent5_hard_negatives.md) line 677 | Raise `batch_size * grad_accum_steps` to ≥ 16 effective; sweep |
 | 8 | Steering AR off-distribution at deployment | Sim A/B differences within noise; large baseline-vs-steer Δaction but inconsistent | [`docs/evals/sim_steer_rollout.md`](../evals/sim_steer_rollout.md) lines 149–170 | Confirm AR's activation corpus matches sim checkpoint; sweep `placement` and `blend` |
 
 **Tripwires for V4 CI / monitoring** (add or schedule before V4 SFT starts):
@@ -403,7 +403,7 @@ Also expose a `dim_fixed` flag (or just bump the metric keys to `fve_pd` for
 "per-dim") so the V3 baseline rows in `metrics.jsonl` aren't mixed apples-to-
 oranges with V4. Update [`docs/sft_plan/03_eval_harness.md`](03_eval_harness.md)
 to point readers at the corrected definition. Note in
-[`06_v2_postmortem_v3_rerun.md`](06_v2_postmortem_v3_rerun.md) that "FVE"
+[`docs/evals/v2_lessons_learned.md`](../evals/v2_lessons_learned.md) that "FVE"
 numbers before the fix used the global-scalar-mean baseline.
 
 ### Step 2 — Tighten the scorecard (small code change, same PR or next)
@@ -457,7 +457,7 @@ lines 100–110 within rounding. **Interpretation**:
   actually move InfoNCE during V4 SFT.
 - `last_text` has zero mining contrast **by design** (the activation
   geometry doesn't separate episodes there — see
-  [`agent5_hard_negatives.md`](v3_quality/agent5_hard_negatives.md) lines
+  [`agent5_hard_negatives.md`](audit_reports/agent5_hard_negatives.md) lines
   39–42). Using `random_same_ptype` stops the trainer from learning that
   fake-hard noise is "informative."
 - `anchor` is statistically noisy (166 rows); not worth interpreting in
@@ -662,8 +662,8 @@ with `ar_dirs: [data/sft/libero_4suite_v4/ar]`.
 ### Step 8 (optional) — GRPO if SFT plateaus
 
 Reserve this for **after** V4 SFT lands and steerability is confirmed.
-Reconstruction-only GRPO can reinforce template collapse (postmortem §3 in
-[`06_v2_postmortem_v3_rerun.md`](06_v2_postmortem_v3_rerun.md) lines 81–88),
+Reconstruction-only GRPO can reinforce template collapse (see
+[`docs/evals/v2_lessons_learned.md`](../evals/v2_lessons_learned.md) GRPO section),
 so add the judge reward path if running GRPO:
 
 ```bash

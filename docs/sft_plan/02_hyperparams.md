@@ -1,6 +1,6 @@
 # 02 — SFT hyperparameters for the first real `droid_100ep` warm-start
 
-> **Success is not val FVE alone.** Use **`--eval-closed-loop`**, **`--ar-contrastive-weight`** when batch allows, and post-run **`scripts/eval/llm_judge_av_captions.py`** (axis **B** = scene-specific). Full rationale and V2 postmortem: **`06_v2_postmortem_v3_rerun.md`**.
+> **Success is not val FVE alone.** Use **`--eval-closed-loop`**, **`--ar-contrastive-weight`** when batch allows, and post-run **`scripts/eval/llm_judge_av_captions.py`** (axis **B** = scene-specific). Rationale: **`docs/evals/v2_lessons_learned.md`**, **`07_sft_recipe_dataset_agnostic.md`**.
 
 Audience: anyone about to launch the first proper joint AV+AR warm-start on
 `data/activations/droid_100ep` + `data/labels/droid_100ep/labels.jsonl`. Goal:
@@ -356,7 +356,7 @@ reproducible by passing the old values explicitly.
 | Knob | V2 default | V3 default | Code path | Rationale |
 |---|---|---|---|---|
 | `--ar-nce-hard-negative-source` | _flag did not exist_ | `none` (opt-in) | [`src/nla/training/dataset.py` `LabeledPositionDataset` hard-neg miner](../../src/nla/training/dataset.py) + [`src/nla/models/ar.py` `forward_sft(negative_explanations=...)`](../../src/nla/models/ar.py) | Pure InfoNCE with batch=4 only contrasts each anchor against 3 random in-batch captions. Hard-neg mining injects K_neg captions sampled from `same_episode` (different step) or `same_position_type` (different episode), so the contrastive denominator gains visually-similar-but-wrong distractors. Off by default to keep paper-faithful baseline reproducible; pass `--ar-nce-hard-negative-source same_episode` to turn on. |
-| `--ar-av-mix-max` | `0.0` | **`0.3`** | [`src/nla/training/sft.py` `_ar_av_mix_p` + the train-loop call](../../src/nla/training/sft.py) | V2 postmortem ([06_v2_postmortem_v3_rerun.md](06_v2_postmortem_v3_rerun.md)) traced the AR-reconstruction-shortcut failure mode to the SFT/eval distribution gap: AR was only ever trained on *gold* captions but evaluated on *AV-generated* ones at test time. Mixing 30% AV-gen captions into AR's input post-warmup forces AR to reconstruct from realistic generations, and exposes template collapse to the contrastive loss (where the failure mode is penalizable). Pass `--ar-av-mix-max 0` to revert to V2 behavior. |
+| `--ar-av-mix-max` | `0.0` | **`0.3`** | [`src/nla/training/sft.py` `_ar_av_mix_p` + the train-loop call](../../src/nla/training/sft.py) | V2 postmortem (`docs/evals/v2_lessons_learned.md`) traced the AR shortcut: AR trained on *gold* captions but evaluated on *AV-generated* text. Mixing ~30% AV-gen into AR’s input post-warmup closes the gap. Pass `--ar-av-mix-max 0` for legacy behavior. |
 | `GRPOConfig.rollouts_per_activation` (`--rollouts-per-activation`) | `4` | **`8`** | [`src/nla/training/grpo.py`](../../src/nla/training/grpo.py) | Group-relative advantage normalization is noisy with K=4: each rollout's advantage is std-normalized over only 3 peers, and the rare lucky/unlucky tail dominates. K=8 doubles rollout cost but halves the per-group advantage variance. The live `droid_100ep_v2_grpo_run1` is unaffected (its `config.json` froze K=4); the next GRPO run picks up K=8 unless the user passes `--rollouts-per-activation 4`. |
 
 The test coverage for the first two lives in

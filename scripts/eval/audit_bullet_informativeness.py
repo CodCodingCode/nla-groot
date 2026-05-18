@@ -11,7 +11,7 @@ parses the structured 5-bullet captions, and computes per-bullet:
     * filler-bullet rate (bullet contains >=80% of instruction's content words)
     * plan-phase taxonomy per suite (top phases by frequency)
 
-Emits a markdown report to docs/sft_plan/v3_quality/agent4_bullet_informativeness.md.
+Emits a markdown report to docs/sft_plan/audit_reports/agent4_bullet_informativeness.md.
 
 Usage::
 
@@ -37,7 +37,7 @@ from typing import Iterator
 
 LABELS_ROOT = Path("data/labels/libero_4suite_stride2")
 SUITES = ("libero_goal", "libero_spatial", "libero_object", "libero_10")
-OUT_PATH = Path("docs/sft_plan/v3_quality/agent4_bullet_informativeness.md")
+OUT_PATH = Path("docs/sft_plan/audit_reports/agent4_bullet_informativeness.md")
 
 # The five bullet types this audit is scoped to.
 BULLETS = ("language", "target", "scene", "spatial", "plan")

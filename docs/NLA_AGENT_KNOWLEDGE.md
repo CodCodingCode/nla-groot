@@ -2,15 +2,15 @@
 
 Concise reference distilled from project code and the Anthropic NLA paper (Transformer Circuits, 2026). Use this so other agents don’t re-derive basics.
 
-> **Project reality (post–droid_100ep V2):** Val **FVE** (teacher-forced or even **closed-loop**) can look **good** while **`llm_judge_av_captions.py` axis B (grounding)** tanks — **shorthand template collapse**. Full write-up + rerun checklist: **`docs/sft_plan/06_v2_postmortem_v3_rerun.md`**. Older bullets below remain true for **mechanics**; **`06`** is the agreed “what went wrong / what to run” layer.
+> **Project reality (post–droid_100ep V2):** Val **FVE** (teacher-forced or **closed-loop**) can look **good** while **`llm_judge_av_captions.py` axis B** tanks — **template collapse**. Narrative + GRPO cookbook: **`docs/evals/v2_lessons_learned.md`**. Operational recipe: **`docs/sft_plan/07_sft_recipe_dataset_agnostic.md`**. Next work queue: **`docs/sft_plan/SFT_V5_NEXT.md`**. Older bullets below remain true for **mechanics**.
 
 ---
 
 ## Repo & doc map (this codebase)
 
 - **Root overview:** `README.md` — layout, quick start, V2 pointers.
-- **SFT runbook:** `docs/sft_plan/00_PLAN.md` (checklist); **`06_v2_postmortem_v3_rerun.md`** (V2/V3 narrative + flags).
-- **V2 detail / GRPO A/B:** `docs/sft_plan/04_v2_lessons_learned.md` and **`docs/evals/v2_lessons_learned.md`** (overlapping depth; evals copy weights **interp + GRPO cookbook**).
+- **SFT runbook:** `docs/sft_plan/00_PLAN.md` (checklist); **`07_sft_recipe_dataset_agnostic.md`** (recipe); **`SFT_V5_NEXT.md`** (V5 roadmap).
+- **V2 detail / GRPO A/B:** **`docs/evals/v2_lessons_learned.md`**.
 - **Library code:** `src/nla/` (`models`, `training`, `extraction`, `labeling`, `steering`, …).
 - **Entrypoints:** `scripts/training/run_sft.py`, `run_grpo.py`; `scripts/eval/*.py`.
 - **Artifacts:** `data/`, `runs/`, `logs/` are typically **gitignored**; paths in docs assume NFS/local mirrors.
@@ -59,7 +59,7 @@ Concise reference distilled from project code and the Anthropic NLA paper (Trans
 - **AR loss:** **MSE** in **`h/α`** space from `description` → `ĥ` (optional **InfoNCE** — **AR only**, not AV).
 - **Not GRPO** — pure supervised gradients until RL phase.
 
-**Distribution gap:** AR default trains on **gold** text; at inference **AV** feeds AR — use **`--ar-av-mix-max`** (scheduled AR-on-AV text in `run_sft.py`) and/or **GRPO** / grounding-aware losses. See **`06_v2_postmortem_v3_rerun.md`**.
+**Distribution gap:** AR default trains on **gold** text; at inference **AV** feeds AR — use **`--ar-av-mix-max`** and/or **GRPO** / grounding-aware losses. See **`07_sft_recipe_dataset_agnostic.md`** and **`docs/evals/v2_lessons_learned.md`**.
 
 ---
 

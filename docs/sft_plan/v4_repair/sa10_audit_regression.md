@@ -28,9 +28,9 @@
 
 - `data/eval/sa3_v3_baseline_summary.json` (SA3, V3 prompt hardening)
 - `data/eval/sa4_v3_baseline_ptype_jaccard.json` (SA4, V3 ptype disambiguation)
-- `docs/sft_plan/v3_quality/agent3_diversity_stats.json` (Agent 3, V3 diversity)
-- `docs/sft_plan/v3_quality/agent5_hard_negatives.json` (Agent 5, V3 hard-neg mining)
-- `docs/sft_plan/v3_quality/agent4_bullet_informativeness.md` was regenerated against the V3 corpus (the audit script has no `--labels-root` flag and a `--help`-prefix invocation re-ran it on the default V3 root); the V3 numbers in that file are unchanged from the original Agent 4 baseline because the underlying corpus and code were unchanged.
+- `docs/sft_plan/audit_reports/agent3_diversity_stats.json` (Agent 3, V3 diversity)
+- `docs/sft_plan/audit_reports/agent5_hard_negatives.json` (Agent 5, V3 hard-neg mining)
+- `docs/sft_plan/audit_reports/agent4_bullet_informativeness.md` was regenerated against the V3 corpus (the audit script has no `--labels-root` flag and a `--help`-prefix invocation re-ran it on the default V3 root); the V3 numbers in that file are unchanged from the original Agent 4 baseline because the underlying corpus and code were unchanged.
 
 ---
 
@@ -289,7 +289,7 @@ Rationale:
 - **SA7 (combined manifests + V4 hard-neg audit):** `docs/sft_plan/v4_repair/sa7_combine.md`, `data/eval/sa7_v4_hardneg_audit.{md,json}`. Audit 5 numbers come from there.
 - **SA8 (hard-neg miner):** `docs/sft_plan/v4_repair/sa8_hardneg_miner.md`. Strategy change rationale.
 - **SA3 / SA4:** `docs/sft_plan/v4_repair/sa3_motor_scaffold_audit.md`, `docs/sft_plan/v4_repair/sa4_ptype_disambiguation.md`. Threshold definitions.
-- **V3 baselines (frozen, untouched):** `data/eval/sa3_v3_baseline_summary.json`, `data/eval/sa4_v3_baseline_ptype_jaccard.json`, `docs/sft_plan/v3_quality/agent3_diversity_stats.json`, `docs/sft_plan/v3_quality/agent5_hard_negatives.json`.
+- **V3 baselines (frozen, untouched):** `data/eval/sa3_v3_baseline_summary.json`, `data/eval/sa4_v3_baseline_ptype_jaccard.json`, `docs/sft_plan/audit_reports/agent3_diversity_stats.json`, `docs/sft_plan/audit_reports/agent5_hard_negatives.json`.
 
 ## SA10 outputs
 

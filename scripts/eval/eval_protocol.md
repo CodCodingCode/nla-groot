@@ -1,6 +1,6 @@
 # Interpretability Evaluation Protocol
 
-> **Two tracks:** (1) **SFT / scene grounding** — caption vs **camera** (`llm_judge_av_captions.py`, axes B/C); (2) **Interp panel** below — caption behavior under **counterfactual `h` edits**. Do not conflate them; see **`docs/sft_plan/06_v2_postmortem_v3_rerun.md`**.
+> **Two tracks:** (1) **SFT / scene grounding** — caption vs **camera** (`llm_judge_av_captions.py`, axes B/C); (2) **Interp panel** below — caption behavior under **counterfactual `h` edits**. Do not conflate them; see **`docs/evals/v2_lessons_learned.md`**, **`07_sft_recipe_dataset_agnostic.md`**.
 
 **Project:** `nla-groot` — AV/AR on GR00T activations (`PYTHONPATH=src`). High **FVE** does not substitute for track (1); that is the main **V2** lesson.
 
