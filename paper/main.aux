@@ -16,101 +16,46 @@
 \gdef\HyperFirstAtBeginDocument#1{#1}
 \providecommand\HyField@AuxAddToFields[1]{}
 \providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{nvidia2025gr00t}
 \citation{frasertaliente2026nla}
-\citation{nvidia2025gr00t,brohan2023rt2,kim2024openvla}
-\citation{alain2017linear,belinkov2022probing}
-\citation{cunningham2023sparseautoencoders,bricken2023monosemanticity}
 \citation{turner2023actadd,zou2023repe}
-\citation{frasertaliente2026nla}
+\citation{hu2022lora}
 \@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
 \newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
-\@writefile{toc}{\contentsline {paragraph}{The NLA recipe applied to a VLA.}{1}{section.1}\protected@file@percent }
-\citation{nvidia2025gr00t}
-\citation{brohan2023rt2}
-\citation{kim2024openvla}
-\citation{octo2024}
-\citation{alain2017linear}
-\citation{cunningham2023sparseautoencoders,bricken2023monosemanticity,templeton2024scaling}
-\citation{frasertaliente2026nla}
-\citation{turner2023actadd,zou2023repe,liu2024incontext,panickssery2024steering}
-\citation{liu2023libero}
-\citation{frasertaliente2026nla}
-\@writefile{toc}{\contentsline {paragraph}{Contributions.}{2}{section.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Thesis.}{2}{Item.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {2}Background and related work}{2}{section.2}\protected@file@percent }
-\newlabel{sec:related}{{2}{2}{Background and related work}{section.2}{}}
-\@writefile{toc}{\contentsline {paragraph}{Vision-language-action policies.}{2}{section.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Activation interpretability.}{2}{section.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Activation steering.}{2}{section.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Robotic simulation benchmarks.}{2}{section.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {3}Method}{2}{section.3}\protected@file@percent }
-\newlabel{sec:method}{{3}{2}{Method}{section.3}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Data: extraction and labeling}{2}{subsection.3.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Architecture: \ensuremath  {\mathrm  {AV}}{} and \ensuremath  {\mathrm  {AR}}{}}{3}{subsection.3.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\ensuremath  {\mathrm  {AV}}{}: activation \(\to \) text.}{3}{subsection.3.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{\ensuremath  {\mathrm  {AR}}{}: text \(\to \) activation.}{3}{subsection.3.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Training}{3}{subsection.3.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Joint SFT.}{3}{subsection.3.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Optional GRPO phase.}{3}{subsection.3.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Steering: language \(\to \) live policy}{3}{subsection.3.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {4}Evaluation protocol}{3}{section.4}\protected@file@percent }
-\newlabel{sec:eval}{{4}{3}{Evaluation protocol}{section.4}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Axis 1: Offline reconstruction and discriminability}{3}{subsection.4.1}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Data flow in \texttt  {\small  nla-groot}. Solid arrows are training paths; dashed arrows are inference / steering paths. \ensuremath  {\mathrm  {AR}}{} doubles as the GRPO reward model and as the source of the live backbone steering vector.\relax }}{4}{figure.caption.1}\protected@file@percent }
-\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
-\newlabel{fig:overview}{{1}{4}{Data flow in \code {nla-groot}. Solid arrows are training paths; dashed arrows are inference / steering paths. \AR {} doubles as the GRPO reward model and as the source of the live backbone steering vector.\relax }{figure.caption.1}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Axis 2: Multimodal LLM judge}{4}{subsection.4.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Axis 3: Closed-loop steerability A/B}{4}{subsection.4.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {5}Experiments and results}{4}{section.5}\protected@file@percent }
-\newlabel{sec:results}{{5}{4}{Experiments and results}{section.5}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Setup}{4}{subsection.5.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Scorecard}{4}{subsection.5.2}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces V3 scorecard (\texttt  {\small  libero\_4suite\_v3}). Thresholds are pre-registered in \texttt  {\small  build\_v3\_scorecard.py}. Required metrics determine the \emph  {overall} verdict; the overall verdict is \textbf  {FAIL}.\relax }}{5}{table.caption.2}\protected@file@percent }
-\newlabel{tab:scorecard}{{1}{5}{V3 scorecard (\code {libero\_4suite\_v3}). Thresholds are pre-registered in \code {build\_v3\_scorecard.py}. Required metrics determine the \emph {overall} verdict; the overall verdict is \textbf {FAIL}.\relax }{table.caption.2}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Multimodal judge: gold (teacher) vs.\ \ensuremath  {\mathrm  {AV}}{} captions, pass rates on a 24-row held-out sample per dataset. Numbers from \texttt  {\small  data/eval/steerability\_v1\_vs\_v3/av\_metrics.json}.\relax }}{5}{table.caption.3}\protected@file@percent }
-\newlabel{tab:av-judge}{{2}{5}{Multimodal judge: gold (teacher) vs.\ \AV {} captions, pass rates on a 24-row held-out sample per dataset. Numbers from \code {data/eval/steerability\_v1\_vs\_v3/av\_metrics.json}.\relax }{table.caption.3}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}AV captions versus teacher (judge)}{5}{subsection.5.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}Closed-loop steerability}{5}{subsection.5.4}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces LIBERO Goal closed-loop steerability on \texttt  {\small  put\_the\_bowl\_on\_the\_plate}, three seeds. ``Target winner rate'' is the fraction of seeds in which the maximum-displaced tracked body was the one named by the steer prompt.\relax }}{6}{table.caption.4}\protected@file@percent }
-\newlabel{tab:steer}{{3}{6}{LIBERO Goal closed-loop steerability on \code {put\_the\_bowl\_on\_the\_plate}, three seeds. ``Target winner rate'' is the fraction of seeds in which the maximum-displaced tracked body was the one named by the steer prompt.\relax }{table.caption.4}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Per-tracked-body summaries across conditions on \texttt  {\small  put\_the\_bowl\_on\_the\_plate}. Baseline (left bar in each group) is the only condition with task-typical bowl displacement; every steering arm dampens motion approximately uniformly.\relax }}{6}{figure.caption.5}\protected@file@percent }
-\newlabel{fig:displacement}{{2}{6}{Per-tracked-body summaries across conditions on \code {put\_the\_bowl\_on\_the\_plate}. Baseline (left bar in each group) is the only condition with task-typical bowl displacement; every steering arm dampens motion approximately uniformly.\relax }{figure.caption.5}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Discussion of results}{6}{subsection.5.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{(i) Reconstruction passes; behavior does not.}{6}{subsection.5.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{(ii) Shorthand template collapse persists in V3.}{6}{subsection.5.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{(iii) Steering changes behavior, but not yet semantically.}{6}{subsection.5.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {6}Limitations}{6}{section.6}\protected@file@percent }
-\newlabel{sec:limitations}{{6}{6}{Limitations}{section.6}{}}
+\@writefile{toc}{\contentsline {paragraph}{Contribution.}{1}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Setup (minimal)}{1}{section.2}\protected@file@percent }
+\newlabel{sec:setup}{{2}{1}{Setup (minimal)}{section.2}{}}
+\@writefile{toc}{\contentsline {paragraph}{Activations.}{1}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\ensuremath  {\mathrm  {AV}}{} and \ensuremath  {\mathrm  {AR}}{}.}{1}{section*.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces \textbf  {Pipeline.} Solid: training (\(\mathbf  {h}\) from GR00T hook; gold captions from teacher). Dashed: inference (\(\hat  {\mathbf  {h}}=\ensuremath  {\mathrm  {AR}}(y)\) steers the live policy). Auditing uses \(\ensuremath  {\mathrm  {AV}}(\mathbf  {h})\); steering bypasses \(\ensuremath  {\mathrm  {AV}}\).}}{2}{figure.1}\protected@file@percent }
+\newlabel{fig:pipeline}{{1}{2}{\textbf {Pipeline.} Solid: training (\(\hvec \) from GR00T hook; gold captions from teacher). Dashed: inference (\(\hhat =\AR (y)\) steers the live policy). Auditing uses \(\AV (\hvec )\); steering bypasses \(\AV \)}{figure.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Steering.}{2}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Three-axis evaluation protocol}{2}{section.3}\protected@file@percent }
+\newlabel{sec:protocol}{{3}{2}{Three-axis evaluation protocol}{section.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{Axis 1: Reconstruction \& retrieval.}{2}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Axis 2: Vision-grounded judge.}{2}{section*.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Axis 3: Closed-loop steer A/B.}{2}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Auditing (optional fourth arm).}{2}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Results: metrics pass, semantics fail}{2}{section.4}\protected@file@percent }
+\newlabel{sec:results}{{4}{2}{Results: metrics pass, semantics fail}{section.4}{}}
+\@writefile{toc}{\contentsline {paragraph}{Template collapse (Axis 2).}{2}{section*.9}\protected@file@percent }
 \bibstyle{unsrtnat}
 \bibdata{refs}
-\bibcite{frasertaliente2026nla}{{1}{2026}{{Fraser-Taliente et~al.}}{{}}}
-\bibcite{nvidia2025gr00t}{{2}{2025}{{NVIDIA}}{{}}}
-\bibcite{brohan2023rt2}{{3}{2023}{{Brohan et~al.}}{{}}}
-\bibcite{kim2024openvla}{{4}{2024}{{Kim et~al.}}{{}}}
-\bibcite{alain2017linear}{{5}{2017}{{Alain and Bengio}}{{}}}
-\bibcite{belinkov2022probing}{{6}{2022}{{Belinkov}}{{}}}
-\bibcite{cunningham2023sparseautoencoders}{{7}{2023}{{Cunningham et~al.}}{{Cunningham, Ewart, Riggs, Huben, and Sharkey}}}
-\@writefile{toc}{\contentsline {section}{\numberline {7}Discussion and outlook}{7}{section.7}\protected@file@percent }
-\newlabel{sec:discussion}{{7}{7}{Discussion and outlook}{section.7}{}}
-\bibcite{bricken2023monosemanticity}{{8}{2023}{{Bricken et~al.}}{{}}}
-\bibcite{turner2023actadd}{{9}{2023}{{Turner et~al.}}{{Turner, Thiergart, Udell, Leech, Mini, and MacDiarmid}}}
-\bibcite{zou2023repe}{{10}{2023}{{Zou et~al.}}{{}}}
-\bibcite{octo2024}{{11}{2024}{{Octo Model Team}}{{}}}
-\bibcite{templeton2024scaling}{{12}{2024}{{Templeton et~al.}}{{}}}
-\bibcite{liu2024incontext}{{13}{2024}{{Liu et~al.}}{{Liu, Ye, Xing, and Zou}}}
-\bibcite{panickssery2024steering}{{14}{2024}{{Panickssery et~al.}}{{Panickssery, Gabrieli, Schulz, Tong, Hubinger, and Turner}}}
-\bibcite{liu2023libero}{{15}{2023}{{Liu et~al.}}{{Liu, Zhu, Gao, Feng, Liu, Zhu, and Stone}}}
-\@writefile{toc}{\contentsline {section}{\numberline {A}Reproducibility appendix}{9}{appendix.A}\protected@file@percent }
-\newlabel{app:repro}{{A}{9}{Reproducibility appendix}{appendix.A}{}}
-\@writefile{toc}{\contentsline {paragraph}{Hardware.}{9}{appendix.A}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Software.}{9}{appendix.A}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Checkpoint identifiers.}{9}{appendix.A}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Canonical commands.}{9}{appendix.A}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Hyperparameters.}{9}{appendix.A}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Non-default SFT hyperparameters for \texttt  {\small  libero\_4suite\_v3}.\relax }}{9}{table.caption.6}\protected@file@percent }
-\newlabel{tab:hp}{{4}{9}{Non-default SFT hyperparameters for \code {libero\_4suite\_v3}.\relax }{table.caption.6}{}}
-\@writefile{toc}{\contentsline {paragraph}{Scorecard schema.}{9}{table.caption.6}\protected@file@percent }
-\newlabel{LastPage}{{}{9}{}{page.9}{}}
-\xdef\lastpage@lastpage{9}
-\xdef\lastpage@lastpageHy{9}
-\gdef \@abspage@last{9}
+\bibcite{nvidia2025gr00t}{{1}{2025}{{NVIDIA}}{{}}}
+\bibcite{frasertaliente2026nla}{{2}{2026}{{Fraser-Taliente et~al.}}{{}}}
+\bibcite{turner2023actadd}{{3}{2023}{{Turner et~al.}}{{Turner, Thiergart, Udell, Leech, Mini, and MacDiarmid}}}
+\bibcite{zou2023repe}{{4}{2023}{{Zou et~al.}}{{}}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces V3 scorecard (\texttt  {\small  libero\_4suite\_v3}). Required metrics gate overall verdict.}}{3}{table.1}\protected@file@percent }
+\newlabel{tab:scorecard}{{1}{3}{V3 scorecard (\code {libero\_4suite\_v3}). Required metrics gate overall verdict}{table.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Multimodal judge pass rates (24-row held-out sample).}}{3}{table.2}\protected@file@percent }
+\newlabel{tab:judge}{{2}{3}{Multimodal judge pass rates (24-row held-out sample)}{table.2}{}}
+\@writefile{toc}{\contentsline {paragraph}{Symmetric steering (Axis 3).}{3}{section*.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Negative result in one line.}{3}{section*.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Use this before you trust or steer}{3}{section.5}\protected@file@percent }
+\newlabel{sec:conclusion}{{5}{3}{Use this before you trust or steer}{section.5}{}}
+\@writefile{toc}{\contentsline {paragraph}{For auditing.}{3}{section*.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{For steering.}{3}{section*.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{For training.}{3}{section*.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Reproducibility.}{3}{section*.15}\protected@file@percent }
+\bibcite{hu2022lora}{{5}{2022}{{Hu et~al.}}{{Hu, Shen, Wallis, Allen-Zhu, Li, Wang, Wang, and Chen}}}
+\gdef \@abspage@last{4}

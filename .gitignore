@@ -55,6 +55,9 @@ secrets/
 # --- ML artifacts (large / generated) ---
 checkpoints/
 data/
+# Website snapshot is committed (source of truth for the static site).
+!website/src/data/
+!website/src/data/snapshot.json
 logs/
 runs/
 wandb/

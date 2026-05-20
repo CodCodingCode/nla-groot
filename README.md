@@ -32,6 +32,8 @@ The **`droid_100ep_v2_nce`** SFT run showed **strong FVE / cosine** (teacher-for
 | `docs/` | SFT plan, eval notes, **`NLA_AGENT_KNOWLEDGE.md`** |
 | `tests/` | Pytest (e.g. tiny-model SFT smoke) |
 | `data/`, `runs/`, `logs/`, `checkpoints/` | **Gitignored** artifacts; use your NFS or local paths |
+| `paper/` | LaTeX workshop short paper (`main.tex`) and repro commands |
+| `website/` | Static technical writeup site (Vite + React); see `website/README.md` |
 
 Run Python with **`PYTHONPATH=src`** (or install the package in editable mode if you add packaging later).
 

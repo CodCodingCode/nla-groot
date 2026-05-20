@@ -1,3 +1,4 @@
+# Workshop short paper (MechInterp / NeurIPS 2026 target).
 DOC := main
 LATEXMK := $(shell command -v latexmk 2>/dev/null)
 
