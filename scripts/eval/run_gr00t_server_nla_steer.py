@@ -114,12 +114,12 @@ def main(config: ServerConfig) -> None:
     apply_groot_compat()
 
     embodiment_tag = EmbodimentTag.resolve(config.embodiment_tag)
-    print("Starting NLA-steered GR00T inference server...")
-    print(f"  Embodiment tag: {embodiment_tag}")
-    print(f"  Model path:     {config.model_path}")
-    print(f"  Device:         {config.device}")
-    print(f"  Host:           {config.host}")
-    print(f"  Port:           {config.port}")
+    print("Starting NLA-steered GR00T inference server...", flush=True)
+    print(f"  Embodiment tag: {embodiment_tag}", flush=True)
+    print(f"  Model path:     {config.model_path}", flush=True)
+    print(f"  Device:         {config.device}", flush=True)
+    print(f"  Host:           {config.host}", flush=True)
+    print(f"  Port:           {config.port}", flush=True)
 
     if config.model_path is None:
         raise SystemExit("--model-path is required")
@@ -150,11 +150,12 @@ def main(config: ServerConfig) -> None:
         from nla.training.checkpoint import load_ar_from_sft
 
         steer_text = _load_steer_text(config)
-        print(f"  AR dir:         {config.ar_dir}")
-        print(f"  Placement:      {config.placement}  blend={config.blend}")
+        print(f"  AR dir:         {config.ar_dir}", flush=True)
+        print(f"  Placement:      {config.placement}  blend={config.blend}", flush=True)
         print(
             "  Steer text:     "
-            f"{steer_text.strip().splitlines()[0][:80] if steer_text.strip() else '<empty>'}…"
+            f"{steer_text.strip().splitlines()[0][:80] if steer_text.strip() else '<empty>'}…",
+            flush=True,
         )
 
         # Load AR on CPU for the one-time bootstrap steer vector.  Keeping a
@@ -180,12 +181,18 @@ def main(config: ServerConfig) -> None:
             enabled=not config.steer_off,
             strict=config.strict,
         )
-        print(f"  Steering:       {'OFF (passthrough)' if config.steer_off else 'ON'}")
+        print(
+            f"  Steering:       {'OFF (passthrough)' if config.steer_off else 'ON'}",
+            flush=True,
+        )
     else:
-        print("  Steering:       disabled (no --ar-dir provided)")
+        print("  Steering:       disabled (no --ar-dir provided)", flush=True)
 
     server = PolicyServer(policy=policy, host=config.host, port=config.port)
-    print(f"\nServer ready — listening on {config.host}:{config.port}\n")
+    print(
+        f"\nServer ready — listening on {config.host}:{config.port}\n",
+        flush=True,
+    )
 
     try:
         server.run()

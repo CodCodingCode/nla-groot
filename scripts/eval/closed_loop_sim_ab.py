@@ -210,6 +210,12 @@ def _spawn_server(
     stdout_f = stdout_path.open("w")
     env = os.environ.copy()
     env["PYTHONPATH"] = env.get("PYTHONPATH", "src") or "src"
+    # Disable Python stdout/stderr buffering so the "Server ready" banner
+    # (and any startup diagnostics) reach the log file immediately. Without
+    # this, block-buffered stdout into a file holds the banner until the
+    # buffer fills or the process exits, which made _wait_for_server_ready
+    # time out at 600s even when the server was healthy.
+    env["PYTHONUNBUFFERED"] = "1"
     return subprocess.Popen(
         cmd,
         stdout=stdout_f,

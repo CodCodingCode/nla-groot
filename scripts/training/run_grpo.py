@@ -44,7 +44,7 @@ Example (LIBERO, sim-success steerability GRPO)::
         --sim-reward-weight 0.5 \\
         --sim-counterfactual-pairs-path data/grpo/cf_pairs.jsonl \\
         --sim-policy-host localhost --sim-policy-port 5555 \\
-        --sim-n-workers 4 --sim-max-steps 100 \\
+        --sim-n-workers 8 --sim-max-steps 100 \\
         --sim-placement image_patch --sim-blend 1.0
 """
 
@@ -190,16 +190,25 @@ def _build_parser() -> argparse.ArgumentParser:
                         "for rows that have a pair and skipped for those "
                         "that don't, so partial-coverage batches still "
                         "learn from sim).")
+    p.add_argument(
+        "--cf-eligible-ids-path", default=None,
+        help="JSON manifest of activation example_ids that have mined CF "
+             "pairs (from scripts/training/build_grpo_cf_manifest.py). "
+             "Restricts SampledPositionDataset to those rows so GRPO never "
+             "samples activations that would skip sim.",
+    )
     p.add_argument("--sim-policy-host", default="localhost")
     p.add_argument("--sim-policy-port", type=int, default=5555,
                    help="ZMQ port the NlaSteerGr00tPolicy server is listening "
                         "on. The trainer fans out short rollouts to this one "
                         "server; the server should have been launched with the "
                         "same AR your SFT dir holds.")
-    p.add_argument("--sim-n-workers", type=int, default=4,
-                   help="Number of concurrent in-flight LIBERO rollouts per "
-                        "GRPO step. Each worker is one subprocess holding one "
-                        "ZMQ client connection.")
+    p.add_argument("--sim-n-workers", type=int, default=8,
+                   help="Number of concurrent in-flight LIBERO rollout "
+                        "subprocesses per GRPO step (CPU/OSMesa-bound; "
+                        "default 8 matches profile_sim_worker.py for "
+                        "B=4/K=4). Each worker holds one ZMQ client to "
+                        "the steer server.")
     p.add_argument("--sim-max-steps", type=int, default=100,
                    help="Max simulator steps per rollout (capped further by "
                         "early-stop-on-predicate). Short rollouts speed up "
@@ -382,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
             args.sim_counterfactual_pairs_path_extra or []
         ),
         sim_require_full_batch_cf=args.sim_require_full_batch_cf,
+        cf_eligible_ids_path=args.cf_eligible_ids_path,
         sim_policy_host=args.sim_policy_host,
         sim_policy_port=args.sim_policy_port,
         sim_n_workers=args.sim_n_workers,

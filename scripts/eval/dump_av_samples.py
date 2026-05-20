@@ -93,9 +93,24 @@ def main(argv: list[str] | None = None) -> int:
         perm = torch.randperm(len(indices), generator=rng).tolist()
         chosen = [indices[k] for k in perm[: args.per_position]]
         batch = collate_labeled_positions([val_ds[i] for i in chosen])
-        acts = batch["activations"].to(args.device)
+        # AV sees the (possibly K-slot) AV-side activation; FVE compares against
+        # the single ``[H]`` AR-side activation. Falls back to ``"activations"``
+        # for old checkpoints that don't carry the dual-vector keys.
+        acts_av = batch.get("activations_av", batch["activations"]).to(args.device)
+        acts_ar = batch.get("activations_ar", batch["activations"]).to(args.device)
         gold = batch["description"]
         pos_types = batch["position_type"]
+        # V5 AV context fields. ``-1`` in the step_index tensor encodes
+        # ``None`` so the prompt renders the "unknown" sentinel.
+        if "step_index" in batch and "instruction" in batch:
+            step_indices = [
+                None if int(v) < 0 else int(v)
+                for v in batch["step_index"].tolist()
+            ]
+            instructions = list(batch["instruction"])
+        else:
+            step_indices = [None] * len(pos_types)
+            instructions = [None] * len(pos_types)
 
         # Teacher-forced AR (gold caption -> ĥ).
         with torch.no_grad():
@@ -108,11 +123,13 @@ def main(argv: list[str] | None = None) -> int:
             do_sample = float(temp) > 0.0
             with torch.no_grad():
                 out = av.generate(
-                    activations=acts,
+                    activations=acts_av,
                     position_types=pos_types,
                     max_new_tokens=args.max_new_tokens,
                     do_sample=do_sample,
                     temperature=float(temp) if do_sample else 1.0,
+                    step_indices=step_indices,
+                    instructions=instructions,
                 )
             gen_by_temp[temp] = out["text"]
             with torch.no_grad():
@@ -122,8 +139,8 @@ def main(argv: list[str] | None = None) -> int:
         print("=" * 78)
         print(f"position_type = {ptype}   (showing {len(chosen)} samples)")
         print("=" * 78)
-        for b in range(acts.shape[0]):
-            tgt_row = acts[b].float()
+        for b in range(acts_ar.shape[0]):
+            tgt_row = acts_ar[b].float()
             tf_cos, tf_mse = _per_row_fve(tgt_row, tf_pred[b])
             print()
             print(f"--- sample {b+1}/{len(chosen)}  position={ptype} ---")

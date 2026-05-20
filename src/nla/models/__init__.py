@@ -11,10 +11,14 @@ from nla.models.ar import (
     DEFAULT_LORA_TARGETS as AR_DEFAULT_LORA_TARGETS,
 )
 from nla.models.templates import (
+    AV_MULTI_SLOT_PLACEHOLDER_FMT,
     AV_PROMPT_TEMPLATE,
+    AV_PROMPT_TEMPLATE_LEGACY,
     AV_SLOT_PLACEHOLDER,
     AR_PROMPT_TEMPLATE,
+    AR_PROMPT_TEMPLATE_CONTEXT_V5,
     PositionType,
+    PromptVersion,
     render_av_prompt,
     render_ar_prompt,
 )
@@ -28,10 +32,14 @@ __all__ = [
     "ActivationReconstructor",
     "ARConfig",
     "AR_DEFAULT_LORA_TARGETS",
+    "AV_MULTI_SLOT_PLACEHOLDER_FMT",
     "AV_PROMPT_TEMPLATE",
+    "AV_PROMPT_TEMPLATE_LEGACY",
     "AV_SLOT_PLACEHOLDER",
     "AR_PROMPT_TEMPLATE",
+    "AR_PROMPT_TEMPLATE_CONTEXT_V5",
     "PositionType",
+    "PromptVersion",
     "render_av_prompt",
     "render_ar_prompt",
 ]

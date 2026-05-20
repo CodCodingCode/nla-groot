@@ -99,6 +99,13 @@ class SFTConfig:
     # the empirical histogram diverges materially from POSITION_MIX.
     balance_position_mix: bool = False
 
+    # Optional override of ``layer_spec.POSITION_MIX`` for the rebalancing
+    # sampler. Only consulted when ``balance_position_mix`` is True. ``None``
+    # keeps the legacy 40/40/20 default. Used for ablations that drop a
+    # position type (e.g. ``{"last_text": 0.5, "image_patch": 0.5}`` for the
+    # no-anchor arm; see ``docs/sft_plan/anchor_ablation.md``).
+    position_mix: dict[str, float] | None = None
+
     # Drop labels whose ``description`` has fewer than this many markdown bullet
     # lines (lines starting with ``-``).  ``None`` disables the filter (legacy
     # behavior).  Used to cull degenerate captions before the split.
@@ -188,9 +195,16 @@ class SFTConfig:
     # (``data/sft/libero_4suite_v3/v4_extraction_scorecard.json``)
     # ``"mean_pool_image"`` is the recommended V4 setting.
     image_patch_pooling: Literal[
-        "pinned", "mean_pool_image", "strided_image", "center_image"
+        "pinned", "mean_pool_image", "strided_image",
+        "strided_image_multi", "center_image",
     ] = "pinned"
     image_patch_pooling_strided_k: int = 4
+
+    # Forwarded to ``LabeledPositionDataset(exclude_position_types=...)``. V5
+    # uses ``("anchor",)`` as a safety net when the caller passes the full
+    # combined labels file; the canonical V5 workflow is to point
+    # ``labels_jsonl`` at the pre-filtered ``labels_no_anchor.jsonl``.
+    exclude_position_types: tuple[str, ...] | None = None
 
     # ---- Action-head consistency (Phase B scaffolding, see
     # ``src/nla/training/action_head_consistency.py`` and
@@ -253,16 +267,27 @@ def _serialize_config(cfg: SFTConfig) -> dict[str, Any]:
     return raw
 
 
-def _position_mix_sampler(labels, *, seed: int):
-    """Build a ``WeightedRandomSampler`` that rebalances ``labels`` toward
-    :data:`nla.layer_spec.POSITION_MIX`.
+def _position_mix_sampler(
+    labels,
+    *,
+    seed: int,
+    position_mix: dict[str, float] | None = None,
+):
+    """Build a ``WeightedRandomSampler`` that rebalances ``labels`` toward a
+    target position-type mix.
 
-    Per-row weight ``w_i = POSITION_MIX[type_i] / (count[type_i] / N)``;
-    rows whose ``position_type`` is not in ``POSITION_MIX`` get weight 0 (a
-    safer choice than letting unrecognized types dominate).  Sampling is with
-    replacement so a small minority class can fill its target share.
+    Defaults to :data:`nla.layer_spec.POSITION_MIX` (40/40/20). Pass an explicit
+    ``position_mix`` mapping to override for ablations that drop a type
+    (e.g. ``{"last_text": 0.5, "image_patch": 0.5}`` for the no-anchor arm).
+
+    Per-row weight ``w_i = mix[type_i] / (count[type_i] / N)``; rows whose
+    ``position_type`` is not in ``mix`` get weight 0 (a safer choice than
+    letting unrecognized types dominate). Sampling is with replacement so a
+    small minority class can fill its target share.
     """
     from torch.utils.data import WeightedRandomSampler
+
+    mix = dict(position_mix) if position_mix is not None else dict(POSITION_MIX)
 
     n = len(labels)
     counts: dict[str, int] = {}
@@ -271,7 +296,7 @@ def _position_mix_sampler(labels, *, seed: int):
 
     weights = torch.zeros(n, dtype=torch.double)
     for i, e in enumerate(labels):
-        target = POSITION_MIX.get(e.position_type)
+        target = mix.get(e.position_type)
         if target is None:
             continue
         empirical = counts[e.position_type] / max(1, n)
@@ -280,16 +305,15 @@ def _position_mix_sampler(labels, *, seed: int):
     if float(weights.sum()) <= 0.0:
         raise RuntimeError(
             "balance_position_mix=True but no label rows had a position_type "
-            f"in POSITION_MIX ({sorted(POSITION_MIX)}); found types "
-            f"{sorted(counts)}."
+            f"in the target mix ({sorted(mix)}); found types {sorted(counts)}."
         )
 
     empirical_pct = {k: v / max(1, n) for k, v in counts.items()}
     logger.info(
         "position_mix rebalance: empirical=%s target=%s (excluded types: %s)",
         {k: round(v, 3) for k, v in empirical_pct.items()},
-        {k: round(v, 3) for k, v in POSITION_MIX.items()},
-        sorted(set(counts) - set(POSITION_MIX)) or "none",
+        {k: round(v, 3) for k, v in mix.items()},
+        sorted(set(counts) - set(mix)) or "none",
     )
 
     g = torch.Generator()
@@ -315,6 +339,7 @@ def _make_dataloaders(cfg: SFTConfig):
         hard_negative_index_path=cfg.ar_nce_hard_negative_index_path,
         image_patch_pooling=cfg.image_patch_pooling,
         image_patch_pooling_strided_k=cfg.image_patch_pooling_strided_k,
+        exclude_position_types=cfg.exclude_position_types,
     )
     val_ds = LabeledPositionDataset(
         cfg.activations_root, cfg.labels_jsonl,
@@ -328,11 +353,32 @@ def _make_dataloaders(cfg: SFTConfig):
         min_bullet_lines=cfg.min_bullet_lines,
         image_patch_pooling=cfg.image_patch_pooling,
         image_patch_pooling_strided_k=cfg.image_patch_pooling_strided_k,
+        exclude_position_types=cfg.exclude_position_types,
     )
     logger.info("Train labels: %d  Val labels: %d", len(train_ds), len(val_ds))
 
     if cfg.balance_position_mix:
-        sampler = _position_mix_sampler(train_ds.labels, seed=cfg.seed)
+        effective_mix = cfg.position_mix
+        if effective_mix is None:
+            # V5 no-anchor arm: when the labels file omits anchor rows entirely
+            # (either via labels_no_anchor.jsonl or exclude_position_types),
+            # the legacy 40/40/20 default would waste 20% of its target weight
+            # on a missing class. Auto-fold into a 50/50 mix so the sampler's
+            # target ratio matches what's actually drawable, per
+            # ``.cursor/plans/v5_av_architecture_cd839da6.plan.md`` §4.
+            present_types = {e.position_type for e in train_ds.labels}
+            if "anchor" not in present_types and present_types <= {
+                "last_text", "image_patch",
+            }:
+                effective_mix = {"last_text": 0.5, "image_patch": 0.5}
+                logger.info(
+                    "No anchor rows in train split; balance_position_mix using "
+                    "50/50 last_text/image_patch (override the default "
+                    "POSITION_MIX 40/40/20)."
+                )
+        sampler = _position_mix_sampler(
+            train_ds.labels, seed=cfg.seed, position_mix=effective_mix,
+        )
         train_loader = DataLoader(
             train_ds, batch_size=cfg.batch_size, sampler=sampler,
             num_workers=0, collate_fn=collate_labeled_positions,
@@ -397,6 +443,24 @@ def _write_jsonl_row(path: Path, row: dict) -> None:
         f.write(json.dumps(row) + "\n")
 
 
+def _av_context_from_batch(batch: dict) -> tuple[list[int | None], list[str | None]]:
+    """Pull V5 AV context fields out of a collated batch.
+
+    Converts the ``step_index`` long tensor's ``-1`` sentinel back to
+    ``None`` and passes ``instruction`` through as-is. Returns empty default
+    lists if the batch was produced by an older collate (backward compat).
+    """
+    if "step_index" in batch and "instruction" in batch:
+        step_t = batch["step_index"]
+        step_indices: list[int | None] = [
+            None if int(v) < 0 else int(v) for v in step_t.tolist()
+        ]
+        instructions: list[str | None] = list(batch["instruction"])
+        return step_indices, instructions
+    B = len(batch["position_type"])
+    return [None] * B, [None] * B
+
+
 def _closed_loop_eval(
     av,
     ar,
@@ -417,18 +481,28 @@ def _closed_loop_eval(
     for i, batch in enumerate(val_loader):
         if max_batches is not None and i >= max_batches:
             break
-        acts = batch["activations"].to(device)
+        acts_av = batch["activations_av"].to(device)
+        acts_ar = batch["activations_ar"].to(device)
+        step_indices, instructions = _av_context_from_batch(batch)
         gen_out = av.generate(
-            activations=acts,
+            activations=acts_av,
             position_types=batch["position_type"],
             do_sample=do_sample,
             temperature=temp_arg,
+            step_indices=step_indices,
+            instructions=instructions,
         )
         texts = gen_out["text"]
-        pred_scaled = ar(texts, device=device)
+        pred_scaled = ar(
+            texts,
+            device=device,
+            position_types=batch["position_type"],
+            step_indices=step_indices,
+            instructions=instructions,
+        )
         pred_unscaled = pred_scaled.detach().float() * ar.cfg.alpha
-        fve_acc.update(acts.float(), pred_unscaled, batch["position_type"])
-        n_seen += acts.shape[0]
+        fve_acc.update(acts_ar.float(), pred_unscaled, batch["position_type"])
+        n_seen += acts_ar.shape[0]
     out = fve_acc.compute()
     out["_n_rows"] = float(n_seen)
     return out
@@ -453,17 +527,27 @@ def _evaluate(
     ce_n = 0
     fve_acc = StratifiedFve(group_name="position")
     for batch in val_loader:
-        acts = batch["activations"].to(device)
+        acts_av = batch["activations_av"].to(device)
+        acts_ar = batch["activations_ar"].to(device)
+        step_indices, instructions = _av_context_from_batch(batch)
         out = av.forward_sft(
-            activations=acts,
+            activations=acts_av,
             position_types=batch["position_type"],
             target_texts=batch["description"],
+            step_indices=step_indices,
+            instructions=instructions,
         )
-        ce_sum += float(out.loss.item()) * acts.shape[0]
-        ce_n += acts.shape[0]
-        pred_scaled = ar(batch["description"], device=device)
+        ce_sum += float(out.loss.item()) * acts_ar.shape[0]
+        ce_n += acts_ar.shape[0]
+        pred_scaled = ar(
+            batch["description"],
+            device=device,
+            position_types=batch["position_type"],
+            step_indices=step_indices,
+            instructions=instructions,
+        )
         pred_unscaled = pred_scaled.detach().float() * alpha
-        fve_acc.update(acts.float(), pred_unscaled, batch["position_type"])
+        fve_acc.update(acts_ar.float(), pred_unscaled, batch["position_type"])
     metrics = fve_acc.compute()
     metrics["ce"] = ce_sum / max(1, ce_n)
 
@@ -655,12 +739,20 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
             for g in optim.param_groups:
                 g["lr"] = _lr_schedule(step, cfg)
 
-            acts = batch["activations"].to(cfg.device, non_blocking=True)
+            # AV sees the (possibly K-slot) AV-side activation tensor; AR
+            # regresses against a single ``[H]`` per row. For single-slot
+            # rows these are the same tensor; for ``strided_image_multi``
+            # image-patch rows ``activations_av`` is ``(B, K, H)`` while
+            # ``activations_ar`` is ``(B, H)`` (mean over K).
+            acts_av = batch["activations_av"].to(cfg.device, non_blocking=True)
+            acts_ar = batch["activations_ar"].to(cfg.device, non_blocking=True)
             descs = batch["description"]
             ptypes = batch["position_type"]
+            step_indices, instructions = _av_context_from_batch(batch)
 
             av_out = av.forward_sft(
-                activations=acts, position_types=ptypes, target_texts=descs,
+                activations=acts_av, position_types=ptypes, target_texts=descs,
+                step_indices=step_indices, instructions=instructions,
             )
             ce = av_out.loss
 
@@ -674,11 +766,13 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                 av.eval()
                 with torch.no_grad():
                     gen_out = av.generate(
-                        activations=acts,
+                        activations=acts_av,
                         position_types=ptypes,
                         max_new_tokens=cfg.ar_av_mix_max_new_tokens,
                         do_sample=bool(cfg.ar_av_mix_do_sample),
                         temperature=0.7 if cfg.ar_av_mix_do_sample else 1.0,
+                        step_indices=step_indices,
+                        instructions=instructions,
                     )
                 av.train()
                 ar_input_text = [t.strip() or "(empty)" for t in gen_out["text"]]
@@ -698,21 +792,32 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                 # (ar_contrastive_weight == 0) ignores them by design.
                 neg_descs = batch.get("negative_descriptions")
                 ar_mse, ar_nce, _pred_scaled = ar.forward_sft(
-                    ar_input_text, acts, return_nce=True,
+                    ar_input_text,
+                    acts_ar,
+                    return_nce=True,
                     negative_explanations=neg_descs,
+                    position_types=ptypes,
+                    step_indices=step_indices,
+                    instructions=instructions,
                 )
                 ar_term = ar_mse + cfg.ar_contrastive_weight * ar_nce
             else:
-                ar_mse, _pred_scaled = ar.forward_sft(ar_input_text, acts)
-                ar_nce = torch.zeros((), device=acts.device)
+                ar_mse, _pred_scaled = ar.forward_sft(
+                    ar_input_text,
+                    acts_ar,
+                    position_types=ptypes,
+                    step_indices=step_indices,
+                    instructions=instructions,
+                )
+                ar_nce = torch.zeros((), device=acts_ar.device)
                 ar_term = ar_mse
 
             if cfg.use_quality_weights and "quality_weight" in batch:
-                qw = batch["quality_weight"].to(acts.device).float().mean().clamp(min=0.0, max=1.0)
+                qw = batch["quality_weight"].to(acts_ar.device).float().mean().clamp(min=0.0, max=1.0)
             else:
-                qw = torch.ones((), device=acts.device)
+                qw = torch.ones((), device=acts_ar.device)
 
-            consistency_loss_t = torch.zeros((), device=acts.device)
+            consistency_loss_t = torch.zeros((), device=acts_ar.device)
             consistency_diag = None
             if (
                 consistency_kernel is not None
@@ -722,6 +827,8 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                     descriptions=descs,
                     example_ids=batch["example_id"],
                     position_types=ptypes,
+                    step_indices=step_indices,
+                    instructions=instructions,
                 )
 
             loss = qw * (cfg.av_weight * ce + cfg.ar_weight * ar_term)

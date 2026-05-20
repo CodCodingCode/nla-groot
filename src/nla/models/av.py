@@ -50,8 +50,10 @@ import torch
 from torch import nn
 
 from nla.models.templates import (
+    AV_MULTI_SLOT_PLACEHOLDER_FMT,
     AV_SLOT_PLACEHOLDER,
     PositionType,
+    PromptVersion,
     render_av_prompt,
 )
 
@@ -101,6 +103,32 @@ class AVConfig:
             "<|fim_pad|>",
         )
     )
+
+    # ---- V5 context prompt ---------------------------------------------------
+    # ``"context_v5"`` (default) renders the V5 enriched prompt with Position
+    # type, Timestep, Task instruction, then the activation slot(s). Set to
+    # ``"legacy"`` to fall back to the V3/V4 single-slot template
+    # byte-identical to the original code path (for ablations or to keep
+    # serving an existing V4 checkpoint).
+    av_prompt_version: PromptVersion = "context_v5"
+    # Toggle whether the Timestep line is rendered. ``False`` skips it (the
+    # legacy template never had it). Only consulted for ``context_v5``.
+    av_include_step_index: bool = True
+    # Same as above but for the Task instruction line.
+    av_include_instruction: bool = True
+    # K for the multi-slot ``image_patch`` prompt. ``1`` keeps single-slot
+    # injection (legacy behaviour); V5 default 8 fans the activation across
+    # 8 strided patch slots so AV sees the spatial signal instead of a single
+    # mean-pooled vector. Non-``image_patch`` rows always use 1 slot.
+    av_num_image_slots: int = 8
+    # Multi-slot string template. ``"<|act_slot_{i}|>"`` resolves to e.g.
+    # ``<|act_slot_0|>`` ... ``<|act_slot_7|>`` -- one fresh special token per
+    # patch position. Mirrors ``new_slot_token_str`` for the K-slot path.
+    multi_slot_token_str_fmt: str = "<|act_slot_{i}|>"
+    # Resolved at __init__: list of ``len == av_num_image_slots`` token ids
+    # for the multi-slot path. Empty when ``av_num_image_slots <= 1``.
+    multi_slot_token_ids: tuple[int, ...] = ()
+    multi_slot_token_strs: tuple[str, ...] = ()
 
 
 def find_slot_token_id(tokenizer, candidates: Iterable[str]) -> tuple[int, str]:
@@ -190,6 +218,21 @@ class ActivationVerbalizer(nn.Module):
         self.cfg.slot_token_id = slot_id
         self.cfg.slot_token_str = slot_str
 
+        # V5 multi-slot ids. Register K distinct ``<|act_slot_i|>`` tokens
+        # when ``av_num_image_slots > 1`` so ``image_patch`` rows can inject
+        # one activation vector per patch position. ``ensure_slot_token`` is
+        # idempotent so calling it for every i is safe.
+        multi_strs: list[str] = []
+        multi_ids: list[int] = []
+        if int(cfg.av_num_image_slots) > 1:
+            for i in range(int(cfg.av_num_image_slots)):
+                s = cfg.multi_slot_token_str_fmt.format(i=i)
+                tid = ensure_slot_token(self.tokenizer, self.base, s)
+                multi_strs.append(s)
+                multi_ids.append(int(tid))
+        self.cfg.multi_slot_token_strs = tuple(multi_strs)
+        self.cfg.multi_slot_token_ids = tuple(multi_ids)
+
         self.act_proj = nn.Linear(cfg.activation_dim, hidden_size, bias=True)
         if cfg.activation_dim == hidden_size:
             nn.init.eye_(self.act_proj.weight)
@@ -214,11 +257,89 @@ class ActivationVerbalizer(nn.Module):
         return self.base.get_input_embeddings()
 
     def _project_activation(self, activation: torch.Tensor, embed_dtype: torch.dtype) -> torch.Tensor:
-        """Project, L2-normalize, scale by α. Returns ``(B, H)`` in ``embed_dtype``."""
+        """Project, L2-normalize, scale by α.
+
+        Accepts ``(B, H)`` (single-slot path) or ``(B, K, H)`` (multi-slot
+        path); returns the same shape in ``embed_dtype``.
+        """
         proj = self.act_proj(activation.to(self.act_proj.weight.dtype))
         proj = proj / proj.norm(dim=-1, keepdim=True).clamp_min(1e-6)
         proj = proj * self.cfg.alpha
         return proj.to(embed_dtype)
+
+    def _row_prompt_spec(
+        self,
+        position_type: PositionType,
+        *,
+        target_intent: str | None,
+        step_index: int | None,
+        instruction: str | None,
+    ) -> tuple[str, int]:
+        """Return (rendered_prompt_with_real_slot_strs, num_slots) for one row.
+
+        Centralizes the per-row decision of "how many slots does this row's
+        prompt expect?" so caller code can stay shape-agnostic. Image-patch
+        rows on the ``context_v5`` template (and only when ``av_num_image_slots
+        > 1``) get the K-slot prompt; every other row stays single-slot.
+        """
+        cfg = self.cfg
+        num_slots = 1
+        if (
+            cfg.av_prompt_version == "context_v5"
+            and target_intent is None
+            and position_type == "image_patch"
+            and int(cfg.av_num_image_slots) > 1
+        ):
+            num_slots = int(cfg.av_num_image_slots)
+
+        step_arg = step_index if cfg.av_include_step_index else None
+        instr_arg = instruction if cfg.av_include_instruction else None
+
+        prompt = render_av_prompt(
+            position_type,
+            target_intent=target_intent,
+            step_index=step_arg,
+            instruction=instr_arg,
+            num_slots=num_slots,
+            prompt_version=cfg.av_prompt_version,
+        )
+
+        if num_slots == 1:
+            prompt = prompt.replace(AV_SLOT_PLACEHOLDER, cfg.slot_token_str)
+        else:
+            for i in range(num_slots):
+                prompt = prompt.replace(
+                    AV_MULTI_SLOT_PLACEHOLDER_FMT.format(i=i),
+                    cfg.multi_slot_token_strs[i],
+                )
+        return prompt, num_slots
+
+    def _row_slot_positions(self, prompt_ids: list[int], num_slots: int) -> list[int]:
+        """Locate the ``num_slots`` slot token ids inside ``prompt_ids``.
+
+        Returns a list of length ``num_slots``; slot 0 is the single-slot id
+        when ``num_slots == 1`` and the multi-slot ids in order otherwise.
+        """
+        if num_slots == 1:
+            try:
+                return [prompt_ids.index(self.cfg.slot_token_id)]
+            except ValueError as e:
+                raise ValueError(
+                    "AV slot token id not found in tokenized prompt; "
+                    f"slot_token_id={self.cfg.slot_token_id}"
+                ) from e
+        positions: list[int] = []
+        for i in range(num_slots):
+            tid = self.cfg.multi_slot_token_ids[i]
+            try:
+                positions.append(prompt_ids.index(tid))
+            except ValueError as e:
+                raise ValueError(
+                    f"AV multi-slot token id {tid} (slot {i}) not found in "
+                    "tokenized prompt; check multi_slot_token_str_fmt matches "
+                    "the rendered template."
+                ) from e
+        return positions
 
     def _tokenize_prompts(
         self,
@@ -226,7 +347,9 @@ class ActivationVerbalizer(nn.Module):
         target_texts: list[str] | None,
         device: torch.device | None = None,
         target_intent_texts: Sequence[str | None] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
+        step_indices: Sequence[int | None] | None = None,
+        instructions: Sequence[str | None] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]]]:
         """Tokenize each (prompt, optional target) pair.
 
         When ``target_intent_texts`` is provided (length must match B), the
@@ -238,38 +361,51 @@ class ActivationVerbalizer(nn.Module):
         this to mix CF rows (intent-conditioned) with non-CF rows
         (descriptive) in the same step.
 
+        ``step_indices`` and ``instructions`` carry V5 context fields per row;
+        when omitted (or per-row ``None``) the prompt renders sentinel
+        placeholders.
+
         Returns
         -------
         input_ids:        ``(B, T_max)`` right-padded with ``pad_id``.
         attention_mask:   ``(B, T_max)`` 1 over real tokens.
         labels:           ``(B, T_max)``: ``-100`` on prompt + pad, target ids otherwise.
-        slot_indices:     ``list[int]`` of length B, slot position in each row.
+        slot_indices:     ``list[list[int]]`` of length B, slot positions per
+                          row. Single-slot rows are length-1 inner lists; K-slot
+                          rows (image_patch on context_v5) are length-K.
         """
         device = device or self.device
-        slot_id = self.cfg.slot_token_id
-        if target_intent_texts is not None and len(target_intent_texts) != len(position_types):
+        B = len(position_types)
+        if target_intent_texts is not None and len(target_intent_texts) != B:
             raise ValueError(
                 f"target_intent_texts length {len(target_intent_texts)} "
-                f"must match position_types length {len(position_types)}"
+                f"must match position_types length {B}"
+            )
+        if step_indices is not None and len(step_indices) != B:
+            raise ValueError(
+                f"step_indices length {len(step_indices)} != B={B}"
+            )
+        if instructions is not None and len(instructions) != B:
+            raise ValueError(
+                f"instructions length {len(instructions)} != B={B}"
             )
 
         encoded_ids: list[list[int]] = []
         encoded_labels: list[list[int]] = []
-        slot_indices: list[int] = []
+        slot_indices: list[list[int]] = []
 
         for b, pos_type in enumerate(position_types):
             intent = None if target_intent_texts is None else target_intent_texts[b]
-            prompt = render_av_prompt(pos_type, target_intent=intent).replace(
-                AV_SLOT_PLACEHOLDER, self.cfg.slot_token_str
+            step = None if step_indices is None else step_indices[b]
+            instr = None if instructions is None else instructions[b]
+            prompt, num_slots = self._row_prompt_spec(
+                pos_type,
+                target_intent=intent,
+                step_index=step,
+                instruction=instr,
             )
             prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-            try:
-                slot_pos = prompt_ids.index(slot_id)
-            except ValueError as e:
-                raise ValueError(
-                    "Slot token id not found after tokenizing AV prompt; "
-                    f"slot_id={slot_id} prompt={prompt!r}"
-                ) from e
+            slot_positions = self._row_slot_positions(prompt_ids, num_slots)
             row_labels = [-100] * len(prompt_ids)
 
             if target_texts is not None:
@@ -283,10 +419,9 @@ class ActivationVerbalizer(nn.Module):
 
             encoded_ids.append(row_ids)
             encoded_labels.append(row_labels)
-            slot_indices.append(slot_pos)
+            slot_indices.append(slot_positions)
 
         T = max(len(r) for r in encoded_ids)
-        B = len(encoded_ids)
         input_ids = torch.full((B, T), self._pad_id, dtype=torch.long, device=device)
         attention_mask = torch.zeros((B, T), dtype=torch.long, device=device)
         labels = torch.full((B, T), -100, dtype=torch.long, device=device)
@@ -301,16 +436,44 @@ class ActivationVerbalizer(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        slot_indices: list[int],
+        slot_indices: list[list[int]] | list[int],
         activations: torch.Tensor,
     ) -> torch.Tensor:
+        """Overwrite per-slot embeddings with projected activations.
+
+        ``slot_indices`` may be a list of ints (legacy single-slot callers) or
+        a list of per-row lists of ints (V5 mixed batches). ``activations`` is
+        ``(B, H)`` in the single-slot case or ``(B, K_max, H)`` in the
+        multi-slot case; rows with fewer than ``K_max`` slots ignore the
+        trailing activations (the unused slot ids never appear in their
+        ``input_ids`` so no embedding is overwritten).
+        """
         embed_module = self._embed()
-        embeds = embed_module(input_ids)              # (B, T, H)
-        proj = self._project_activation(activations, embeds.dtype)
-        idx_b = torch.arange(embeds.shape[0], device=embeds.device)
-        idx_t = torch.tensor(slot_indices, device=embeds.device, dtype=torch.long)
-        embeds = embeds.clone()
-        embeds[idx_b, idx_t] = proj
+        embeds = embed_module(input_ids).clone()      # (B, T, H)
+
+        # Normalize ``slot_indices`` to list-of-lists.
+        norm_slots: list[list[int]]
+        if slot_indices and isinstance(slot_indices[0], int):
+            norm_slots = [[int(s)] for s in slot_indices]  # type: ignore[arg-type]
+        else:
+            norm_slots = [list(s) for s in slot_indices]   # type: ignore[arg-type]
+
+        if activations.dim() == 2:
+            # Legacy single-slot path. All rows must have exactly one slot.
+            proj = self._project_activation(activations, embeds.dtype)
+            for b, slots in enumerate(norm_slots):
+                embeds[b, int(slots[0])] = proj[b]
+            return embeds
+
+        if activations.dim() != 3:
+            raise ValueError(
+                f"activations must be (B, H) or (B, K, H); got shape {tuple(activations.shape)}"
+            )
+
+        proj = self._project_activation(activations, embeds.dtype)  # (B, K_max, H)
+        for b, slots in enumerate(norm_slots):
+            for k, pos in enumerate(slots):
+                embeds[b, int(pos)] = proj[b, k]
         return embeds
 
     # ------------------------------------------------------------------ public
@@ -320,11 +483,20 @@ class ActivationVerbalizer(nn.Module):
         activations: torch.Tensor,
         position_types: list[PositionType],
         target_texts: list[str],
+        *,
+        step_indices: Sequence[int | None] | None = None,
+        instructions: Sequence[str | None] | None = None,
     ):
-        """Teacher-forced SFT: CE only over the target completion tokens."""
+        """Teacher-forced SFT: CE only over the target completion tokens.
+
+        ``step_indices`` / ``instructions`` are optional V5 context fields.
+        When omitted, the prompt renders sentinel placeholders so the call
+        site stays backward compatible.
+        """
         assert activations.shape[0] == len(position_types) == len(target_texts)
         input_ids, attention_mask, labels, slot_indices = self._tokenize_prompts(
             position_types, target_texts, device=activations.device,
+            step_indices=step_indices, instructions=instructions,
         )
         embeds = self._embed_with_injection(input_ids, attention_mask, slot_indices, activations)
         out = self.base(
@@ -348,6 +520,8 @@ class ActivationVerbalizer(nn.Module):
         do_sample: bool = True,
         return_logprobs: bool = False,
         target_intent_texts: Sequence[str | None] | None = None,
+        step_indices: Sequence[int | None] | None = None,
+        instructions: Sequence[str | None] | None = None,
     ) -> dict:
         """Sampling rollout used both for inference and GRPO.
 
@@ -365,6 +539,7 @@ class ActivationVerbalizer(nn.Module):
         input_ids, attention_mask, _, slot_indices = self._tokenize_prompts(
             position_types, target_texts=None, device=activations.device,
             target_intent_texts=target_intent_texts,
+            step_indices=step_indices, instructions=instructions,
         )
         embeds = self._embed_with_injection(input_ids, attention_mask, slot_indices, activations)
 
@@ -404,6 +579,8 @@ class ActivationVerbalizer(nn.Module):
         gen_attention_mask: torch.Tensor,
         *,
         target_intent_texts: Sequence[str | None] | None = None,
+        step_indices: Sequence[int | None] | None = None,
+        instructions: Sequence[str | None] | None = None,
     ) -> torch.Tensor:
         """Differentiable per-token log probs of ``gen_token_ids`` under this AV.
 
@@ -434,33 +611,41 @@ class ActivationVerbalizer(nn.Module):
             when computing loss / KL).
         """
         device = activations.device
-        B = activations.shape[0]
-        assert B == len(position_types) == gen_token_ids.shape[0]
+        B = len(position_types)
+        assert B == gen_token_ids.shape[0]
         if target_intent_texts is not None and len(target_intent_texts) != B:
             raise ValueError(
                 f"target_intent_texts length {len(target_intent_texts)} != B={B}"
             )
+        if step_indices is not None and len(step_indices) != B:
+            raise ValueError(f"step_indices length {len(step_indices)} != B={B}")
+        if instructions is not None and len(instructions) != B:
+            raise ValueError(f"instructions length {len(instructions)} != B={B}")
         T_gen = gen_token_ids.shape[1]
-        slot_id = self.cfg.slot_token_id
 
         # Per-row build of [prompt_ids; gen_ids_real]. Prompt length varies
         # because position_type strings tokenize to different lengths.
         rows_ids: list[list[int]] = []
-        rows_slot_pos: list[int] = []
+        rows_slot_pos: list[list[int]] = []
         rows_score_start: list[int] = []
         rows_gen_lens: list[int] = []
         for b in range(B):
             intent = None if target_intent_texts is None else target_intent_texts[b]
-            prompt = render_av_prompt(position_types[b], target_intent=intent).replace(
-                AV_SLOT_PLACEHOLDER, self.cfg.slot_token_str
+            step = None if step_indices is None else step_indices[b]
+            instr = None if instructions is None else instructions[b]
+            prompt, num_slots = self._row_prompt_spec(
+                position_types[b],
+                target_intent=intent,
+                step_index=step,
+                instruction=instr,
             )
             prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-            slot_pos = prompt_ids.index(slot_id)
+            slot_positions = self._row_slot_positions(prompt_ids, num_slots)
             gen_len = int(gen_attention_mask[b].sum().item())
             gen_real = gen_token_ids[b, :gen_len].tolist() if gen_len > 0 else []
             row = prompt_ids + gen_real
             rows_ids.append(row)
-            rows_slot_pos.append(slot_pos)
+            rows_slot_pos.append(slot_positions)
             rows_score_start.append(len(prompt_ids))
             rows_gen_lens.append(gen_len)
 
@@ -511,6 +696,8 @@ class ActivationVerbalizer(nn.Module):
         cfg = {**self.cfg.__dict__}
         cfg["lora_targets"] = list(cfg["lora_targets"])
         cfg["reserved_token_candidates"] = list(cfg["reserved_token_candidates"])
+        cfg["multi_slot_token_strs"] = list(cfg["multi_slot_token_strs"])
+        cfg["multi_slot_token_ids"] = list(cfg["multi_slot_token_ids"])
         import json
         (path / "av_config.json").write_text(json.dumps(cfg, indent=2))
 

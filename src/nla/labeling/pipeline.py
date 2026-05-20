@@ -25,6 +25,7 @@ from nla.extraction.storage import ActivationShardReader
 from nla.labeling.context import (
     FrameLoaderPool,
     build_position_inputs,
+    build_step_inputs,
     load_qwen3_vl_tokenizer,
     sample_one_position_per_example,
     sample_positions_per_example,
@@ -119,7 +120,9 @@ async def run_labeling(
     labels_dir.mkdir(parents=True, exist_ok=True)
     frames_cache = labels_dir / "frames_cache"
     frames_cache.mkdir(parents=True, exist_ok=True)
-    out_jsonl = labels_dir / "labels.jsonl"
+    prompt_mode = os.environ.get("NLA_POSITION_PROMPT_MODE", "v3").lower()
+    v5_step_mode = prompt_mode in ("v5", "v5_step", "v5-step")
+    out_jsonl = labels_dir / ("labels_steps.jsonl" if v5_step_mode else "labels.jsonl")
 
     if suite is None:
         suite = _infer_suite_from_dataset_root(dataset_root)
@@ -135,36 +138,57 @@ async def run_labeling(
     logger.info("Loading tokenizer %s", tokenizer_repo)
     tokenizer = load_qwen3_vl_tokenizer(tokenizer_repo)
 
-    logger.info(
-        "Sampling %d position(s) per example (seed=%d, guarantee_strata=%s)",
-        positions_per_example, seed, guarantee_strata,
-    )
-    sampled = list(
-        sample_positions_per_example(
-            reader, tokenizer,
-            n_per_example=positions_per_example,
-            seed=seed,
-            guarantee_strata=guarantee_strata,
-        )
-    )
-    if max_examples is not None:
-        sampled = sampled[: int(max_examples)]
-    logger.info("  %d sampled positions across %d examples",
-                len(sampled), len(set(s.record.example_id for s in sampled)))
-
     pool = FrameLoaderPool(max_open=8)
     try:
-        logger.info("Loading frames and building position inputs into %s", frames_cache)
-        inputs = list(
-            build_position_inputs(
-                sampled,
-                dataset_root=dataset_root,
-                frame_cache_dir=frames_cache,
-                state_name=state_name,
-                pool=pool,
-                suite=suite,
+        if v5_step_mode:
+            if positions_per_example != 1:
+                logger.warning(
+                    "V5 step mode ignores positions_per_example=%d (one nested JSON per step)",
+                    positions_per_example,
+                )
+            logger.info("V5 step labeling: one nested JSON label per example")
+            inputs = list(
+                build_step_inputs(
+                    reader,
+                    tokenizer,
+                    dataset_root=dataset_root,
+                    frame_cache_dir=frames_cache,
+                    state_name=state_name,
+                    pool=pool,
+                    suite=suite,
+                    max_examples=max_examples,
+                )
             )
-        )
+        else:
+            logger.info(
+                "Sampling %d position(s) per example (seed=%d, guarantee_strata=%s)",
+                positions_per_example, seed, guarantee_strata,
+            )
+            sampled = list(
+                sample_positions_per_example(
+                    reader, tokenizer,
+                    n_per_example=positions_per_example,
+                    seed=seed,
+                    guarantee_strata=guarantee_strata,
+                )
+            )
+            if max_examples is not None:
+                sampled = sampled[: int(max_examples)]
+            logger.info(
+                "  %d sampled positions across %d examples",
+                len(sampled), len(set(s.record.example_id for s in sampled)),
+            )
+            logger.info("Loading frames and building position inputs into %s", frames_cache)
+            inputs = list(
+                build_position_inputs(
+                    sampled,
+                    dataset_root=dataset_root,
+                    frame_cache_dir=frames_cache,
+                    state_name=state_name,
+                    pool=pool,
+                    suite=suite,
+                )
+            )
         logger.info("  %d inputs ready (with frames)", len(inputs))
 
         n_new = await label_many_async(

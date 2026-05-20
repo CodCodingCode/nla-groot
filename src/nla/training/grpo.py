@@ -181,9 +181,15 @@ class GRPOConfig:
     # have a pair and skipped (z-mean only over eligible entries) for
     # those that don't, so partial-coverage batches still learn from sim.
     sim_require_full_batch_cf: bool = False
+    # When set, ``SampledPositionDataset`` keeps only activations whose
+    # ``example_id`` appears in this manifest (built by
+    # ``scripts/training/build_grpo_cf_manifest.py`` from the CF pairs
+    # JSONLs). Avoids GRPO steps that skip sim because the batch sampled
+    # rows with no mined counterfactual pair.
+    cf_eligible_ids_path: str | None = None
     sim_policy_host: str = "localhost"
     sim_policy_port: int = 5555
-    sim_n_workers: int = 4
+    sim_n_workers: int = 8
     sim_max_steps: int = 100
     sim_placement: str = "image_patch"
     sim_blend: float = 1.0
@@ -271,7 +277,7 @@ def _serialize_config(cfg: GRPOConfig) -> dict[str, Any]:
         for k in (
             "sim_reward_weight", "sim_counterfactual_pairs_path",
             "sim_counterfactual_pairs_paths_extra",
-            "sim_require_full_batch_cf",
+            "sim_require_full_batch_cf", "cf_eligible_ids_path",
             "sim_policy_host", "sim_policy_port", "sim_n_workers",
             "sim_max_steps", "sim_placement", "sim_blend",
             "sim_cache_path", "sim_rollout_python", "sim_rollout_script",
@@ -285,6 +291,8 @@ def _serialize_config(cfg: GRPOConfig) -> dict[str, Any]:
             d.pop("sim_counterfactual_pairs_paths_extra", None)
         if not cfg.sim_require_full_batch_cf:
             d.pop("sim_require_full_batch_cf", None)
+        if not cfg.cf_eligible_ids_path:
+            d.pop("cf_eligible_ids_path", None)
     # SimpleVLA-RL knobs are hidden whenever they sit at their defaults
     # so a baseline run's config.json stays byte-identical to the
     # pre-SimpleVLA layout. Each is dropped independently.
@@ -1285,6 +1293,16 @@ def _evaluate_fve(
 
 
 def _build_dataloaders(cfg: GRPOConfig):
+    allowed_ids = None
+    if cfg.cf_eligible_ids_path:
+        from nla.training.counterfactual_data import load_grpo_cf_manifest
+
+        allowed_ids = load_grpo_cf_manifest(cfg.cf_eligible_ids_path)
+        logger.info(
+            "Restricting GRPO pool to %d CF-eligible activations "
+            "(manifest=%s)",
+            len(allowed_ids), cfg.cf_eligible_ids_path,
+        )
     train_ds = SampledPositionDataset(
         cfg.activations_root,
         seed=cfg.seed,
@@ -1293,6 +1311,7 @@ def _build_dataloaders(cfg: GRPOConfig):
         held_out=False,
         split_by=cfg.split_by,
         allow_episode_split_row_fallback=cfg.allow_episode_split_row_fallback,
+        allowed_example_ids=allowed_ids,
     )
     val_ds = SampledPositionDataset(
         cfg.activations_root,
@@ -1302,6 +1321,7 @@ def _build_dataloaders(cfg: GRPOConfig):
         held_out=True,
         split_by=cfg.split_by,
         allow_episode_split_row_fallback=cfg.allow_episode_split_row_fallback,
+        allowed_example_ids=allowed_ids,
     )
     logger.info("Train pool: %d  Val pool: %d", len(train_ds), len(val_ds))
     train_loader = DataLoader(

@@ -91,21 +91,67 @@ def render_panel(obs: dict, success: bool, t: int) -> np.ndarray:
 
 
 def _to_server_obs(obs: dict) -> dict:
-    """Add B=1, T=1 dims to the env observation as the GR00T server expects."""
-    out: dict[str, Any] = {}
+    """Pack the LIBERO env observation into the format the GR00T server expects.
+
+    The NLA steer server (``scripts/eval/run_gr00t_server_nla_steer.py``)
+    runs a bare ``Gr00tPolicy`` (no ``Gr00tSimPolicyWrapper``), which expects
+    a **nested** observation::
+
+        {
+          "video":     {"image": (B, T, H, W, C), "wrist_image": ...},
+          "state":     {"x": (B, T, D), ..., "gripper": ...},
+          "language":  {"task": [[<str>]]},   # (B, T) list of lists
+          "annotation": {...},                  # optional, passed through
+        }
+
+    The LIBERO env yields **flat** keys with dotted prefixes (``video.image``,
+    ``state.x``, ``annotation.human.action.task_description``) and per-step
+    shapes ``(H, W, C)`` / ``(D,)``. We unflatten by splitting on the first
+    dot, add the ``(B=1, T=1)`` broadcasting dims, and lift the language /
+    task-description string into a one-deep ``[[...]]`` list as the server
+    requires for the (B, T) language slot. Other prefixes (``annotation``)
+    are passed through into their own sub-dict so the wrapper is forward-
+    compatible with future modality keys without code changes.
+    """
+    out: dict[str, dict[str, Any]] = {}
     for k, v in obs.items():
-        if k.startswith("video"):
+        if "." not in k:
+            # Unprefixed keys (rare; mostly raw env fields) are dropped --
+            # the server validates against the model's modality config and
+            # would reject them anyway.
+            continue
+        modality, sub = k.split(".", 1)
+        bucket = out.setdefault(modality, {})
+        if modality == "video":
             arr = np.asarray(v)  # (H, W, C) uint8
-            out[k] = arr[None, None, ...]  # (1, 1, H, W, C)
-        elif k.startswith("state"):
-            arr = np.asarray(v, dtype=np.float32)  # (n_dim,)
+            bucket[sub] = arr[None, None, ...]  # (1, 1, H, W, C)
+        elif modality == "state":
+            arr = np.asarray(v, dtype=np.float32)
             if arr.ndim == 0:
                 arr = arr.reshape(1)
-            out[k] = arr[None, None, ...]  # (1, 1, n_dim)
-        elif k.startswith("annotation"):
-            out[k] = [v] if not isinstance(v, list) else v
+            bucket[sub] = arr[None, None, ...]  # (1, 1, D)
+        elif modality == "annotation":
+            # The model treats ``annotation.human.action.task_description``
+            # (or whatever ``modality_keys[0]`` is in the loaded model's
+            # language config) as the task language. The bare
+            # ``Gr00tPolicy`` (no ``Gr00tSimPolicyWrapper`` -- which is the
+            # NLA steer-server default; see
+            # ``scripts/eval/run_gr00t_server_nla_steer.py``) indexes
+            # ``observation["language"][<full_original_key>]`` so we mirror
+            # the value under the FULL dotted key, not the wrapper's
+            # canonical ``"task"`` alias. Shape is (B=1, T=1) ->
+            # ``[[str(v)]]`` per the language modality validator.
+            bucket[sub] = v
+            lang = out.setdefault("language", {})
+            lang.setdefault(k, [[str(v)]])
         else:
-            out[k] = v
+            # Unknown modality: pack the value verbatim under sub-key. Lets
+            # us add new modalities without code changes.
+            bucket[sub] = v
+    # The server asserts the three core modality buckets exist even if some
+    # of them are empty (e.g. a vision-only model). Ensure they're present.
+    for required in ("video", "state", "language"):
+        out.setdefault(required, {})
     return out
 
 
@@ -114,11 +160,14 @@ def _unpack_action_chunk(
 ) -> list[dict]:
     """Convert (B, T, D) per key into a list of per-step env actions.
 
-    The GR00T policy server (with ``Gr00tSimPolicyWrapper``) returns flat
-    keys whose values are ``np.float32`` arrays of shape ``(B, T, D)``. We
-    pick the requested batch row, then iterate over the first
-    ``n_action_steps`` timesteps and emit one ``{key: ndarray(D,)}`` dict
-    per sub-action — that's what :class:`LiberoEnv` expects.
+    The bare ``Gr00tPolicy`` (the NLA steer-server default) returns
+    **nested** action keys like ``{"x": ..., "y": ..., "gripper": ...}``,
+    while ``Gr00tSimPolicyWrapper`` returns the same chunk under flat
+    ``action.<name>`` keys. :class:`LiberoEnv.step` expects the flat form,
+    so we transparently re-prefix any key that doesn't already start with
+    ``"action."``. We pick the requested batch row, then iterate over the
+    first ``n_action_steps`` timesteps and emit one
+    ``{action.<name>: ndarray(D,)}`` dict per sub-action.
     """
     per_key: dict[str, np.ndarray] = {}
     chunk_T = None
@@ -132,7 +181,8 @@ def _unpack_action_chunk(
             row = arr[:, None]  # (T, 1)
         else:
             row = arr.reshape(1, -1)
-        per_key[k] = row
+        flat_key = k if k.startswith("action.") else f"action.{k}"
+        per_key[flat_key] = row
         chunk_T = row.shape[0] if chunk_T is None else min(chunk_T, row.shape[0])
     chunk_T = chunk_T or 0
     chunk_T = min(chunk_T, n_action_steps)

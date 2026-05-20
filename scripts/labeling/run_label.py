@@ -64,14 +64,15 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Disable JSONL resume (re-label everything).")
     p.add_argument(
         "--prompt-mode",
-        choices=("v3", "v3_strict", "v4"),
+        choices=("v3", "v3_strict", "v4", "v5"),
         default=None,
         help="Per-position prompt builder. v3 = production builder (default; "
              "kept for back-compat with existing label runs). v3_strict = "
              "strict relabel builder. v4 = LIBERO Phase-1 repair builder "
              "(drops gripper/motion/image_region; bans scaffold leakage; "
-             "position-type-conditional last bullet). When set, overrides "
-             "the NLA_POSITION_PROMPT_MODE env var for this run.",
+             "position-type-conditional last bullet). v5 = nested per-step "
+             "JSON (experimental; sets NLA_POSITION_PROMPT_MODE=v5). When set, "
+             "overrides the NLA_POSITION_PROMPT_MODE env var for this run.",
     )
     p.add_argument(
         "--suite",

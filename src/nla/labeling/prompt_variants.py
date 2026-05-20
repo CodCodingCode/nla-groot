@@ -396,6 +396,60 @@ register_variant("V5", v5_diversity)
 register_variant("V6", v6_combined)
 
 
+# ---------------------------------------------------------------------------
+# V5 nested JSON (per-timestep, three slots) — temperature A/B variants
+# ---------------------------------------------------------------------------
+
+def _position_to_step_label_input(inp: PositionLabelInput):
+    from nla.labeling.prompts_v5 import position_input_to_step
+
+    return position_input_to_step(inp)
+
+
+
+
+def _v5_nested_post_process(raw: str) -> str:
+    from nla.labeling.prompts_v5 import parse_v5_response
+    from nla.labeling.schema_v5 import SLOT_NAMES, render_slot_bullets, validate_nested
+    obj = parse_v5_response(raw)
+    ok, errs, norm = validate_nested(obj)
+    if not ok:
+        raise ValueError("V5 schema: " + "; ".join(errs[:5]))
+    parts = [f"[{slot.upper()}]\n" + render_slot_bullets(norm[slot]) for slot in SLOT_NAMES]
+    return "\n\n".join(parts)
+
+def _v5_nested_variant(temperature: float, variant_id: str) -> VariantFn:
+    from nla.labeling.prompts_v5 import V5_NESTED_JSON_SCHEMA, build_v5_step_prompt
+
+    def _fn(inp: PositionLabelInput) -> VariantOutput:
+        step_inp = _position_to_step_label_input(inp)
+        system, user = build_v5_step_prompt(step_inp)
+        return VariantOutput(
+            system_prompt=system,
+            user_prompt=user,
+            response_format=V5_NESTED_JSON_SCHEMA,
+            post_process=_v5_nested_post_process,
+            meta={
+                "variant": variant_id,
+                "label": "v5_nested",
+                "temperature": temperature,
+                "schema": "v5_nested",
+            },
+        )
+
+    return _fn
+
+
+def v5_nested_base(inp: PositionLabelInput) -> VariantOutput:
+    """V5 nested JSON at temperature 0 (default nested builder)."""
+    return _v5_nested_variant(0.0, "V5_nested_T0")(inp)
+
+
+register_variant("V5_nested_T0", _v5_nested_variant(0.0, "V5_nested_T0"))
+register_variant("V5_nested_T07", _v5_nested_variant(0.7, "V5_nested_T07"))
+register_variant("V5_nested_T10", _v5_nested_variant(1.0, "V5_nested_T10"))
+
+
 __all__ = [
     "VariantOutput",
     "VariantFn",
@@ -409,4 +463,5 @@ __all__ = [
     "v4_length_cap",
     "v5_diversity",
     "v6_combined",
+    "v5_nested_base",
 ]

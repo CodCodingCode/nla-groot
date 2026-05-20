@@ -224,6 +224,9 @@ def load_labels_jsonl(path, *, min_bullet_lines: int | None = None):
 
 @dataclass
 class LabeledPositionSample:
+    # AV-side activation. ``[H]`` for single-slot rows (last_text, anchor,
+    # image_patch under pinned/mean_pool/strided/center pooling); ``[K, H]``
+    # for image_patch rows under ``strided_image_multi`` (V5 K-slot path).
     activation: torch.Tensor
     position_type: str
     position_index: int
@@ -233,6 +236,20 @@ class LabeledPositionSample:
     label_example_id: str
     episode_index: int | None
     quality_weight: float
+    # AR-side activation. Always a single ``[H]`` vector regardless of pooling
+    # (AR continues to regress one ``h`` per row even when AV sees K slots).
+    # For single-slot rows this equals ``activation``; for K-slot rows it is
+    # the mean of the K patch vectors so existing AR forward and offline
+    # hard-neg mining stay valid.
+    activation_ar: torch.Tensor | None = None
+    # V5 context fields surfaced for the AV prompt. ``step_index`` is the
+    # episode timestep from the activation index (``rec.step_index``);
+    # ``instruction`` is the natural-language task pulled from the label row's
+    # ``meta.instruction``. Both are ``None`` when the underlying artifact
+    # doesn't carry the field, in which case the AV prompt renders sentinel
+    # placeholders ("unknown" / "(not provided)").
+    step_index: int | None = None
+    instruction: str | None = None
     # Optional list of hard-negative captions sampled for this anchor by the
     # dataset's hard-negative miner. ``None`` (the default) means hard-neg
     # mining is disabled and downstream code should keep its legacy in-batch
@@ -269,41 +286,66 @@ class LabeledPositionDataset(Dataset):
         hard_negatives_per_anchor: int = 4,
         hard_negative_index_path: str | Path | None = None,
         image_patch_pooling: Literal[
-            "pinned", "mean_pool_image", "strided_image", "center_image"
+            "pinned", "mean_pool_image", "strided_image",
+            "strided_image_multi", "center_image",
         ] = "pinned",
         image_patch_pooling_strided_k: int = 4,
+        exclude_position_types: tuple[str, ...] | None = None,
     ):
         # ``image_patch_pooling`` controls how the dataset materializes the
         # activation for rows whose ``position_type == "image_patch"``. The
         # default ``"pinned"`` preserves V3 behaviour exactly: return
         # ``features[entry.position_index]`` (the single random patch the
-        # labeling pass committed to). The non-pinned strategies (added for
-        # V4 per ``docs/sft_plan/08_positive_steering_followon.md`` step 1)
-        # ignore ``position_index`` and pool over every valid image-patch
-        # token via ``nla.extraction.position_strategies.apply``. Non-image
-        # ptypes (``last_text``, ``anchor``) are untouched regardless.
+        # labeling pass committed to). The single-vector pooled strategies
+        # (added for V4 per ``docs/sft_plan/08_positive_steering_followon.md``
+        # step 1) ignore ``position_index`` and pool over every valid
+        # image-patch token via ``nla.extraction.position_strategies.apply``.
+        # V5 adds ``"strided_image_multi"``: AV gets the full ``[K, H]`` strided
+        # patch grid (one slot per patch); AR keeps a single ``[H]`` target by
+        # mean-pooling the K patches so the existing AR forward and offline
+        # hard-neg mining stay valid. Non-image ptypes (``last_text``,
+        # ``anchor``) are untouched regardless.
         self.image_patch_pooling = str(image_patch_pooling)
         self.image_patch_pooling_strided_k = int(image_patch_pooling_strided_k)
         if self.image_patch_pooling not in (
-            "pinned", "mean_pool_image", "strided_image", "center_image"
+            "pinned", "mean_pool_image", "strided_image",
+            "strided_image_multi", "center_image",
         ):
             raise ValueError(
                 f"image_patch_pooling must be one of pinned/mean_pool_image/"
-                f"strided_image/center_image, got {self.image_patch_pooling!r}"
+                f"strided_image/strided_image_multi/center_image, "
+                f"got {self.image_patch_pooling!r}"
             )
+        # Optional set of position_type values to drop entirely before split.
+        # V5 ablations use this to enforce ``no anchor`` even when callers
+        # accidentally pass the full combined labels file; the canonical
+        # workflow is still to point ``labels_jsonl`` at the pre-filtered
+        # ``labels_no_anchor.jsonl``.
+        self.exclude_position_types: frozenset[str] = (
+            frozenset(exclude_position_types) if exclude_position_types else frozenset()
+        )
         self.reader = ActivationShardReader(activations_root)
         self._index_by_id = {rec.example_id: i for i, rec in enumerate(self.reader.records)}
 
         all_labels = load_labels_jsonl(labels_jsonl, min_bullet_lines=min_bullet_lines)
         valid = []
         n_missing = 0
+        n_excluded = 0
         for entry in all_labels:
             if entry.source_example_id not in self._index_by_id:
                 n_missing += 1
                 continue
+            if entry.position_type in self.exclude_position_types:
+                n_excluded += 1
+                continue
             valid.append(entry)
         if n_missing:
             logger.warning("Discarded %d labels with no matching activation.", n_missing)
+        if n_excluded:
+            logger.info(
+                "Dropped %d labels via exclude_position_types=%s",
+                n_excluded, sorted(self.exclude_position_types),
+            )
 
         if strict_position_check and valid:
             # Fail fast on out-of-bounds position_index using the cheap index
@@ -580,11 +622,12 @@ class LabeledPositionDataset(Dataset):
                 f"Label position {pos} >= seq_len {features.shape[0]} for "
                 f"example {entry.source_example_id}"
             )
+        vec_ar: torch.Tensor | None = None
         if (
             self.image_patch_pooling != "pinned"
             and entry.position_type == "image_patch"
         ):
-            # V4 pooled-strategy path. Re-uses the same read-time pooling
+            # V4/V5 pooled-strategy path. Re-uses the same read-time pooling
             # functions the extraction A/B sweep validated. We do NOT
             # apply pooling to ``last_text``/``anchor`` rows: their pinned
             # token positions are the whole point of those ptypes.
@@ -605,7 +648,7 @@ class LabeledPositionDataset(Dataset):
                     "Re-extract with the current scripts/extraction/run_extract.py."
                 )
             try:
-                vec = _apply_strategy(
+                pooled = _apply_strategy(
                     self.image_patch_pooling,
                     features,
                     image_mask,
@@ -616,12 +659,26 @@ class LabeledPositionDataset(Dataset):
                 # Strategy raises if there are no image patches (shouldn't
                 # happen for a row whose ptype is image_patch, but be
                 # defensive); fall back to the pinned position.
-                vec = features[pos].contiguous().to(torch.float32)
+                pooled = features[pos].contiguous().to(torch.float32)
+            if self.image_patch_pooling == "strided_image_multi" and pooled.dim() == 2:
+                # AV sees the full K-patch grid; AR keeps a single mean vector
+                # so the existing AR forward and offline hard-neg mining (mined
+                # on per-row single ``h``) stay valid.
+                vec = pooled                                  # [K, H]
+                vec_ar = pooled.mean(dim=0).contiguous()      # [H]
+            else:
+                # Single-vector pooling returned ``[H]`` directly.
+                vec = pooled
         else:
             vec = features[pos].contiguous().to(torch.float32)
         negs: list[str] | None = None
         if self.hard_negative_source != "none":
             negs = self._sample_hard_negatives(i)
+        meta = entry.raw.get("meta") or {}
+        instruction = meta.get("instruction")
+        if instruction is not None:
+            instruction = str(instruction)
+        step_index = None if rec.step_index is None else int(rec.step_index)
         return LabeledPositionSample(
             activation=vec,
             position_type=entry.position_type,
@@ -632,13 +689,79 @@ class LabeledPositionDataset(Dataset):
             label_example_id=entry.raw.get("example_id") or entry.source_example_id,
             episode_index=rec.episode_index,
             quality_weight=float(entry.quality_weight),
+            activation_ar=vec_ar if vec_ar is not None else vec,
+            step_index=step_index,
+            instruction=instruction,
             negative_descriptions=negs,
         )
 
 
 def collate_labeled_positions(batch):
+    # ``step_index`` defaults to -1 for rows whose activation index didn't
+    # carry the field; AV passes the value through ``int | None`` and
+    # converts -1 back to ``None`` so the prompt renders the sentinel.
+    #
+    # AV vs AR activation tensors
+    # ---------------------------
+    # Most rows have ``activation`` shape ``[H]`` and ``activation_ar == vec``
+    # (single-vector path). Image-patch rows under ``strided_image_multi``
+    # pooling have ``activation`` shape ``[K, H]`` (one slot per patch) and a
+    # separate ``activation_ar`` of shape ``[H]`` (mean over K). To handle
+    # mixed batches we right-pad K with zeros up to ``K_max`` and emit an
+    # ``activation_slot_mask`` so AV knows which slots are real.
+    #
+    # ``activations`` is kept as an alias for ``activations_ar`` so legacy
+    # callers (e.g. closed-loop eval helpers, action-consistency kernel) that
+    # only need a single ``[H]`` per row keep working without a code change.
+    ar_vecs = []
+    for b in batch:
+        v_ar = b.activation_ar if b.activation_ar is not None else b.activation
+        if v_ar.dim() != 1:
+            raise ValueError(
+                f"activation_ar must be 1-D ``[H]``; got shape {tuple(v_ar.shape)}"
+            )
+        ar_vecs.append(v_ar)
+    activations_ar = torch.stack(ar_vecs, dim=0)
+
+    av_shapes = {tuple(b.activation.shape) for b in batch}
+    k_per_row = [b.activation.shape[0] if b.activation.dim() == 2 else 1 for b in batch]
+    h_dim = int(activations_ar.shape[-1])
+    k_max = max(k_per_row)
+    if k_max == 1 and all(b.activation.dim() == 1 for b in batch):
+        activations_av = torch.stack(
+            [b.activation for b in batch], dim=0,
+        )                                                    # (B, H)
+        slot_mask = torch.ones((len(batch), 1), dtype=torch.bool)
+    else:
+        # Mixed batch (or all multi-slot). Right-pad to ``k_max`` with zeros
+        # and record real-vs-padding in ``activation_slot_mask``. AV's
+        # ``_embed_with_injection`` never reads the trailing padding rows
+        # because their slot ids don't appear in the corresponding prompt.
+        activations_av = torch.zeros(
+            (len(batch), k_max, h_dim), dtype=activations_ar.dtype,
+        )
+        slot_mask = torch.zeros((len(batch), k_max), dtype=torch.bool)
+        for i, b in enumerate(batch):
+            v = b.activation
+            if v.dim() == 1:
+                activations_av[i, 0] = v
+                slot_mask[i, 0] = True
+            else:
+                k_i = v.shape[0]
+                activations_av[i, :k_i] = v
+                slot_mask[i, :k_i] = True
+        if len({tuple(s.shape) for s in [activations_av]}) != 1:
+            # Sanity: stack must be rectangular at this point.
+            raise RuntimeError(
+                f"activations_av collate produced ragged shapes from {av_shapes}"
+            )
+
     out = {
-        "activations": torch.stack([b.activation for b in batch], dim=0),
+        "activations": activations_ar,
+        "activations_ar": activations_ar,
+        "activations_av": activations_av,
+        "activation_slot_mask": slot_mask,
+        "activation_slot_count": torch.tensor(k_per_row, dtype=torch.long),
         "position_type": [b.position_type for b in batch],
         "position_index": torch.tensor([b.position_index for b in batch], dtype=torch.long),
         "seq_len": torch.tensor([b.seq_len for b in batch], dtype=torch.long),
@@ -649,6 +772,11 @@ def collate_labeled_positions(batch):
         "quality_weight": torch.tensor(
             [b.quality_weight for b in batch], dtype=torch.float32,
         ),
+        "step_index": torch.tensor(
+            [-1 if b.step_index is None else int(b.step_index) for b in batch],
+            dtype=torch.long,
+        ),
+        "instruction": [b.instruction for b in batch],
     }
     if any(b.negative_descriptions is not None for b in batch):
         # Carry only when *every* row provided negatives so downstream
@@ -691,10 +819,29 @@ class SampledPositionDataset(Dataset):
         held_out=False,
         split_by: SplitBy = "episode",
         allow_episode_split_row_fallback: bool = True,
+        allowed_example_ids: set[str] | frozenset[str] | None = None,
     ):
         self.reader = ActivationShardReader(activations_root)
         self.sampler = TokenPositionSampler(position_mix=position_mix, seed=seed)
         idx = list(range(len(self.reader)))
+        if allowed_example_ids is not None:
+            allowed = set(allowed_example_ids)
+            n_before = len(idx)
+            idx = [
+                i for i in idx
+                if self.reader.records[i].example_id in allowed
+            ]
+            logger.info(
+                "[%s] CF-eligible filter: kept %d / %d activations (%.1f%%)",
+                f"SampledPositionDataset({'val' if held_out else 'train'})",
+                len(idx), n_before, 100.0 * len(idx) / max(1, n_before),
+            )
+            if not idx:
+                raise RuntimeError(
+                    "CF-eligible filter removed every activation; check "
+                    "allowed_example_ids against activations_root example_id "
+                    "format."
+                )
         if held_out_fraction > 0.0:
             idx = _split_episode_aware(
                 idx,

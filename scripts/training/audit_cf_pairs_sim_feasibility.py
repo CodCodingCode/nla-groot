@@ -59,6 +59,11 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from nla.eval.steerability.bddl_bodies import (  # noqa: E402
+    DEFAULT_GOAL_BDDL_DIR,
+    missing_bodies_for_task,
+    parse_bddl_instance_names,
+)
 from nla.eval.steerability.predicates import GOAL_TASKS, resolve_task  # noqa: E402
 
 
@@ -288,6 +293,7 @@ def audit(
     per_env: list[dict[str, Any]] = []
     n_bddl_missing = 0
     n_unresolvable = 0
+    n_missing_bodies = 0
     n_env_load_failed = 0
     rows_at_risk = 0
 
@@ -301,6 +307,7 @@ def audit(
             "predicate_kind": None,
             "source_body": None,
             "destination": None,
+            "missing_predicate_bodies": [],
             "bddl_found": False,
             "bddl_path": None,
             "env_loads": None,
@@ -327,13 +334,22 @@ def audit(
         rec["bddl_path"] = str(bddl_path)
         if bddl_path.exists():
             rec["bddl_found"] = True
+            missing = missing_bodies_for_task(spec.name, bddl_dir)
+            rec["missing_predicate_bodies"] = missing
+            if missing:
+                rec["errors"].append(
+                    "predicate bodies missing from BDDL: "
+                    + ", ".join(missing)
+                )
+                n_missing_bodies += 1
+                rows_at_risk += int(n_use)
         else:
             rec["bddl_found"] = False
             rec["errors"].append(f"missing BDDL at {bddl_path}")
             n_bddl_missing += 1
             rows_at_risk += int(n_use)
 
-        if probe_env and rec["bddl_found"]:
+        if probe_env and rec["bddl_found"] and not rec.get("missing_predicate_bodies"):
             t0 = time.time()
             res = _run_env_load(
                 env_name,
@@ -364,6 +380,7 @@ def audit(
         "n_rows": n_rows,
         "n_unique_target_env_names": len(env_name_counts),
         "n_bddl_missing": n_bddl_missing,
+        "n_missing_predicate_bodies": n_missing_bodies,
         "n_unresolvable": n_unresolvable,
         "env_load_probed": bool(probe_env),
         "env_load_skipped_reason": env_load_skipped_reason,
@@ -394,6 +411,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Unique target_env_names: {report['n_unique_target_env_names']}"
     )
     lines.append(f"- BDDL missing: {report['n_bddl_missing']}")
+    lines.append(f"- Predicate bodies missing from BDDL: {report['n_missing_predicate_bodies']}")
     lines.append(f"- Unresolvable target_task: {report['n_unresolvable']}")
     lines.append(
         f"- Env-load probed: **{'yes' if report['env_load_probed'] else 'no (skipped)'}**"
@@ -424,7 +442,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         )
     lines.append("")
 
-    pass_bddl = report["n_bddl_missing"] == 0 and report["n_unresolvable"] == 0
+    pass_bddl = (
+        report["n_bddl_missing"] == 0
+        and report["n_unresolvable"] == 0
+        and report["n_missing_predicate_bodies"] == 0
+    )
     pass_env = (
         not report["env_load_probed"] or report["n_env_load_failed"] == 0
     )
@@ -606,7 +628,11 @@ def main(argv: list[str] | None = None) -> int:
     out_json.write_text(json.dumps(report, indent=2, sort_keys=False))
     out_md.write_text(render_markdown(report))
 
-    pass_bddl = report["n_bddl_missing"] == 0 and report["n_unresolvable"] == 0
+    pass_bddl = (
+        report["n_bddl_missing"] == 0
+        and report["n_unresolvable"] == 0
+        and report["n_missing_predicate_bodies"] == 0
+    )
     pass_env = (
         not report["env_load_probed"] or report["n_env_load_failed"] == 0
     )

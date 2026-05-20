@@ -1,0 +1,114 @@
+# Anchor ablation - Arm A (with anchor) vs Arm B (no anchor)
+#
+# Protocol and rationale: ../../docs/sft_plan/anchor_ablation.md
+#
+# Arm A is the existing V4 SFT checkpoint + current GRPO run; do NOT restart it.
+# Arm B is launched only after the current GRPO finishes and the user approves.
+# Both arms share the same activations root and stats_pooled.json (V4 alpha).
+
+shared:
+  activations_root: data/activations/libero_4suite_v4_combined
+  stats_json:       data/activations/libero_4suite_v4_combined/stats_pooled.json
+  image_patch_pooling: mean_pool_image
+  ar_nce_hard_negative_source: topk_cosine
+
+arm_a_with_anchor:
+  notes: |
+    Existing V4 baseline. Already trained. Already has a GRPO run in flight.
+    Touch nothing here.
+  sft:
+    labels_jsonl:                data/labels/libero_4suite_v4_combined/labels.jsonl
+    output_dir:                  data/sft/libero_4suite_v4_consistency_overnight   # existing
+    ar_nce_hard_negative_index_path: data/activations/libero_4suite_v4_combined/hard_negatives.jsonl
+    balance_position_mix:        true
+    position_mix_json:           null    # default 40/40/20 from layer_spec.POSITION_MIX
+  grpo:
+    sft_dir:                     data/sft/libero_4suite_v4_consistency_overnight
+    position_mix_json:           null    # current run uses default POSITION_MIX
+    output_dir:                  data/grpo/libero_4suite_v4_sim_grpo_20260519_124923   # running
+
+arm_b_no_anchor:
+  notes: |
+    Drop the 166 anchor label rows. Force SFT sampler to 50/50 last_text /
+    image_patch via --position-mix-json. New SFT output dir; new GRPO output
+    dir; new hard-neg index. All eval / sim infrastructure unchanged.
+  sft:
+    labels_jsonl:                data/labels/libero_4suite_v4_combined/labels_no_anchor.jsonl
+    output_dir:                  data/sft/libero_4suite_v4_no_anchor
+    ar_nce_hard_negative_index_path: data/activations/libero_4suite_v4_combined/hard_negatives_no_anchor.jsonl
+    balance_position_mix:        true
+    position_mix_json: '{"last_text": 0.5, "image_patch": 0.5}'
+  grpo:
+    sft_dir:                     data/sft/libero_4suite_v4_no_anchor
+    position_mix_json:           '{"last_text": 0.5, "image_patch": 0.5}'
+    output_dir:                  data/grpo/libero_4suite_v4_no_anchor_sim_grpo
+
+# Pre-registered decision rule. Compare on image_patch + last_text only;
+# Arm B has no anchor stratum.
+decision_rule:
+  primary_metrics:
+    - cosine/position=image_patch
+    - cosine/position=last_text
+    - closed_greedy/cosine
+    - judge_grounding/image_patch
+    - judge_grounding/last_text
+    - sim_correct_minus_wrong
+  rules:
+    - condition: "Arm B >= Arm A on all primary metrics"
+      action: "Drop anchor from labeling pipeline and POSITION_MIX permanently."
+    - condition: "Arm B worse on >=2 primary metrics"
+      action: "Keep anchor slot, but invest in 1000s of anchor rows before any further use."
+    - condition: "Roughly flat"
+      action: "Drop anchor for simplicity (166 rows aren't buying anything)."
+
+# Reference launch commands. Run from repo root in the .venv. The Arm B SFT
+# command is intentionally not executed by this config - it is launched
+# manually after the current GRPO finishes and the user approves.
+launch_commands:
+  arm_b_sft: |
+    PYTHONPATH=src .venv/bin/python scripts/training/run_sft.py \
+      --activations-root data/activations/libero_4suite_v4_combined \
+      --labels-jsonl     data/labels/libero_4suite_v4_combined/labels_no_anchor.jsonl \
+      --stats-json       data/activations/libero_4suite_v4_combined/stats_pooled.json \
+      --output-dir       data/sft/libero_4suite_v4_no_anchor \
+      --image-patch-pooling mean_pool_image \
+      --balance-position-mix \
+      --position-mix-json '{"last_text": 0.5, "image_patch": 0.5}' \
+      --ar-contrastive-weight 0.5 \
+      --ar-nce-hard-negative-source topk_cosine \
+      --ar-nce-hard-negative-index-path data/activations/libero_4suite_v4_combined/hard_negatives_no_anchor.jsonl \
+      --batch-size 4 --learning-rate 1e-4 --warmup-steps 500 --total-steps 8000 \
+      --eval-every 500 --save-every 2000 --log-every 5 \
+      --eval-closed-loop --closed-loop-temps 0.0 0.7 --closed-loop-max-batches 64 \
+      --ar-av-mix-max 0.4 --ar-av-mix-warmup-frac 0.3 \
+      # Match Arm A's action-consistency settings for an apples-to-apples eval
+      # (this assumes you have the libero_goal lerobot dataset locally; drop
+      # these four flags to disable the auxiliary kernel)
+      --action-consistency-weight 0.1 \
+      --action-consistency-every-n-steps 8 \
+      --action-consistency-policy-path checkpoints/GR00T-N1.7-LIBERO/libero_goal \
+      --action-consistency-embodiment-tag LIBERO_PANDA \
+      --action-consistency-dataset-roots '{"goal": "third_party/Isaac-GR00T/examples/LIBERO/libero_goal_no_noops_1.0.0_lerobot"}' \
+      --action-consistency-suites goal
+
+  arm_b_grpo: |
+    # Run AFTER Arm B SFT completes and after the current Arm A GRPO run
+    # finishes. Mirror Arm A's flags except --sft-dir, --output-dir, and
+    # --position-mix-json.
+    PYTHONPATH=src .venv/bin/python scripts/training/run_grpo.py \
+      --sft-dir          data/sft/libero_4suite_v4_no_anchor \
+      --activations-root data/activations/libero_4suite_v4_combined \
+      --output-dir       data/grpo/libero_4suite_v4_no_anchor_sim_grpo \
+      --batch-size 2 --rollouts-per-activation 4 --total-steps 200 \
+      --eval-every 25 --save-every 100 \
+      --position-mix-json '{"last_text": 0.5, "image_patch": 0.5}' \
+      --sim-reward-weight 0.5 \
+      --sim-counterfactual-pairs-path data/grpo/libero_goal_counterfactual_pairs.jsonl \
+      --sim-counterfactual-pairs-path-extra data/grpo/libero_spatial_counterfactual_pairs.jsonl \
+      --sim-counterfactual-pairs-path-extra data/grpo/libero_object_counterfactual_pairs.jsonl \
+      --sim-counterfactual-pairs-path-extra data/grpo/libero_10_counterfactual_pairs.jsonl \
+      --sim-policy-host localhost --sim-policy-port 5556 \
+      --sim-n-workers 8 --sim-max-steps 100 \
+      --sim-rollout-python /home/ubuntu/nla-groot/third_party/Isaac-GR00T/gr00t/eval/sim/LIBERO/libero_uv/.venv/bin/python \
+      --dynamic-sampling --use-ppo-clip --disable-kl-anchor \
+      --rollout-temperature-high 1.6 --beta 0.0 --seed 0

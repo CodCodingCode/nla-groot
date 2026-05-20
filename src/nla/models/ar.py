@@ -40,7 +40,7 @@ import torch
 from torch import nn
 
 from nla.models.av import _hidden_size, _load_causal_lm, _load_tokenizer
-from nla.models.templates import render_ar_prompt
+from nla.models.templates import PositionType, PromptVersion, render_ar_prompt
 
 
 DEFAULT_LORA_TARGETS: tuple[str, ...] = (
@@ -74,6 +74,10 @@ class ARConfig:
     # produced mode collapse with the legacy negative-L2 sims at α-scaled
     # magnitudes ~1e-3).
     nce_temperature: float = 0.1
+    # V5 conditioned AR prompt (prepends position / timestep / instruction).
+    ar_prompt_version: PromptVersion = "legacy"
+    ar_include_step_index: bool = True
+    ar_include_instruction: bool = True
 
 
 class ActivationReconstructor(nn.Module):
@@ -115,8 +119,59 @@ class ActivationReconstructor(nn.Module):
     def device(self) -> torch.device:
         return next(self.base.parameters()).device
 
-    def _tokenize(self, explanations: list[str]) -> dict[str, torch.Tensor]:
-        rendered = [render_ar_prompt(e) for e in explanations]
+    def _render_prompts(
+        self,
+        explanations: list[str],
+        *,
+        position_types: list[PositionType] | None = None,
+        step_indices: list[int | None] | None = None,
+        instructions: list[str | None] | None = None,
+    ) -> list[str]:
+        B = len(explanations)
+        version = self.cfg.ar_prompt_version
+        if version == "legacy":
+            return [render_ar_prompt(e, prompt_version="legacy") for e in explanations]
+        if position_types is None:
+            position_types = ["fallback"] * B
+        if len(position_types) != B:
+            raise ValueError(
+                f"position_types length {len(position_types)} != batch size {B}."
+            )
+        step_list = step_indices if step_indices is not None else [None] * B
+        instr_list = instructions if instructions is not None else [None] * B
+        if len(step_list) != B or len(instr_list) != B:
+            raise ValueError(
+                "step_indices and instructions must match batch size when provided."
+            )
+        out: list[str] = []
+        for i, expl in enumerate(explanations):
+            step_arg = step_list[i] if self.cfg.ar_include_step_index else None
+            instr_arg = instr_list[i] if self.cfg.ar_include_instruction else None
+            out.append(
+                render_ar_prompt(
+                    expl,
+                    position_type=position_types[i],
+                    step_index=step_arg,
+                    instruction=instr_arg,
+                    prompt_version="context_v5",
+                )
+            )
+        return out
+
+    def _tokenize(
+        self,
+        explanations: list[str],
+        *,
+        position_types: list[PositionType] | None = None,
+        step_indices: list[int | None] | None = None,
+        instructions: list[str | None] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        rendered = self._render_prompts(
+            explanations,
+            position_types=position_types,
+            step_indices=step_indices,
+            instructions=instructions,
+        )
         return self.tokenizer(
             rendered,
             return_tensors="pt",
@@ -157,13 +212,21 @@ class ActivationReconstructor(nn.Module):
         explanations: list[str],
         *,
         device: torch.device | None = None,
+        position_types: list[PositionType] | None = None,
+        step_indices: list[int | None] | None = None,
+        instructions: list[str | None] | None = None,
     ) -> torch.Tensor:
         """Return α-scaled predictions ``(B, activation_dim)``.
 
         Use ``predict(...)`` if you want unscaled outputs (the default for
         consumers of the activation).
         """
-        toks = self._tokenize(explanations)
+        toks = self._tokenize(
+            explanations,
+            position_types=position_types,
+            step_indices=step_indices,
+            instructions=instructions,
+        )
         if device is None:
             device = self.device
         input_ids = toks["input_ids"].to(device)
@@ -172,9 +235,22 @@ class ActivationReconstructor(nn.Module):
         last = self._pickoff(hidden, attention_mask)
         return self.head(last.to(self.head.weight.dtype))
 
-    def predict(self, explanations: list[str], *, unscale: bool = True) -> torch.Tensor:
+    def predict(
+        self,
+        explanations: list[str],
+        *,
+        unscale: bool = True,
+        position_types: list[PositionType] | None = None,
+        step_indices: list[int | None] | None = None,
+        instructions: list[str | None] | None = None,
+    ) -> torch.Tensor:
         with torch.no_grad():
-            pred_scaled = self.forward(explanations)
+            pred_scaled = self.forward(
+                explanations,
+                position_types=position_types,
+                step_indices=step_indices,
+                instructions=instructions,
+            )
         return pred_scaled * self.cfg.alpha if unscale else pred_scaled
 
     def forward_sft(
@@ -184,6 +260,9 @@ class ActivationReconstructor(nn.Module):
         *,
         return_nce: bool = False,
         negative_explanations: list[list[str]] | None = None,
+        position_types: list[PositionType] | None = None,
+        step_indices: list[int | None] | None = None,
+        instructions: list[str | None] | None = None,
     ) -> tuple[torch.Tensor, ...]:
         """Returns ``(mse, pred_scaled)``, or ``(mse, nce, pred_scaled)`` if
         ``return_nce=True``.
@@ -219,7 +298,13 @@ class ActivationReconstructor(nn.Module):
         When ``negative_explanations is None`` the code path is byte-identical
         to the random-in-batch-only baseline.
         """
-        pred_scaled = self.forward(explanations, device=target_activations.device)
+        pred_scaled = self.forward(
+            explanations,
+            device=target_activations.device,
+            position_types=position_types,
+            step_indices=step_indices,
+            instructions=instructions,
+        )
         target_scaled = (target_activations / self.cfg.alpha).to(pred_scaled.dtype)
         if self.cfg.clip_target_scaled is not None:
             clip = float(self.cfg.clip_target_scaled)
@@ -248,6 +333,9 @@ class ActivationReconstructor(nn.Module):
                 sims_neg = self._hard_negative_sims(
                     pred_scaled=pred_scaled,
                     negative_explanations=negative_explanations,
+                    position_types=position_types,
+                    step_indices=step_indices,
+                    instructions=instructions,
                 )
                 sims = torch.cat([sims, sims_neg], dim=1)  # (B, B+K_neg)
             temp = max(1e-6, float(self.cfg.nce_temperature))
@@ -263,6 +351,9 @@ class ActivationReconstructor(nn.Module):
         *,
         pred_scaled: torch.Tensor,
         negative_explanations: list[list[str]],
+        position_types: list[PositionType] | None = None,
+        step_indices: list[int | None] | None = None,
+        instructions: list[str | None] | None = None,
     ) -> torch.Tensor:
         """Return ``(B, K_neg)`` cosine sims of pred[i] vs AR(negative[i,k]).
 
@@ -286,7 +377,28 @@ class ActivationReconstructor(nn.Module):
         if K_neg == 0:
             return pred_scaled.new_zeros((B, 0))
         flat = [neg for row in negative_explanations for neg in row]
-        pred_neg_flat = self.forward(flat, device=pred_scaled.device)  # (B*K_neg, H)
+        neg_position_types: list[PositionType] | None = None
+        neg_step_indices: list[int | None] | None = None
+        neg_instructions: list[str | None] | None = None
+        if position_types is not None:
+            neg_position_types = [
+                position_types[i] for i in range(B) for _ in range(K_neg)
+            ]
+        if step_indices is not None:
+            neg_step_indices = [
+                step_indices[i] for i in range(B) for _ in range(K_neg)
+            ]
+        if instructions is not None:
+            neg_instructions = [
+                instructions[i] for i in range(B) for _ in range(K_neg)
+            ]
+        pred_neg_flat = self.forward(
+            flat,
+            device=pred_scaled.device,
+            position_types=neg_position_types,
+            step_indices=neg_step_indices,
+            instructions=neg_instructions,
+        )  # (B*K_neg, H)
         pred_neg = pred_neg_flat.view(B, K_neg, pred_neg_flat.shape[-1])
         # cos(pred[i], pred_neg[i, k]) for each (i, k).
         return nn.functional.cosine_similarity(

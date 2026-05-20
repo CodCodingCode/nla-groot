@@ -1,46 +1,13 @@
 #!/usr/bin/env python
-"""Mine (scene, target_intent) pairs for sim-success GRPO on LIBERO Goal.
+"""Mine (scene, target_intent) pairs for sim-success GRPO on LIBERO suites.
 
-For each labeled position in the Goal split of the combined corpus we emit
-a small bundle::
+For each labeled position in a chosen suite (``goal``, ``spatial``, ``object``,
+``10``) we emit a JSONL row keyed by ``example_id`` / ``source_example_id``.
 
-    {
-      "example_id":         <label example_id>,
-      "source_example_id":  <activation example_id>,
-      "episode_index":      <int>,
-      "step_index":         <int>,
-      "position_type":      "last_text" | "image_patch" | "anchor",
-      "position_index":     <int>,
-      "source_intent":      <free-text demo task>,
-      "source_task":        <canonical task id>,
-      "target_intent":      <free-text task we want the policy to do>,
-      "target_task":        <canonical task id>,
-      "target_env_name":    "libero_sim/<target_task>",
-      "is_counterfactual":  bool   (source_task != target_task)
-    }
-
-Roughly 50% of rows are "matching" (target == source intent — these test
-whether the AV can preserve behavior under steering) and 50% are
-"counterfactual" (target differs — the ones the GRPO loss actually needs
-to learn to redirect on).
-
-The GRPO trainer reads this file via
-:class:`nla.training.counterfactual_data.CounterfactualPairSampler` to draw
-``(activation, intent_text)`` pairs each step. Pairs are indexed under
-*both* ``source_example_id`` and ``example_id`` so a dataset that yields
-either flavor of id (the activation-shard id or the label-row id) lands
-on the same candidate list — no offline JSONL rewriting required. The
-env name lets the sim worker spin up the appropriate BDDL — which we
-choose to be the *target* task so :code:`info["success"]` would fire if
-the policy actually executed the steered intent (a useful, free secondary
-signal even though our custom predicates run regardless of the loaded
-BDDL).
-
-Note: dual indexing only fixes key aliasing. A cross-suite batch whose
-shards aren't covered by this miner (e.g. spatial/object/10 instead of
-goal) still won't get a CF row — mine the missing suites and either
-concatenate the JSONLs offline or pass them via
-``--sim-counterfactual-pairs-path-extra``.
+Sim predicates currently score **Goal** tasks only, so ``target_task`` and
+``target_env_name`` always reference a Goal benchmark task whose bodies were
+verified in that task's BDDL. Non-goal source rows therefore get cross-suite
+Goal sim targets (lookup coverage + valid sim reward).
 """
 
 from __future__ import annotations
@@ -60,22 +27,32 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from nla.eval.steerability.bddl_bodies import (  # noqa: E402
+    DEFAULT_GOAL_BDDL_DIR,
+    filter_tasks_with_bodies_in_bddl,
+    validate_cf_target_bodies,
+)
+from nla.eval.steerability.libero_suites import resolve_suite_instruction  # noqa: E402
 from nla.eval.steerability.predicates import GOAL_TASKS, resolve_task  # noqa: E402
 
 
 logger = logging.getLogger("mine_grpo_counterfactuals")
 
-
-def _resolve_canonical(instruction: str) -> str | None:
-    """Free-text instruction -> canonical task id. Returns None if unknown."""
-    try:
-        return resolve_task(instruction).name
-    except KeyError:
-        return None
+SUITE_CHOICES = ("goal", "spatial", "object", "10", "all")
 
 
-def _iter_goal_label_rows(labels_path: Path) -> Iterable[dict]:
-    """Yield only rows from the ``goal`` suite that carry full metadata."""
+def _resolve_canonical(instruction: str, suite_label: str = "goal") -> str | None:
+    """Free-text instruction -> canonical task id for ``suite_label``."""
+    if suite_label == "goal":
+        try:
+            return resolve_task(instruction).name
+        except KeyError:
+            return None
+    return resolve_suite_instruction(instruction, suite_label)
+
+
+def _iter_suite_label_rows(labels_path: Path, suite_label: str) -> Iterable[dict]:
+    """Yield label rows for one ``meta.suite`` value with full metadata."""
     n_total = 0
     n_kept = 0
     n_skipped_suite = 0
@@ -94,7 +71,7 @@ def _iter_goal_label_rows(labels_path: Path) -> Iterable[dict]:
             if obj.get("error"):
                 continue
             meta = obj.get("meta") or {}
-            if meta.get("suite") != "goal":
+            if meta.get("suite") != suite_label:
                 n_skipped_suite += 1
                 continue
             sid = meta.get("source_example_id")
@@ -106,7 +83,7 @@ def _iter_goal_label_rows(labels_path: Path) -> Iterable[dict]:
             if sid is None or ep is None or st is None or pos is None or ptype is None or not instr:
                 n_skipped_meta += 1
                 continue
-            canon = _resolve_canonical(instr)
+            canon = _resolve_canonical(instr, suite_label)
             if canon is None:
                 n_skipped_intent += 1
                 continue
@@ -119,12 +96,20 @@ def _iter_goal_label_rows(labels_path: Path) -> Iterable[dict]:
                 "position_type":     str(ptype),
                 "source_intent":     str(instr),
                 "source_task":       canon,
+                "source_suite":      suite_label,
             }
             n_kept += 1
     logger.info(
-        "Goal label scan: total=%d kept=%d  skipped(suite!=goal)=%d  skipped(missing meta)=%d  skipped(unknown intent)=%d",
-        n_total, n_kept, n_skipped_suite, n_skipped_meta, n_skipped_intent,
+        "%s label scan: total=%d kept=%d  skipped(suite!=%s)=%d  "
+        "skipped(missing meta)=%d  skipped(unknown intent)=%d",
+        suite_label, n_total, n_kept, suite_label,
+        n_skipped_suite, n_skipped_meta, n_skipped_intent,
     )
+
+
+def _iter_goal_label_rows(labels_path: Path) -> Iterable[dict]:
+    """Backward-compatible alias."""
+    return _iter_suite_label_rows(labels_path, "goal")
 
 
 def _canonical_to_instruction() -> dict[str, str]:
@@ -179,6 +164,7 @@ def mine_pairs(
     labels_path: Path,
     *,
     out_path: Path,
+    suite_label: str = "goal",
     seed: int = 0,
     matching_fraction: float = 0.5,
     max_per_episode: int | None = None,
@@ -187,30 +173,19 @@ def mine_pairs(
     balance_target_counts: bool = False,
     shuffle: bool = True,
 ) -> dict:
-    """Walk Goal labels and emit one (source, target) per row.
+    """Walk one suite's labels and emit (source, Goal sim target) pairs.
 
-    ``matching_fraction`` of rows get ``target_intent == source_intent`` (the
-    "preserve behavior" half of the curriculum); the rest get a uniformly-
-    sampled counterfactual intent drawn from the other 9 Goal tasks.
-
-    Pass ``max_per_episode`` to keep the file balanced across episodes when
-    the corpus has highly imbalanced row counts per task. Pass ``max_total``
-    to cap the output for smoke runs.
-
-    Two optional balance knobs (default off -> behavior is byte-identical to
-    the original miner):
-
-      * ``max_per_source_task``: hard cap rows per canonical source task.
-        Useful when the corpus is dominated by one task (e.g. >25% bowl-on-
-        plate) and uniform target sampling can't fix the source skew.
-      * ``balance_target_counts``: replace the uniform counterfactual target
-        sampler with one that inverse-weights by current target-task emit
-        count. Helps when source skew indirectly drags certain target tasks
-        below the gate floor.
+    For ``suite_label == "goal"``, ``matching_fraction`` rows keep
+    ``target_task == source_task``. For other suites, targets are always
+    drawn from :data:`GOAL_TASKS` (sim predicates require Goal tasks); those
+    rows are always marked counterfactual w.r.t. the source suite task.
     """
+    if suite_label not in ("goal", "spatial", "object", "10"):
+        raise ValueError(f"unknown suite_label {suite_label!r}")
+
     rng = random.Random(seed)
-    canon_to_instr = _canonical_to_instruction()
-    all_canon = list(GOAL_TASKS.keys())
+    goal_canon_to_instr = _canonical_to_instruction()
+    all_goal = list(GOAL_TASKS.keys())
 
     if not labels_path.exists():
         raise FileNotFoundError(f"labels.jsonl not found: {labels_path}")
@@ -222,13 +197,11 @@ def mine_pairs(
     src_task_emitted: Counter[str] = Counter()
     counterfactual_count = 0
     written = 0
+    n_rejected_bodies = 0
+    instance_cache: dict[str, frozenset[str]] = {}
+    bddl_dir = DEFAULT_GOAL_BDDL_DIR
 
-    # Materialize + shuffle the row stream so smoke-mining a small --max-total
-    # samples uniformly across the corpus rather than reading the head of the
-    # file (which is grouped by task). At ~25k Goal rows the load is ~5 MB.
-    # The reproducibility-critical RNG stays the same one used for target
-    # sampling so a given seed produces identical output.
-    row_stream = list(_iter_goal_label_rows(labels_path))
+    row_stream = list(_iter_suite_label_rows(labels_path, suite_label))
     if shuffle:
         rng.shuffle(row_stream)
 
@@ -246,28 +219,53 @@ def mine_pairs(
                 rows_per_episode[ep] = rows_per_episode.get(ep, 0) + 1
             src_task_emitted[src] += 1
             src_task_counts[src] += 1
-            if rng.random() < matching_fraction:
+
+            use_matching = (
+                suite_label == "goal"
+                and src in GOAL_TASKS
+                and rng.random() < matching_fraction
+            )
+            if use_matching:
                 tgt = src
                 is_cf = False
             else:
+                options = [t for t in all_goal if t != src or suite_label != "goal"]
+                valid = filter_tasks_with_bodies_in_bddl(
+                    options, bddl_dir, instance_cache=instance_cache,
+                )
+                if not valid:
+                    n_rejected_bodies += 1
+                    continue
                 if balance_target_counts:
                     tgt = _weighted_counterfactual_target(
-                        rng=rng, src=src, all_canon=all_canon,
+                        rng=rng, src=src, all_canon=valid,
                         tgt_emit=tgt_task_counts,
                     )
                 else:
-                    tgt = rng.choice([t for t in all_canon if t != src])
+                    tgt = rng.choice(valid)
                 is_cf = True
+
             tgt_task_counts[tgt] += 1
             if is_cf:
                 counterfactual_count += 1
             out_row = {
                 **row,
-                "target_intent":    canon_to_instr[tgt],
-                "target_task":      tgt,
-                "target_env_name":  f"libero_sim/{tgt}",
+                "target_intent": goal_canon_to_instr[tgt],
+                "target_task": tgt,
+                "target_env_name": f"libero_sim/{tgt}",
                 "is_counterfactual": bool(is_cf),
             }
+            body_issues = validate_cf_target_bodies(
+                tgt, out_row["target_env_name"], bddl_dir,
+                instance_cache=instance_cache,
+            )
+            if body_issues:
+                n_rejected_bodies += 1
+                logger.debug(
+                    "[bddl] skip sid=%s tgt=%s: %s",
+                    row.get("source_example_id"), tgt, body_issues,
+                )
+                continue
             fout.write(json.dumps(out_row, ensure_ascii=False) + "\n")
             written += 1
             if max_total is not None and written >= max_total:
@@ -276,18 +274,21 @@ def mine_pairs(
     summary = {
         "labels_path":      str(labels_path),
         "out_path":         str(out_path),
+        "suite_label":      suite_label,
         "seed":             int(seed),
         "n_rows":           int(written),
         "n_counterfactual": int(counterfactual_count),
         "counterfactual_fraction": float(counterfactual_count / max(1, written)),
         "source_task_counts": dict(src_task_counts),
         "target_task_counts": dict(tgt_task_counts),
+        "n_rejected_missing_bodies": int(n_rejected_bodies),
     }
     summary_path = out_path.with_suffix(out_path.suffix + ".summary.json")
     summary_path.write_text(json.dumps(summary, indent=2))
     logger.info(
-        "Wrote %d pairs to %s (counterfactual=%.1f%%); summary at %s",
-        written, out_path, 100.0 * summary["counterfactual_fraction"], summary_path,
+        "Wrote %d pairs to %s (counterfactual=%.1f%%, rejected_bodies=%d); summary at %s",
+        written, out_path, 100.0 * summary["counterfactual_fraction"],
+        n_rejected_bodies, summary_path,
     )
     return summary
 
@@ -299,8 +300,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Combined labels.jsonl path.",
     )
     p.add_argument(
+        "--suite",
+        default="goal",
+        choices=list(SUITE_CHOICES),
+        help="Label suite to mine (goal/spatial/object/10) or all four sequentially.",
+    )
+    p.add_argument(
         "--out", default="data/grpo/libero_goal_counterfactual_pairs.jsonl",
-        help="Output JSONL path.",
+        help="Output JSONL path (for --suite all, used as output directory if it "
+             "ends with /, else files are libero_{suite}_counterfactual_pairs.jsonl "
+             "alongside this path's parent).",
     )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
@@ -341,23 +350,42 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _out_path_for_suite(base: Path, suite_label: str) -> Path:
+    if base.suffix == ".jsonl":
+        parent = base.parent
+        if suite_label == "goal":
+            return base
+        return parent / f"libero_{suite_label}_counterfactual_pairs.jsonl"
+    return base / f"libero_{suite_label}_counterfactual_pairs.jsonl"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
         level=args.log_level,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
-    mine_pairs(
-        labels_path=Path(args.labels),
-        out_path=Path(args.out),
-        seed=args.seed,
-        matching_fraction=args.matching_fraction,
-        max_per_episode=args.max_per_episode,
-        max_total=args.max_total,
-        max_per_source_task=args.max_per_source_task,
-        balance_target_counts=bool(args.balance_target_counts),
-        shuffle=bool(args.shuffle),
+    labels_path = Path(args.labels)
+    out_base = Path(args.out)
+    suites = (
+        ["goal", "spatial", "object", "10"]
+        if args.suite == "all"
+        else [args.suite]
     )
+    for i, suite in enumerate(suites):
+        out_path = _out_path_for_suite(out_base, suite)
+        mine_pairs(
+            labels_path=labels_path,
+            out_path=out_path,
+            suite_label=suite,
+            seed=int(args.seed) + i,
+            matching_fraction=args.matching_fraction,
+            max_per_episode=args.max_per_episode,
+            max_total=args.max_total,
+            max_per_source_task=args.max_per_source_task,
+            balance_target_counts=bool(args.balance_target_counts),
+            shuffle=bool(args.shuffle),
+        )
     return 0
 
 

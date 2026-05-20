@@ -98,24 +98,107 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Draw training rows with a WeightedRandomSampler so per-batch "
                         "position_type frequencies approximate layer_spec.POSITION_MIX "
                         "(40/40/20). Use when the labels file is skewed.")
+    p.add_argument("--position-mix-json", default=None,
+                   help="Optional JSON object of target position-type weights for "
+                        "the rebalancing sampler (e.g. "
+                        '\'{"last_text": 0.5, "image_patch": 0.5}\' for the '
+                        "no-anchor ablation). Only consulted when "
+                        "--balance-position-mix is set. Omit to use "
+                        "layer_spec.POSITION_MIX (40/40/20).")
     p.add_argument(
         "--image-patch-pooling",
-        choices=["pinned", "mean_pool_image", "strided_image", "center_image"],
+        choices=[
+            "pinned", "mean_pool_image", "strided_image",
+            "strided_image_multi", "center_image",
+        ],
         default="pinned",
-        help="V4 image-patch pooling. 'pinned' (default) preserves V3 behaviour "
-             "(use the single labeled position_index per row). The non-pinned "
-             "options pool over every valid image-patch token at read time and "
-             "are applied ONLY to rows whose position_type == 'image_patch' "
-             "(last_text / anchor rows are untouched). Per "
+        help="V4/V5 image-patch pooling. 'pinned' (default) preserves V3 "
+             "behaviour (use the single labeled position_index per row). The "
+             "single-vector options ('mean_pool_image', 'strided_image', "
+             "'center_image') pool over every valid image-patch token at read "
+             "time and feed AV a single [H] vector. V5 'strided_image_multi' "
+             "gives AV the full [K, H] strided patch grid (one slot per patch) "
+             "while AR still regresses against a single [H] (mean over K). "
+             "Pooling is applied ONLY to rows whose position_type == "
+             "'image_patch' (last_text / anchor rows are untouched). Per "
              "data/sft/libero_4suite_v3/v4_extraction_scorecard.json the "
-             "recommended V4 setting is 'mean_pool_image'.",
+             "recommended V4 setting was 'mean_pool_image'; V5 default is "
+             "'strided_image_multi' with K=8.",
     )
     p.add_argument(
         "--image-patch-pooling-strided-k",
         type=int,
         default=4,
-        help="K for --image-patch-pooling=strided_image (number of evenly-spaced "
-             "image-patch tokens to average). Ignored for other pooling modes.",
+        help="K for --image-patch-pooling=strided_image / strided_image_multi "
+             "(number of evenly-spaced image-patch tokens to read). For the "
+             "single-vector 'strided_image' the K patches are averaged; for "
+             "the multi-vector 'strided_image_multi' they are returned as K "
+             "separate AV slot vectors. Ignored for other pooling modes.",
+    )
+    p.add_argument(
+        "--exclude-position-types",
+        nargs="+",
+        default=None,
+        help="Drop rows whose position_type is in this list before splitting "
+             "(safety net for the V5 no-anchor arm). Canonical V5 workflow is "
+             "to point --labels-jsonl at the pre-filtered labels_no_anchor.jsonl "
+             "instead; use this flag when running on the full combined file. "
+             "Example: --exclude-position-types anchor.",
+    )
+    p.add_argument(
+        "--av-prompt-version",
+        choices=["legacy", "context_v5"],
+        default="context_v5",
+        help="V5 default: render the context-enriched AV prompt with Position "
+             "type, Timestep, Task instruction, then the activation slot(s). "
+             "Pass 'legacy' to fall back to the V3/V4 two-line prompt "
+             "byte-identical to the original (useful for ablations or for "
+             "continuing a V4 checkpoint without a prompt shift).",
+    )
+    p.add_argument(
+        "--av-no-step-index",
+        action="store_true",
+        help="Skip the Timestep line in the AV prompt even when "
+             "--av-prompt-version=context_v5. The labeler never showed the AV "
+             "the literal step index, so this lets you A/B whether the timestep "
+             "improves grounding or just adds prompt tokens.",
+    )
+    p.add_argument(
+        "--av-no-instruction",
+        action="store_true",
+        help="Skip the Task instruction line in the AV prompt even when "
+             "--av-prompt-version=context_v5. Useful for measuring how much "
+             "of V5's lift comes from the instruction vs the patch fan-out.",
+    )
+    p.add_argument(
+        "--ar-prompt-version",
+        choices=["legacy", "context_v5"],
+        default="legacy",
+        help="AR prompt template. 'legacy' keeps the canonical Summary-only "
+             "line (V3/V4 byte-identical). 'context_v5' prepends position type, "
+             "timestep, and task instruction before the Summary line.",
+    )
+    p.add_argument(
+        "--ar-no-step-index",
+        action="store_true",
+        help="Skip the Timestep line in the AR prompt when "
+             "--ar-prompt-version=context_v5.",
+    )
+    p.add_argument(
+        "--ar-no-instruction",
+        action="store_true",
+        help="Skip the Task instruction line in the AR prompt when "
+             "--ar-prompt-version=context_v5.",
+    )
+    p.add_argument(
+        "--av-num-image-slots",
+        type=int,
+        default=8,
+        help="K for the multi-slot image_patch prompt (V5 default 8). Each "
+             "slot maps to one entry of the K-patch activation tensor. K=1 "
+             "falls back to the single-slot prompt regardless of pooling. "
+             "Only consulted on image_patch rows; last_text / anchor / "
+             "fallback rows always use one slot.",
     )
     p.add_argument("--min-bullets", type=int, default=None,
                    help="Drop labels whose description has fewer than this many '-' "
@@ -253,6 +336,16 @@ def main(argv: list[str] | None = None) -> int:
     from nla.models import ARConfig, AVConfig
     from nla.training.sft import SFTConfig, run_sft
 
+    position_mix: dict[str, float] | None = None
+    if args.position_mix_json:
+        try:
+            position_mix = json.loads(args.position_mix_json)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"--position-mix-json: invalid JSON: {e}") from e
+        if not isinstance(position_mix, dict):
+            raise SystemExit("--position-mix-json must be a JSON object (dictionary).")
+        position_mix = {str(k): float(v) for k, v in position_mix.items()}
+
     alpha = args.alpha
     if args.stats_json:
         from nla.extraction.stats import load_stats
@@ -270,6 +363,10 @@ def main(argv: list[str] | None = None) -> int:
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_rank * 2,
         dtype=args.dtype,
+        av_prompt_version=args.av_prompt_version,
+        av_include_step_index=not args.av_no_step_index,
+        av_include_instruction=not args.av_no_instruction,
+        av_num_image_slots=int(args.av_num_image_slots),
     )
     ar_cfg = ARConfig(
         base_model=args.base_model,
@@ -281,6 +378,9 @@ def main(argv: list[str] | None = None) -> int:
         dtype=args.dtype,
         clip_target_scaled=args.ar_clip_target_scaled,
         nce_temperature=args.ar_nce_temperature,
+        ar_prompt_version=args.ar_prompt_version,
+        ar_include_step_index=not args.ar_no_step_index,
+        ar_include_instruction=not args.ar_no_instruction,
     )
     cfg = SFTConfig(
         activations_root=args.activations_root,
@@ -312,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
         max_val_items=args.max_val_items,
         gradient_checkpointing=not args.no_gradient_checkpointing,
         balance_position_mix=args.balance_position_mix,
+        position_mix=position_mix,
         min_bullet_lines=args.min_bullets,
         eval_closed_loop=args.eval_closed_loop,
         closed_loop_temperatures=tuple(args.closed_loop_temps),
@@ -323,6 +424,9 @@ def main(argv: list[str] | None = None) -> int:
         ar_av_mix_log_text_every=args.ar_av_mix_log_text_every,
         image_patch_pooling=args.image_patch_pooling,
         image_patch_pooling_strided_k=args.image_patch_pooling_strided_k,
+        exclude_position_types=(
+            tuple(args.exclude_position_types) if args.exclude_position_types else None
+        ),
         action_consistency_weight=args.action_consistency_weight,
         action_consistency_every_n_steps=args.action_consistency_every_n_steps,
         action_consistency_max_microbatch=args.action_consistency_max_microbatch,

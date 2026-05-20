@@ -153,6 +153,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--steer-text-b", default=None)
     p.add_argument("--steer-text-b-file", default=None)
     p.add_argument(
+        "--ar-position-type",
+        default=None,
+        choices=["last_text", "image_patch", "anchor", "fallback"],
+        help="Position type for AR context_v5 prompt (required when the "
+             "checkpoint was trained with --ar-prompt-version=context_v5).",
+    )
+    p.add_argument(
+        "--step-index",
+        type=int,
+        default=None,
+        help="Timestep for AR context_v5 prompt (defaults to dataset step "
+             "when --ar-position-type is set).",
+    )
+    p.add_argument(
+        "--instruction",
+        default=None,
+        help="Task instruction string for AR context_v5 prompt.",
+    )
+    p.add_argument(
         "--placement",
         default="anchor",
         choices=["last_text", "image_patch", "anchor", "image_patch_all", "fixed"],
@@ -216,8 +235,14 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     ar = load_ar_from_sft(Path(args.ar_dir), device=args.device, freeze=True)
-    v_a = ar_text_to_backbone_vec(ar, ta).detach().cpu().numpy()
-    v_b = ar_text_to_backbone_vec(ar, tb).detach().cpu().numpy()
+    ar_ctx: dict = {}
+    if args.ar_position_type is not None:
+        ar_ctx["position_type"] = args.ar_position_type
+        ar_ctx["step_index"] = args.step_index if args.step_index is not None else args.step
+        if args.instruction is not None:
+            ar_ctx["instruction"] = args.instruction
+    v_a = ar_text_to_backbone_vec(ar, ta, **ar_ctx).detach().cpu().numpy()
+    v_b = ar_text_to_backbone_vec(ar, tb, **ar_ctx).detach().cpu().numpy()
     vec_rep = _vec_report(v_a, v_b)
 
     spec = SteerSpec(

@@ -597,6 +597,8 @@ class ActionConsistencyKernel:
         descriptions: Sequence[str],
         example_ids: Sequence[str],
         position_types: Sequence[str],
+        step_indices: Sequence[int | None] | None = None,
+        instructions: Sequence[str | None] | None = None,
     ) -> tuple[torch.Tensor, ActionConsistencyDiagnostics]:
         """Compute the consistency loss on a slice of the SFT batch.
 
@@ -619,7 +621,17 @@ class ActionConsistencyKernel:
             if entry is None:
                 continue
             # Live AR forward (caption -> α-scaled vector -> unscaled ĥ).
-            ar_pred_scaled = self.ar([descriptions[idx]], device=self.device)
+            ar_pred_scaled = self.ar(
+                [descriptions[idx]],
+                device=self.device,
+                position_types=[position_types[idx]],
+                step_indices=(
+                    [step_indices[idx]] if step_indices is not None else None
+                ),
+                instructions=(
+                    [instructions[idx]] if instructions is not None else None
+                ),
+            )
             steer_vec = (ar_pred_scaled.squeeze(0) * float(self.ar.cfg.alpha))
             baseline, hit = self.get_baseline(entry)
             diag.baseline_cache_hits += int(hit)

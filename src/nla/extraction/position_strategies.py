@@ -169,15 +169,50 @@ def strided_image(
     return features.index_select(0, selected).mean(dim=0)
 
 
+def strided_image_multi(
+    features: torch.Tensor,
+    image_mask: torch.Tensor,
+    attention_mask: torch.Tensor,
+    *,
+    k: int = 8,
+    **_unused,
+) -> torch.Tensor:
+    """Same index selection as ``strided_image`` but returns ``[K, H]``.
+
+    Used by V5 to give AV the strided patch grid as K separate slot
+    activations instead of a single mean-pooled vector. The trailing
+    ``.mean(dim=0)`` from ``strided_image`` is *intentionally* omitted so the
+    caller (the SFT dataset) can hand AV one slot per patch and feed the AR
+    a separately-pooled single ``[H]`` vector.
+
+    When fewer than ``k`` image-patch tokens are present (rare for LIBERO
+    frames but defensive for short prompts), the available patches are
+    returned as-is with shape ``[n_available, H]``; downstream collate code
+    must handle that variable K or filter such rows.
+    """
+    if k <= 0:
+        raise ValueError(f"strided_image_multi: k must be >= 1, got {k}")
+    idx = _image_indices(image_mask, attention_mask)
+    if idx.numel() == 0:
+        raise ValueError("strided_image_multi: no image-patch tokens in example")
+    n = int(idx.numel())
+    if n <= k:
+        return features.index_select(0, idx)
+    picks = torch.linspace(0, n - 1, steps=k).round().to(torch.int64)
+    selected = idx.index_select(0, picks)
+    return features.index_select(0, selected)
+
+
 # ---------------------------------------------------------------------------
 # Registry.
 # ---------------------------------------------------------------------------
 
 STRATEGIES: dict[str, PositionStrategy] = {
-    "random_one":      random_one,
-    "mean_pool_image": mean_pool_image,
-    "strided_image":   strided_image,
-    "center_image":    center_image,
+    "random_one":          random_one,
+    "mean_pool_image":     mean_pool_image,
+    "strided_image":       strided_image,
+    "strided_image_multi": strided_image_multi,
+    "center_image":        center_image,
 }
 
 
@@ -202,6 +237,6 @@ def apply(
     fn = STRATEGIES[name]
     if name == "random_one":
         return fn(features, image_mask, attention_mask, rng=rng)
-    if name == "strided_image":
+    if name in ("strided_image", "strided_image_multi"):
         return fn(features, image_mask, attention_mask, k=k)
     return fn(features, image_mask, attention_mask)

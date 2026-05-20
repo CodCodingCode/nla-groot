@@ -38,8 +38,56 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from nla.eval.steerability.bddl_bodies import (
+    DEFAULT_GOAL_BDDL_DIR,
+    validate_cf_target_bodies,
+)
+
 
 logger = logging.getLogger(__name__)
+
+MANIFEST_VERSION = 1
+
+
+def collect_cf_eligible_example_ids(
+    pairs_paths: Iterable[str | Path],
+) -> set[str]:
+    """Return activation ``example_id`` values that have at least one CF row.
+
+    Uses ``source_example_id`` from each JSONL row — the same key
+    :class:`SampledPositionDataset` yields as ``example_id`` and GRPO uses
+    for counterfactual lookup.
+    """
+    out: set[str] = set()
+    for raw_path in pairs_paths:
+        path = Path(raw_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"CF pairs file not found: {path}")
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                sid = obj.get("source_example_id")
+                if sid is not None:
+                    out.add(str(sid))
+    return out
+
+
+def load_grpo_cf_manifest(path: str | Path) -> set[str]:
+    """Load ``example_ids`` from a manifest written by ``build_grpo_cf_manifest``."""
+    obj = json.loads(Path(path).read_text())
+    ids = obj.get("example_ids")
+    if not isinstance(ids, list):
+        raise ValueError(
+            f"GRPO CF manifest {path} must contain an 'example_ids' list "
+            f"(got {type(ids).__name__})"
+        )
+    return {str(x) for x in ids}
 
 
 @dataclass(frozen=True)
@@ -76,12 +124,17 @@ class CounterfactualPairSampler:
         fallback_intent: str = "(no labeled intent)",
         fallback_env_name: str | None = None,
         additional_paths: Iterable[str | Path] | None = None,
+        validate_bodies_in_bddl: bool = True,
+        bddl_dir: str | Path | None = None,
     ) -> None:
         self.pairs_path = Path(pairs_path)
         self.additional_paths: list[Path] = [Path(p) for p in (additional_paths or [])]
         self.seed = int(seed)
         self.fallback_intent = fallback_intent
         self.fallback_env_name = fallback_env_name
+        self.validate_bodies_in_bddl = bool(validate_bodies_in_bddl)
+        self.bddl_dir = Path(bddl_dir) if bddl_dir is not None else DEFAULT_GOAL_BDDL_DIR
+        self._instance_cache: dict[str, frozenset[str]] = {}
         self._by_id: dict[str, list[CounterfactualPair]] = defaultdict(list)
         # Per-bucket fingerprint set used to drop exact-duplicate pair rows
         # so a pair that appears in multiple files (or under both id keys
@@ -94,22 +147,32 @@ class CounterfactualPairSampler:
         all_paths = [self.pairs_path, *self.additional_paths]
         total_rows = 0
         total_cf = 0
+        total_skipped_bodies = 0
         for path in all_paths:
-            n_rows, n_cf = self._load_one(path)
+            n_rows, n_cf, n_skip = self._load_one(path)
             total_rows += n_rows
             total_cf += n_cf
+            total_skipped_bodies += n_skip
         logger.info(
             "CounterfactualPairSampler: loaded %d pairs across %d ids "
-            "(%.1f%% counterfactual) from %d file(s)",
+            "(%.1f%% counterfactual) from %d file(s)"
+            "%s",
             total_rows, len(self._by_id),
             100.0 * total_cf / max(1, total_rows), len(all_paths),
+            (
+                f"; skipped {total_skipped_bodies} rows with bodies missing "
+                f"from target BDDL"
+                if total_skipped_bodies
+                else ""
+            ),
         )
 
-    def _load_one(self, path: Path) -> tuple[int, int]:
+    def _load_one(self, path: Path) -> tuple[int, int, int]:
         if not path.exists():
             raise FileNotFoundError(f"counterfactual pairs file not found: {path}")
         n_rows = 0
         n_cf = 0
+        n_skipped_bodies = 0
         with path.open() as f:
             for line in f:
                 line = line.strip()
@@ -120,14 +183,33 @@ class CounterfactualPairSampler:
                 except Exception:
                     continue
                 sid = obj.get("source_example_id")
-                tgt = obj.get("target_intent")
-                if sid is None or tgt is None:
+                tgt_intent = obj.get("target_intent")
+                if sid is None or tgt_intent is None:
                     continue
+                target_task = str(obj.get("target_task", ""))
+                target_env_name = str(obj.get("target_env_name", ""))
+                if (
+                    self.validate_bodies_in_bddl
+                    and target_task
+                    and target_env_name
+                ):
+                    body_issues = validate_cf_target_bodies(
+                        target_task,
+                        target_env_name,
+                        self.bddl_dir,
+                        instance_cache=self._instance_cache,
+                    )
+                    if body_issues:
+                        n_skipped_bodies += 1
+                        logger.debug(
+                            "skip CF row sid=%s: %s", sid, body_issues
+                        )
+                        continue
                 pair = CounterfactualPair(
                     source_example_id=str(sid),
-                    target_intent=str(tgt),
-                    target_task=str(obj.get("target_task", "")),
-                    target_env_name=str(obj.get("target_env_name", "")),
+                    target_intent=str(tgt_intent),
+                    target_task=target_task,
+                    target_env_name=target_env_name,
                     is_counterfactual=bool(obj.get("is_counterfactual", False)),
                     source_intent=str(obj.get("source_intent", "")),
                     source_task=str(obj.get("source_task", "")),
@@ -161,10 +243,11 @@ class CounterfactualPairSampler:
                 if pair.is_counterfactual:
                     n_cf += 1
         logger.info(
-            "  %s: %d pairs (%.1f%% counterfactual)",
+            "  %s: %d pairs (%.1f%% counterfactual)%s",
             path, n_rows, 100.0 * n_cf / max(1, n_rows),
+            f", skipped_bodies={n_skipped_bodies}" if n_skipped_bodies else "",
         )
-        return n_rows, n_cf
+        return n_rows, n_cf, n_skipped_bodies
 
     def __len__(self) -> int:
         return len(self._by_id)

@@ -61,10 +61,58 @@ def _make_tiny_base():
 # ---------------------------------------------------------------------------
 
 def test_av_template_has_unique_slot():
+    # Default ``num_slots=1`` renders the V5 context-enriched single-slot
+    # template (Position type + Timestep + Task instruction + slot).
     rendered = render_av_prompt("image_patch")
     assert rendered.count(AV_SLOT_PLACEHOLDER) == 1
     assert "image_patch" in rendered
     assert "4-5 bullet" in rendered
+    # V5 context lines always render (with sentinel placeholders when
+    # ``step_index`` / ``instruction`` are not provided).
+    assert "Timestep:" in rendered
+    assert "Task instruction:" in rendered
+
+
+def test_av_legacy_template_omits_context_lines():
+    """The legacy template stays byte-identical to V3/V4 for ablation runs."""
+    rendered = render_av_prompt("image_patch", prompt_version="legacy")
+    assert "Timestep:" not in rendered
+    assert "Task instruction:" not in rendered
+    assert rendered.count(AV_SLOT_PLACEHOLDER) == 1
+
+
+def test_av_context_prompt_inserts_step_and_instruction():
+    rendered = render_av_prompt(
+        "last_text",
+        step_index=36,
+        instruction="pick up the bowl",
+    )
+    assert "Timestep: 36" in rendered
+    assert 'Task instruction: "pick up the bowl"' in rendered
+    assert rendered.count(AV_SLOT_PLACEHOLDER) == 1
+
+
+def test_av_context_prompt_uses_sentinels_when_missing():
+    rendered = render_av_prompt("last_text", step_index=None, instruction="")
+    assert "Timestep: unknown" in rendered
+    assert '(not provided)' in rendered
+
+
+def test_av_multi_slot_prompt_has_k_distinct_placeholders():
+    rendered = render_av_prompt(
+        "image_patch",
+        step_index=12,
+        instruction="place the bowl on the plate",
+        num_slots=8,
+    )
+    # Each of the K placeholders appears exactly once.
+    for i in range(8):
+        ph = f"<<ACT_SLOT_{i}>>"
+        assert rendered.count(ph) == 1
+    # And the single-slot placeholder is absent (so the injector doesn't
+    # mistake a multi-slot prompt for a single-slot one).
+    assert AV_SLOT_PLACEHOLDER not in rendered
+    assert "Activation patches:" in rendered
 
 
 def test_ar_template_is_exact():
@@ -77,6 +125,22 @@ def test_ar_template_is_exact():
 def test_ar_template_constant_format():
     assert AR_PROMPT_TEMPLATE.format(explanation="X") == (
         "Summary of the following text: <text>X</text> <summary>"
+    )
+
+
+def test_ar_context_prompt_contains_position_type():
+    rendered = render_ar_prompt(
+        "hello world",
+        position_type="image_patch",
+        step_index=12,
+        instruction="pick up the cube",
+        prompt_version="context_v5",
+    )
+    assert "Position type: image_patch." in rendered
+    assert "Timestep: 12." in rendered
+    assert 'Task instruction: "pick up the cube"' in rendered
+    assert rendered.endswith(
+        "Summary of the following text: <text>hello world</text> <summary>"
     )
 
 
@@ -155,6 +219,81 @@ def test_av_generate_returns_text():
     )
     assert "text" in out and len(out["text"]) == 2
     assert "token_ids" in out and out["token_ids"].shape[0] == 2
+
+
+def test_av_multi_slot_injection_overwrites_k_distinct_positions():
+    """K=8 image-patch slots resolve to K distinct token ids and the injector
+    overwrites all of them with the matching projected activation slice."""
+    base, tok = _make_tiny_base()
+    cfg = AVConfig(
+        activation_dim=TINY_HIDDEN,
+        alpha=5.0,
+        dtype="float32",
+        av_prompt_version="context_v5",
+        av_num_image_slots=8,
+    )
+    av = ActivationVerbalizer(cfg, tokenizer=tok, base_model=base, apply_lora=False)
+    # The K multi-slot tokens each tokenize to one distinct id.
+    assert len(av.cfg.multi_slot_token_ids) == 8
+    assert len(set(av.cfg.multi_slot_token_ids)) == 8
+
+    acts = torch.randn(1, 8, TINY_HIDDEN)
+    input_ids, attn, _, slot_positions = av._tokenize_prompts(
+        ["image_patch"],
+        target_texts=None,
+        step_indices=[42],
+        instructions=["pick up the bowl"],
+    )
+    assert len(slot_positions[0]) == 8
+    embeds_no_inj = av._embed()(input_ids).clone()
+    embeds_with_inj = av._embed_with_injection(input_ids, attn, slot_positions, acts)
+    # Non-slot positions are unchanged; each of the K slot positions changes.
+    slot_set = set(slot_positions[0])
+    for t in range(embeds_no_inj.shape[1]):
+        if t in slot_set:
+            assert not torch.allclose(embeds_with_inj[0, t], embeds_no_inj[0, t])
+            assert abs(embeds_with_inj[0, t].norm().item() - cfg.alpha) / cfg.alpha < 1e-4
+        else:
+            assert torch.allclose(embeds_with_inj[0, t], embeds_no_inj[0, t])
+
+
+def test_av_forward_sft_handles_mixed_single_and_multi_slot_batch():
+    """A batch mixing a last_text row (1 slot) with an image_patch row (K
+    slots) trains end-to-end and produces a finite CE that flows gradients
+    back into the activation projector."""
+    base, tok = _make_tiny_base()
+    cfg = AVConfig(
+        activation_dim=TINY_HIDDEN,
+        alpha=5.0,
+        dtype="float32",
+        av_prompt_version="context_v5",
+        av_num_image_slots=8,
+    )
+    av = ActivationVerbalizer(cfg, tokenizer=tok, base_model=base, apply_lora=False)
+
+    # Mixed-K activations: row 0 is single-slot (last_text), row 1 is K-slot
+    # (image_patch). The single-slot row is padded out to K_max so collate
+    # yields a rectangular (B, K_max, H) tensor; padding slots are zero and
+    # never injected because the corresponding row's prompt has only one
+    # slot token.
+    B, K_max = 2, 8
+    acts = torch.zeros(B, K_max, TINY_HIDDEN)
+    acts[0, 0] = torch.randn(TINY_HIDDEN)              # last_text: 1 real slot
+    acts[1] = torch.randn(K_max, TINY_HIDDEN)          # image_patch: 8 real slots
+    out = av.forward_sft(
+        activations=acts,
+        position_types=["last_text", "image_patch"],
+        target_texts=[
+            "- scene: a table\n- target: blue cube",
+            "- scene: floor\n- target: mug",
+        ],
+        step_indices=[5, 36],
+        instructions=["pick up the cube", "pick up the mug"],
+    )
+    assert torch.isfinite(out.loss)
+    out.loss.backward()
+    assert av.act_proj.weight.grad is not None
+    assert av.act_proj.weight.grad.abs().sum() > 0
 
 
 def test_av_lora_wrapping_works():

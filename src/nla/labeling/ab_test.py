@@ -163,6 +163,9 @@ async def _label_one_variant_async(
     create_kwargs: dict = {"model": model, "messages": messages}
     if variant_out.response_format is not None:
         create_kwargs["response_format"] = variant_out.response_format
+    temp = variant_out.meta.get("temperature")
+    if temp is not None:
+        create_kwargs["temperature"] = float(temp)
 
     last_err = "no attempt"
     backoff = base_backoff
@@ -173,11 +176,15 @@ async def _label_one_variant_async(
                 resp = await client.chat.completions.create(**create_kwargs)
                 raw = (resp.choices[0].message.content or "").strip()
                 usage = resp.usage.model_dump() if getattr(resp, "usage", None) else {}
-                desc = (
-                    variant_out.post_process(raw)
-                    if variant_out.post_process is not None
-                    else raw
-                )
+                post_err: str | None = None
+                if variant_out.post_process is not None:
+                    try:
+                        desc = variant_out.post_process(raw)
+                    except Exception as e:
+                        post_err = f"{type(e).__name__}: {e}"
+                        desc = ""
+                else:
+                    desc = raw
                 return LabelRow(
                     example_id=inp.example_id,
                     description=desc,
@@ -185,7 +192,7 @@ async def _label_one_variant_async(
                     model=model,
                     elapsed_ms=(time.time() - t0) * 1000,
                     usage=usage,
-                    error=None,
+                    error=post_err,
                     meta={
                         "variant_id": variant_id,
                         "position_type": inp.position_type,
@@ -193,6 +200,7 @@ async def _label_one_variant_async(
                         "instruction": inp.instruction,
                         "source": inp.extra.get("source"),
                         "source_example_id": inp.extra.get("source_example_id"),
+                        "temperature": variant_out.meta.get("temperature"),
                     },
                 )
             except Exception as e:
@@ -213,6 +221,7 @@ async def _label_one_variant_async(
             "instruction": inp.instruction,
             "source": inp.extra.get("source"),
             "source_example_id": inp.extra.get("source_example_id"),
+            "temperature": variant_out.meta.get("temperature"),
         },
     )
 

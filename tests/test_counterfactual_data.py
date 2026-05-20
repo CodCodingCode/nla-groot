@@ -35,7 +35,7 @@ def test_sampler_indexes_by_source_id_and_example_id(tmp_path: Path):
             "is_counterfactual": False,
         },
     ])
-    s = CounterfactualPairSampler(p, seed=0)
+    s = CounterfactualPairSampler(p, seed=0, validate_bodies_in_bddl=False)
     # Both keys resolve to the same single candidate pair.
     assert s.has("src_alpha")
     assert s.has("lbl_alpha")
@@ -65,7 +65,7 @@ def test_sampler_dedups_when_source_id_equals_example_id(tmp_path: Path):
             "target_env_name": "env_B",
         },
     ])
-    s = CounterfactualPairSampler(p, seed=0)
+    s = CounterfactualPairSampler(p, seed=0, validate_bodies_in_bddl=False)
     # Internal bucket has exactly the two distinct pairs (not 4).
     assert len(s._by_id["same_id"]) == 2
 
@@ -84,7 +84,7 @@ def test_sampler_dedups_same_pair_across_multiple_files(tmp_path: Path):
     }
     _write_jsonl(p1, [common])
     _write_jsonl(p2, [common])
-    s = CounterfactualPairSampler(p1, seed=0, additional_paths=[p2])
+    s = CounterfactualPairSampler(p1, seed=0, additional_paths=[p2], validate_bodies_in_bddl=False)
     assert len(s._by_id["src_dup"]) == 1
 
 
@@ -109,7 +109,7 @@ def test_sampler_merges_distinct_pairs_across_files(tmp_path: Path):
             "target_env_name": "envB",
         },
     ])
-    s = CounterfactualPairSampler(p1, seed=0, additional_paths=[p2])
+    s = CounterfactualPairSampler(p1, seed=0, additional_paths=[p2], validate_bodies_in_bddl=False)
     assert len(s._by_id["src_x"]) == 2
     assert len(s._by_id["lbl_x"]) == 2
 
@@ -148,6 +148,7 @@ def test_sampler_raises_on_missing_extra_path(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         CounterfactualPairSampler(
             p, seed=0, additional_paths=[tmp_path / "nope.jsonl"],
+            validate_bodies_in_bddl=False,
         )
 
 
@@ -163,6 +164,59 @@ def test_sampler_skips_example_id_when_only_source_present(tmp_path: Path):
             "target_env_name": "envy",
         },
     ])
-    s = CounterfactualPairSampler(p, seed=0)
+    s = CounterfactualPairSampler(p, seed=0, validate_bodies_in_bddl=False)
     assert s.has("old_style")
     assert not s.has("anything_else")
+
+
+def test_sampler_skips_rows_with_missing_bodies_when_validating(tmp_path: Path):
+    p = tmp_path / "pairs.jsonl"
+    _write_jsonl(p, [
+        {
+            "source_example_id": "src_bad",
+            "target_intent": "put the wine bottle on the rack",
+            "target_task": "put_the_wine_bottle_on_the_rack",
+            "target_env_name": "libero_sim/put_the_wine_bottle_on_the_rack",
+        },
+    ])
+    bddl_dir = tmp_path / "bddl"
+    bddl_dir.mkdir()
+    (bddl_dir / "put_the_wine_bottle_on_the_rack.bddl").write_text(
+        "(:objects\n  plate_1 - plate\n)\n"
+    )
+    s = CounterfactualPairSampler(
+        p, seed=0, validate_bodies_in_bddl=True, bddl_dir=bddl_dir,
+    )
+    assert not s.has("src_bad")
+
+
+def test_collect_cf_eligible_example_ids(tmp_path: Path):
+    p1 = tmp_path / "a.jsonl"
+    p2 = tmp_path / "b.jsonl"
+    _write_jsonl(p1, [
+        {"source_example_id": "goal__traj000001_step000002"},
+        {"source_example_id": "spatial__traj000010_step000004"},
+    ])
+    _write_jsonl(p2, [
+        {"source_example_id": "spatial__traj000010_step000004"},
+        {"source_example_id": "10__traj000099_step000000"},
+    ])
+    from nla.training.counterfactual_data import (
+        collect_cf_eligible_example_ids,
+        load_grpo_cf_manifest,
+        MANIFEST_VERSION,
+    )
+
+    ids = collect_cf_eligible_example_ids([p1, p2])
+    assert ids == {
+        "goal__traj000001_step000002",
+        "spatial__traj000010_step000004",
+        "10__traj000099_step000000",
+    }
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({
+        "version": MANIFEST_VERSION,
+        "example_ids": sorted(ids),
+    }))
+    assert load_grpo_cf_manifest(manifest_path) == ids

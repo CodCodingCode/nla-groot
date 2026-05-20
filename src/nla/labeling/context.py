@@ -39,6 +39,7 @@ from nla.extraction.sampler import (
 from nla.extraction.storage import ActivationShardReader, ExampleRecord
 from nla.labeling.frames import EpisodeFrameLoader, save_jpeg
 from nla.labeling.prompts import PositionLabelInput, PositionType
+from nla.labeling.prompts_v5 import StepLabelInput
 
 logger = logging.getLogger(__name__)
 
@@ -437,3 +438,90 @@ def build_position_inputs(
             extra=extra,
             suite=suite,
         )
+
+
+def build_step_inputs(
+    reader: ActivationShardReader,
+    tokenizer,
+    *,
+    dataset_root: str | Path,
+    frame_cache_dir: str | Path,
+    video_keys: list[str] | None = None,
+    state_name: str | None = None,
+    pool: FrameLoaderPool | None = None,
+    suite: str | None = None,
+    require_input_ids: bool = True,
+    record_filter=None,
+    max_examples: int | None = None,
+) -> Iterator[StepLabelInput]:
+    """One :class:`StepLabelInput` per activation example (V5 nested JSON labeling)."""
+    dataset_root = Path(dataset_root)
+    frame_cache_dir = Path(frame_cache_dir)
+    pool = pool or FrameLoaderPool(max_open=4)
+
+    from nla.labeling.frames import DatasetInfo
+
+    di = DatasetInfo.from_root(dataset_root)
+    if video_keys is None:
+        video_keys = di.video_keys
+
+    n = 0
+    for item in reader.iter_examples(record_filter=record_filter):
+        if max_examples is not None and n >= max_examples:
+            break
+        rec: ExampleRecord = item["_record"]
+        if rec.episode_index is None or rec.step_index is None:
+            logger.warning(
+                "Example %s missing episode/step index; cannot fetch frames.",
+                rec.example_id,
+            )
+            continue
+        img = item["image_mask"]
+        ids = item.get("input_ids")
+        if require_input_ids and ids is None:
+            logger.warning(
+                "Example %s has no input_ids; skipping.", rec.example_id,
+            )
+            continue
+        text_ctx = (
+            decode_text_context(ids, img, tokenizer)
+            if ids is not None
+            else "(input_ids unavailable)"
+        )
+
+        loader = pool.get(dataset_root, rec.episode_index)
+        image_paths: list[str] = []
+        for vk in video_keys:
+            try:
+                frame = loader.frame(vk, rec.step_index)
+            except (FileNotFoundError, IndexError) as e:
+                logger.warning(
+                    "Skipping %s: could not load %s frame %d (%s)",
+                    rec.example_id, vk, rec.step_index, e,
+                )
+                image_paths = []
+                break
+            out = frame_cache_dir / f"{rec.example_id}__{vk}.jpg"
+            save_jpeg(frame, out)
+            image_paths.append(str(out))
+        if not image_paths:
+            continue
+
+        instruction = rec.task_text or ""
+        if not instruction and rec.episode_index is not None:
+            instruction = di.episode_to_task.get(int(rec.episode_index), "")
+
+        extra: dict = {"source_example_id": rec.example_id}
+        if suite is not None:
+            extra["suite"] = suite
+        yield StepLabelInput(
+            example_id=rec.example_id,
+            instruction=instruction,
+            image_paths=image_paths,
+            step_index=rec.step_index,
+            decoded_text_context=text_ctx,
+            suite=suite,
+            episode_index=rec.episode_index,
+            extra=extra,
+        )
+        n += 1

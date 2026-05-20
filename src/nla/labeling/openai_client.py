@@ -38,6 +38,7 @@ from nla.labeling.prompts import (
     build_step_prompt,
     build_strict_position_prompt,
 )
+from nla.labeling.prompts_v5 import StepLabelInput, V5_NESTED_JSON_SCHEMA, build_v5_step_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +76,18 @@ def _select_position_builder(mode: str | None = None) -> Callable:
     if mode in ("v4", "v4_position", "v4-position"):
         from nla.labeling.prompts import build_v4_position_prompt
         return build_v4_position_prompt
+    if mode in ("v5", "v5_step", "v5-step"):
+        return _v5_step_builder_stub
     if mode in ("strict", "v3_strict"):
         return build_strict_position_prompt
     return build_position_prompt
+
+
+def _v5_step_builder_stub(inp: PositionLabelInput) -> tuple[str, str]:
+    """Dispatch V5 step labeling from a position-shaped input (pipeline stub)."""
+    from nla.labeling.prompts_v5 import build_v5_step_prompt, position_input_to_step
+
+    return build_v5_step_prompt(position_input_to_step(inp))
 
 
 def _call_position_builder(
@@ -143,6 +153,18 @@ class LabelResult:
     meta: dict = field(default_factory=dict)
 
 
+def _is_v5_label_mode() -> bool:
+    mode = os.environ.get("NLA_POSITION_PROMPT_MODE", "v3").lower()
+    return mode in ("v5", "v5_step", "v5-step")
+
+
+def _completion_kwargs(model: str, messages: list[dict]) -> dict:
+    kwargs: dict = {"model": model, "messages": messages}
+    if _is_v5_label_mode():
+        kwargs["response_format"] = V5_NESTED_JSON_SCHEMA
+    return kwargs
+
+
 def _img_data_url(path: str) -> str:
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("ascii")
@@ -157,7 +179,18 @@ def _build_messages(inp) -> tuple[list[dict], str, dict]:
 
     Returns ``(messages, kind, meta_for_logging)``.
     """
-    if isinstance(inp, PositionLabelInput):
+    if isinstance(inp, StepLabelInput):
+        sys_p, user_p = build_v5_step_prompt(inp)
+        image_paths = inp.image_paths
+        kind = "step"
+        meta = {
+            "episode_index": inp.episode_index,
+            "step_index": inp.step_index,
+            "instruction": inp.instruction,
+            "source_example_id": inp.example_id,
+            "label_schema": "v5",
+        }
+    elif isinstance(inp, PositionLabelInput):
         builder = _select_position_builder()
         sys_p, user_p = _call_position_builder(builder, inp)
         image_paths = inp.image_paths
@@ -215,7 +248,7 @@ def label_one(
     messages, kind, meta = _build_messages(inp)
     t0 = time.time()
     try:
-        resp = client.chat.completions.create(model=model, messages=messages)
+        resp = client.chat.completions.create(**_completion_kwargs(model, messages))
         text = (resp.choices[0].message.content or "").strip()
         usage = resp.usage.model_dump() if getattr(resp, "usage", None) else {}
         return LabelResult(
@@ -245,7 +278,7 @@ async def _label_one_async(client, inp, model: str, sem: asyncio.Semaphore,
             t0 = time.time()
             try:
                 resp = await client.chat.completions.create(
-                    model=model, messages=messages,
+                    **_completion_kwargs(model, messages),
                 )
                 text = (resp.choices[0].message.content or "").strip()
                 usage = resp.usage.model_dump() if getattr(resp, "usage", None) else {}
@@ -326,17 +359,19 @@ async def label_many_async(
                     continue
                 if obj.get("description") and not obj.get("error"):
                     done_ids.add(obj["example_id"])
-                    pk = _position_resume_key_from_row(obj)
-                    if pk is not None:
-                        done_pos_keys.add(pk)
+                    if obj.get("kind") != "step":
+                        pk = _position_resume_key_from_row(obj)
+                        if pk is not None:
+                            done_pos_keys.add(pk)
 
     todo = []
     for i in inputs:
         if i.example_id in done_ids:
             continue
-        pk = _position_resume_key_from_input(i)
-        if pk is not None and pk in done_pos_keys:
-            continue
+        if not isinstance(i, StepLabelInput):
+            pk = _position_resume_key_from_input(i)
+            if pk is not None and pk in done_pos_keys:
+                continue
         todo.append(i)
     logger.info(
         "Labeling: %d new, %d example_ids done, %d position keys done -> %s",
