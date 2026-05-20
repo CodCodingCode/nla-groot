@@ -82,5 +82,5 @@ python scripts/eval/steerability_eval.py \
 # -------------------------------------------------------------------
 bash scripts/eval/make_v1_vs_v3_grid.sh
 python scripts/eval/build_v3_scorecard.py \
-  --sft-dir data/sft/libero_4suite_v3 \
+  --ckpt-dir data/sft/libero_4suite_v3 \
   --sim-ab-json data/sft/libero_4suite_v3/sim_ab.json

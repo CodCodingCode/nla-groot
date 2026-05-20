@@ -145,6 +145,21 @@ INFORMATIONAL = (
 # Source readers
 # ---------------------------------------------------------------------------
 
+_POSITION_TYPES = ("image_patch", "last_text", "anchor", "fallback")
+
+
+def _position_type_from_example_id(example_id: str) -> str | None:
+    """Parse ``position_type`` from judge / label example ids.
+
+    Examples: ``goal__traj...@p72_image_patch``, ``...@p042_last_text``.
+    """
+    tail = example_id.rsplit("@", 1)[-1] if "@" in example_id else example_id
+    for pt in _POSITION_TYPES:
+        if tail.endswith(f"_{pt}"):
+            return pt
+    return None
+
+
 def _read_retrieval(path: Path) -> dict[str, float | None]:
     """Return {retrieval_margin, retrieval_at_1, retrieval_at_5} from
     closed_loop_retrieval.py output, or all-Nones if file is missing."""
@@ -156,6 +171,113 @@ def _read_retrieval(path: Path) -> dict[str, float | None]:
         "retrieval_at_1": obj.get("retrieval_at_1"),
         "retrieval_at_5": obj.get("retrieval_at_5"),
     }
+
+
+def _read_retrieval_by_position(path: Path) -> dict[str, dict[str, float | int | None]]:
+    """Return per-``position_type`` slice of ``closed_loop_retrieval.py`` output."""
+    out: dict[str, dict[str, float | int | None]] = {}
+    if not path.exists():
+        return out
+    obj = json.loads(path.read_text())
+    by_pos = obj.get("by_position") or {}
+    for pt, block in by_pos.items():
+        if not isinstance(block, dict):
+            continue
+        out[str(pt)] = {
+            "n": block.get("n"),
+            "retrieval_margin": block.get("margin"),
+            "retrieval_matched_cos_mean": block.get("matched_cos_mean"),
+            "retrieval_at_1": block.get("retrieval_at_1"),
+        }
+    return out
+
+
+def _read_judge_by_position(
+    path: Path,
+    *,
+    variant: str = "av_pred",
+) -> dict[str, dict[str, float | int | None]]:
+    """Aggregate judge pass rates per ``position_type`` for one variant."""
+    out: dict[str, dict[str, float | int | None]] = {}
+    if not path.exists():
+        return out
+    buckets: dict[str, list[dict]] = {}
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("variant_id") != variant or row.get("error"):
+                continue
+            pt = row.get("position_type") or _position_type_from_example_id(
+                str(row.get("example_id") or "")
+            )
+            if not pt:
+                continue
+            buckets.setdefault(str(pt), []).append(row)
+    for pt, rows in buckets.items():
+        n = len(rows)
+        if n == 0:
+            continue
+        b_pass = sum(
+            1 for r in rows
+            if (r.get("grounding") or {}).get("verdict") == "specific"
+        )
+        d_rows = [r for r in rows if r.get("template_distinguishable")]
+        n_d = len(d_rows)
+        d_pass = sum(
+            1 for r in d_rows
+            if (r.get("template_distinguishable") or {}).get("verdict") == "specific"
+        )
+        out[pt] = {
+            "n": n,
+            "judge_grounding_specific_pct": b_pass / n,
+            "judge_anti_template_specific_pct": (d_pass / n_d) if n_d else None,
+        }
+    return out
+
+
+def _read_stratified_training_metrics(path: Path) -> dict[str, float | None]:
+    """Pull per-position cosine keys from the last val row of metrics.jsonl."""
+    keys = (
+        "closed_greedy/cosine/position=image_patch",
+        "closed_greedy/cosine/position=last_text",
+        "cosine/position=image_patch",
+        "cosine/position=last_text",
+        "cosine/position=anchor",
+    )
+    out: dict[str, float | None] = {k.replace("/", "_").replace("=", "_"): None for k in keys}
+    if not path.exists():
+        return out
+    last_val: dict | None = None
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("phase") == "val":
+                last_val = row
+    if last_val is None:
+        return out
+    mapping = {
+        "closed_greedy_cosine_position_image_patch": "closed_greedy/cosine/position=image_patch",
+        "closed_greedy_cosine_position_last_text": "closed_greedy/cosine/position=last_text",
+        "tf_cosine_position_image_patch": "cosine/position=image_patch",
+        "tf_cosine_position_last_text": "cosine/position=last_text",
+        "tf_cosine_position_anchor": "cosine/position=anchor",
+    }
+    for out_key, src_key in mapping.items():
+        v = last_val.get(src_key)
+        out[out_key] = float(v) if isinstance(v, (int, float)) else None
+    return out
 
 
 def _read_judge(path: Path, variant: str = "av_pred") -> dict[str, float | None]:
@@ -380,6 +502,7 @@ class Scorecard:
     metrics: list[dict] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)
     config: dict = field(default_factory=dict)
+    by_position_type: dict[str, dict] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +552,25 @@ def main(argv: list[str] | None = None) -> int:
     values.update(_read_judge(judge_p))
     values.update(_read_training_metrics(metrics_p))
     values.update(_read_sim_ab(sim_p))
+    stratified_metrics = _read_stratified_training_metrics(metrics_p)
+    retrieval_by_pos = _read_retrieval_by_position(retrieval_p)
+    judge_av_by_pos = _read_judge_by_position(judge_p, variant="av_pred")
+    judge_gold_by_pos = _read_judge_by_position(judge_p, variant="gold")
+
+    by_position_type: dict[str, dict] = {}
+    for pt in _POSITION_TYPES:
+        block: dict[str, Any] = {}
+        if pt in retrieval_by_pos:
+            block.update(retrieval_by_pos[pt])
+        for prefix, src in (("av", judge_av_by_pos), ("gold", judge_gold_by_pos)):
+            if pt in src:
+                for k, v in src[pt].items():
+                    block[f"{prefix}_{k}"] = v
+        for k, v in stratified_metrics.items():
+            if k.endswith(f"position_{pt}"):
+                block[k] = v
+        if block:
+            by_position_type[pt] = block
 
     rows = _build_metric_rows(values)
     overall = _overall_verdict(rows)
@@ -451,6 +593,7 @@ def main(argv: list[str] | None = None) -> int:
             "sim_n_episodes_per_arm": values.get("sim_n_episodes", 0),
             "sim_per_suite": values.get("sim_per_suite", {}),
         },
+        by_position_type=by_position_type,
     )
 
     out_p.parent.mkdir(parents=True, exist_ok=True)
@@ -488,6 +631,33 @@ def main(argv: list[str] | None = None) -> int:
                 else "    N/A"
             )
             print(f"    {sn:<10s}  {_fmt(b)}  {_fmt(c)}  {_fmt(w)}  {gap}")
+        print()
+    if by_position_type:
+        print("  Per-position-type breakdown (aggregate metrics can hide this):")
+        print(
+            f"    {'position':<12s}  {'n_ret':>5s}  {'cl_cos':>6s}  "
+            f"{'margin':>7s}  {'AV_B%':>6s}  {'gold_B%':>7s}"
+        )
+        for pt in _POSITION_TYPES:
+            if pt not in by_position_type:
+                continue
+            b = by_position_type[pt]
+            n_ret = b.get("n")
+            cl = b.get("closed_greedy_cosine_position_image_patch")
+            if pt == "last_text":
+                cl = b.get("closed_greedy_cosine_position_last_text")
+            elif pt == "anchor":
+                cl = b.get("tf_cosine_position_anchor")
+            margin = b.get("retrieval_margin")
+            av_b = b.get("av_judge_grounding_specific_pct")
+            gold_b = b.get("gold_judge_grounding_specific_pct")
+            fmt = lambda v: f"{v:6.3f}" if isinstance(v, (int, float)) else "   n/a"
+            pct = lambda v: f"{100*v:5.1f}%" if isinstance(v, (int, float)) else "  n/a"
+            print(
+                f"    {pt:<12s}  {str(n_ret or 'n/a'):>5s}  {fmt(cl)}  "
+                f"{fmt(margin) if isinstance(margin, (int, float)) else '    n/a':>7s}  "
+                f"{pct(av_b):>6s}  {pct(gold_b):>7s}"
+            )
         print()
     print(f"  -> {out_p}")
     print()

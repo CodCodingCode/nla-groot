@@ -59,10 +59,12 @@ We release \code{nla-groot} and a three-axis evaluation protocol:
 (2)~vision-grounded caption judging,
 (3)~closed-loop steer A/B (matched vs.\ mismatched language).
 On our main checkpoint, reconstruction metrics pass while grounding,
-anti-template specificity, and semantic steering fail.
+anti-template specificity, and semantic steering fail; aggregate scores
+\textbf{hide} collapse on \code{image\_patch} tokens, where retrieval
+margin is near zero.
 \textbf{Claim:} NL autoencoders on VLA activations are misleading without
-vision-grounded and behavioral checks---use this protocol before trusting
-captions or steering policies with language.
+vision-grounded and behavioral checks \emph{stratified by token role}---use
+this protocol before trusting captions or steering policies with language.
 \end{abstract}
 
 \section{Introduction}
@@ -112,6 +114,11 @@ so NLA ports on policies are not validated by reconstruction alone.
 A forward hook on GR00T \code{backbone\_features} (Qwen3-VL, layer~16,
 pre-action-head LayerNorm) records \(\hvec_i\) per token at three position
 types: \code{last\_text}, \code{image\_patch}, \code{anchor}.
+Types are inferred from the backbone's \code{image\_mask}
+(\code{input\_ids == image\_token\_id}) and \code{attention\_mask}:
+\code{image\_patch} = valid vision placeholders;
+\code{last\_text} = last valid non-image token;
+\code{anchor} = last valid token overall (often the sequence tail).
 Corpus: LIBERO Goal/Spatial/Object/10 LeRobot trajectories;
 \(\alpha \approx \) P75\(\|\hvec\|_2\) for injection scaling.
 
@@ -138,6 +145,9 @@ required metrics (pre-registered in \code{build\_v3\_scorecard.py}).
 \paragraph{Axis 1: Reconstruction \& retrieval.}
 Closed-loop cosine \(\cos(\hvec,\AR(\AV(\hvec)))\) without teacher forcing;
 retrieval margin (matched vs.\ cross-pair \(\AR(\AV(\hvec))\)).
+Report both \textbf{aggregate} and \textbf{per-\code{position\_type}} slices
+(\code{image\_patch} vs.\ \code{last\_text} vs.\ \code{anchor}): the pooled
+margin can pass while \code{image\_patch} is near chance.
 High scores mean \(\AV\) and \(\AR\) form a consistent codec---not that
 language matches pixels.
 
@@ -194,6 +204,44 @@ Table~\ref{tab:judge}: on 4-suite holdout, gold grounding is 75\% but
 Appropriateness stays 100\% for \(\AV\): prose \emph{looks} valid while
 being vision-wrong (\emph{shorthand collapse}).
 
+\paragraph{Aggregate metrics hide token-role failure (Axes 1--2).}
+Table~\ref{tab:stratified}: the \textbf{pooled} retrieval margin passes
+(0.124), but the \code{image\_patch} stratum is near chance
+(margin~0.003, \(n{=}85\)): \(\AV\)--\(\AR\) is not discriminative on
+vision tokens---the regime where NLAs are meant to add value over text-only
+readouts.
+\code{last\_text} rows look healthier (closed-loop cosine 0.44 vs.\ 0.34;
+judge grounding 67\% vs.\ 0\% on the small per-type judge subsample),
+consistent with instruction paraphrase rather than pixel grounding.
+\code{anchor} retrieval margin is high but \(n{=}8\) (saturated @5);
+do not over-interpret.
+\textbf{Lesson:} headline scorecards on mixed position types can certify a
+codec that works on language slots while vision slots collapse.
+
+\begin{table}[t]
+  \centering
+  \caption{Stratified V3 metrics (\code{libero\_4suite\_v3}). Closed-loop
+  cosine = \(\cos(\hvec,\AR(\AV(\hvec)))\) greedy; margin from
+  \code{closed\_loop\_retrieval.py}. Judge B\% = grounding-specific pass
+  rate on a 32-row held-out subsample (8 per type targeted; see text).}
+  \label{tab:stratified}
+  \small
+  \begin{tabular}{@{}lrrrr@{}}
+    \toprule
+    Position & \(n\) & CL cos & Margin & \(\AV\) B\% \\
+    \midrule
+    \code{image\_patch} & 85 & 0.338 & 0.003 & 0 \\
+    \code{last\_text}   & 85 & 0.437 & 0.046 & 67 \\
+    \code{anchor}       &  8 & 0.367$^\dagger$ & 0.139 & 75 \\
+    \midrule
+    pooled              & 178 & 0.388 & 0.124 & 42 \\
+    \bottomrule
+  \end{tabular}
+  \vspace{0.25em}
+  {\footnotesize $^\dagger$Teacher-forced AR cosine on gold (no closed-loop
+  \code{anchor} slice in val log).}
+\end{table}
+
 \begin{table}[t]
   \centering
   \caption{Multimodal judge pass rates (24-row held-out sample).}
@@ -221,8 +269,9 @@ toward the prompted object.
 
 \paragraph{Negative result in one line.}
 Reconstruction and retrieval can certify a low-loss text--vector codec
-while (i)~captions fail vision grounding and (ii)~language steers do not
-separate correct from wrong instructions.
+while (i)~captions fail vision grounding (especially on \code{image\_patch}),
+and (ii)~language steers do not separate correct from wrong instructions.
+Aggregate passes are insufficient---stratify by token role.
 
 \section{Use this before you trust or steer}
 \label{sec:conclusion}
@@ -230,7 +279,8 @@ separate correct from wrong instructions.
 \paragraph{For auditing.}
 Do not treat \(\AV(\hvec)\) as ground truth without Axis~2 on held-out
 frames and, when possible, counterfactual \(\hvec\) edits (Axis~4).
-Report gold-vs-\(\AV\) gaps, not \(\AV\) alone.
+Report gold-vs-\(\AV\) gaps \emph{per \code{position\_type}}, not pooled
+\(\AV\) alone; \code{image\_patch} is the vision-grounding slice.
 
 \paragraph{For steering.}
 Do not deploy \(\AR(y)\) backbone steers because reconstruction is high.
@@ -246,7 +296,8 @@ quality-weighted SFT, mined hard negatives, judge-blended GRPO.
 \paragraph{Reproducibility.}
 Anonymous code: \url{https://anonymous.4open.science/} (placeholder---replace
 before submit).
-Scorecard: \code{scripts/eval/build\_v3\_scorecard.py};
+Scorecard: \code{scripts/eval/build\_v3\_scorecard.py} (includes
+\code{by\_position\_type} breakdown);
 commands: \code{paper/repro/canonical\_commands.sh}.
 
 \section*{Broader impact}

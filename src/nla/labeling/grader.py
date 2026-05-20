@@ -133,6 +133,7 @@ class GradeResult:
     # Optional 3rd axis added for the V3 anti-template-collapse eval. Older
     # grade JSONL rows pre-V3 lack this field and load with ``None``.
     template_distinguishable: AxisGrade | None = None
+    position_type: str | None = None
 
     @property
     def passes_b_llm(self) -> bool:
@@ -308,6 +309,7 @@ async def _grade_one_async(
                     template_distinguishable=d,
                     elapsed_ms=(time.time() - t0) * 1000, usage=usage,
                     error=parse_err, raw_response=text,
+                    position_type=inp.position_type,
                 )
             except Exception as e:
                 last_err = f"{type(e).__name__}: {e}"
@@ -322,6 +324,7 @@ async def _grade_one_async(
         grader="gpt-5.1", model=model,
         grounding=None, appropriateness=None,
         elapsed_ms=0.0, usage={}, error=last_err, raw_response=None,
+        position_type=inp.position_type,
     )
 
 
@@ -401,7 +404,7 @@ async def grade_many_async(
 
 
 def _grade_to_row(res: GradeResult) -> dict:
-    return {
+    row = {
         "example_id": res.example_id,
         "variant_id": res.variant_id,
         "grader": res.grader,
@@ -418,6 +421,9 @@ def _grade_to_row(res: GradeResult) -> dict:
         "error": res.error,
         "raw_response": res.raw_response,
     }
+    if res.position_type is not None:
+        row["position_type"] = res.position_type
+    return row
 
 
 def grade_to_row(res: GradeResult) -> dict:
