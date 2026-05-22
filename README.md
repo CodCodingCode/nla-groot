@@ -1,47 +1,65 @@
 # nla-groot
 
-Implementation of **Natural Language Autoencoder (NLA)**–style tooling for **robotics VLA activations** (GR00T backbone): an **activation verbalizer (AV)** maps a hidden state `h` to text, and an **activation reconstructor (AR)** maps text back to `ĥ`. The stack supports **joint supervised fine-tuning (SFT)**, optional **GRPO** on AV with reconstruction reward, **extraction/labeling** pipelines, and **eval scripts** for reconstruction metrics plus LLM- and counterfactual-based interpretability checks.
+**When reconstruction passes: natural-language autoencoders on VLA activations can still fail grounding and semantic steering.**
 
-Primary research reference: Fraser-Taliente et al., *Natural Language Autoencoders Produce Unsupervised Explanations of LLM Activations*, Transformer Circuits, 2026. This repo is **operational code for GR00T/droid-style activations** (default base LM **Qwen3-4B-Instruct**), not a paper drop-in for Cosmos-scale LMs.
+[![Technical writeup](https://img.shields.io/badge/site-technical_writeup-0366d6?style=flat-square)](https://codcodingcode.github.io/nla-groot/)
+[![CoRL 2026 draft](https://img.shields.io/badge/paper-CoRL_2026_draft-555?style=flat-square)](paper/main_corl.pdf)
 
----
+Open implementation of **Natural Language Autoencoder (NLA)** tooling for **GR00T** vision–language–action (VLA) activations: an **activation verbalizer (AV)** maps hidden state `h` to text; an **activation reconstructor (AR)** maps text back to `ĥ`. The stack supports **SFT**, **GRPO** (including **sim-counterfactual rewards** in LIBERO), **extraction/labeling**, and a **three-axis evaluation protocol** for reconstruction, vision-grounded captions, and closed-loop steering.
 
-## V2 project reality (read before a long GPU run)
-
-The **`droid_100ep_v2_nce`** SFT run showed **strong FVE / cosine** (teacher-forced and even **closed-loop**) while **AV captions failed scene grounding** (~0% axis **B** pass on `llm_judge_av_captions.py` vs ~70–80% for gold labels)—**shorthand template collapse**. **Do not treat reconstruction alone as success.**
-
-| Doc | Use |
-|-----|-----|
-| **`docs/sft_plan/07_sft_recipe_dataset_agnostic.md`** | Operational **SFT recipe** (hard negs, AR–AV mix, closed-loop) |
-| **`docs/evals/v2_lessons_learned.md`** | **V2 DROID** postmortem depth + **GRPO** A/B cookbook |
-| **`docs/sft_plan/SFT_V5_NEXT.md`** | **V5** next steps (supersedes removed `v4_repair/V5_TODO.md`) |
-| **`docs/sft_plan/00_PLAN.md`** | End-to-end SFT preconditions + hyperparameter checklist |
-| **`docs/NLA_AGENT_KNOWLEDGE.md`** | Agent-oriented mechanics (α, SFT/GRPO, metrics matrix) |
-| **`docs/evals/v2_lessons_learned.md`** | Deeper post-mortem + **GRPO A/B** cookbook |
-| **`scripts/eval/eval_protocol.md`** | Counterfactual **interp panel** pipeline (separate from caption-vs-camera judge) |
+Inspired by Fraser-Taliente et al., [*Natural Language Autoencoders Produce Unsupervised Explanations of LLM Activations*](https://transformer-circuits.pub/2026/nla/index.html) (Transformer Circuits, 2026). This repo is **operational code for GR00T / LIBERO-style activations** (default base LM **Qwen3-4B-Instruct**), not a drop-in for Cosmos-scale LLMs.
 
 ---
 
-## Repository layout
+## Start here
 
-| Path | Role |
-|------|------|
-| `src/nla/` | Library: `models` (AV/AR), `training` (SFT, GRPO), `extraction`, `labeling`, `layer_spec`, `steering`, … |
-| `scripts/training/` | `run_sft.py`, `run_grpo.py` |
-| `scripts/eval/` | Judges, `dump_av_samples.py`, `overlay_av_video.py`, interp panel (`build_eval_cases.py`, …) |
-| `docs/` | SFT plan, eval notes, **`NLA_AGENT_KNOWLEDGE.md`** |
-| `tests/` | Pytest (e.g. tiny-model SFT smoke) |
-| `data/`, `runs/`, `logs/`, `checkpoints/` | **Gitignored** artifacts; use your NFS or local paths |
-| `paper/` | LaTeX workshop short paper (`main.tex`) and repro commands |
-| `website/` | Static technical writeup site (Vite + React); see `website/README.md` |
-
-Run Python with **`PYTHONPATH=src`** (or install the package in editable mode if you add packaging later).
+| Resource | What it is |
+|----------|------------|
+| **[Interactive writeup](https://codcodingcode.github.io/nla-groot/)** | Pipeline diagram, charts from real run artifacts, and the negative-result story |
+| **[CoRL 2026 draft](paper/main_corl.pdf)** | Full submission draft (8 pages + refs) |
+| **[Workshop short paper](paper/main.pdf)** | Earlier 4-page writeup |
+| **[Eval protocol](scripts/eval/eval_protocol.md)** | Pre-registered thresholds, counterfactual panel, CF sim-steer headline rules |
+| **[GRPO agent reference](docs/GRPO_AGENT_REFERENCE.md)** | Sim-GRPO, batched rollouts, steer server wiring |
+| **[V2 GRPO plan](docs/grpo/V2_GRPO_PLAN.md)** | Counterfactual sim rewards + held-out scorecard track |
 
 ---
 
-## Quick start (SFT)
+## The claim (in one paragraph)
 
-Example from `scripts/training/run_sft.py`:
+NLAs give a readable interface to VLA internals and a causal handle for steering—but **reconstruction alone is not evidence** that captions describe what the robot sees or that language steers behavior semantically. On our main LIBERO checkpoint, offline codec metrics pass while **vision grounding**, **anti-template specificity**, and **matched-vs-wrong closed-loop steering** fail. Aggregate scores **hide collapse on `image_patch` tokens**, where retrieval margin is near chance. Use the three-axis protocol (and token-role stratification) before trusting AV captions or deploying AR steers.
+
+---
+
+## Three-axis evaluation
+
+| Axis | Question | Key scripts |
+|------|----------|-------------|
+| **1. Codec** | Does `AR(AV(h)) ≈ h`? Retrieval margin? | `build_v3_scorecard.py`, closed-loop eval in SFT |
+| **2. Grounding** | Do captions match **cached frames**? | `llm_judge_av_captions.py` |
+| **3. Steerability** | Does matched text beat mismatched text in sim? | `steerability_eval.py`, `compare_cf_steer_checkpoints.py` |
+
+Do **not** conflate Axis 1 FVE/cosine with “explains what the robot sees.” See **`docs/evals/v2_lessons_learned.md`** for the DROID V2 postmortem and GRPO A/B cookbook.
+
+---
+
+## Pipeline (high level)
+
+```
+GR00T forward hook (layer 16 h)
+    → multimodal teacher labels
+    → SFT: AV(h→text) + AR(text→ĥ)
+    → optional GRPO (recon + sim CF rewards)
+    → live LIBERO steering via AR(y) backbone injection
+    → three-axis scorecard
+```
+
+**Steering server:** `scripts/eval/launch_steer_server.sh` → `NlaPolicyServer` with `get_action_batch` for batched sim-GRPO rollouts.
+
+---
+
+## Quick start
+
+### SFT
 
 ```bash
 PYTHONPATH=src python scripts/training/run_sft.py \
@@ -52,26 +70,57 @@ PYTHONPATH=src python scripts/training/run_sft.py \
   --batch-size 4 --total-steps 1000 --eval-every 250
 ```
 
-For production-scale runs, follow **`docs/sft_plan/00_PLAN.md`** and enable **closed-loop validation** (`--eval-closed-loop`, `--closed-loop-temps`, …) plus post-hoc **`scripts/eval/llm_judge_av_captions.py`** on serious checkpoints. See **`docs/sft_plan/07_sft_recipe_dataset_agnostic.md`** and **`docs/evals/v2_lessons_learned.md`** for flags and failure modes.
+Production runs: **`docs/sft_plan/00_PLAN.md`**, **`docs/sft_plan/07_sft_recipe_dataset_agnostic.md`**, closed-loop validation (`--eval-closed-loop`), and post-hoc **`scripts/eval/llm_judge_av_captions.py`**.
 
-**GRPO** (after SFT): `scripts/training/run_grpo.py` with activations only (no `labels.jsonl`).
+### GRPO (after SFT)
+
+```bash
+PYTHONPATH=src python scripts/training/run_grpo.py \
+  --sft-dir data/sft/<run> \
+  --activations-root data/activations/<run> \
+  --output-dir data/grpo/<run>_grpo \
+  --sim-reward-weight 0.5 \
+  --sim-counterfactual-pairs-path data/grpo/cf_pairs.jsonl \
+  --sim-policy-host localhost --sim-policy-port 5556 \
+  --sim-batch-size 4 --sim-n-workers 18
+```
+
+Requires a running steer server (`launch_steer_server.sh`) and LIBERO rollout venv. See **`docs/GRPO_AGENT_REFERENCE.md`**.
+
+### Website (local)
+
+```bash
+python scripts/website/export_site_data.py   # refresh snapshot from data/ artifacts
+cd website && npm install && npm run build
+npm run preview
+```
+
+Deploy: push to `main` — GitHub Actions builds and publishes to **GitHub Pages** (see `website/README.md`).
 
 ---
 
-## Evaluation (two tracks)
+## Repository layout
 
-1. **Scene grounding** — multimodal LLM judge on **cached frames**: `scripts/eval/llm_judge_av_captions.py` (axes **B** grounding, **C** appropriateness).
-2. **Causal / counterfactual interpretability** — `build_eval_cases.py` → `run_interp_panel.py` → `run_llm_judge.py` → `score_panel.py`; protocol in **`scripts/eval/eval_protocol.md`**.
+| Path | Role |
+|------|------|
+| `src/nla/` | Library: `models`, `training`, `extraction`, `labeling`, `steering`, `eval` |
+| `scripts/training/` | `run_sft.py`, `run_grpo.py`, launch/orchestration scripts |
+| `scripts/eval/` | Judges, steerability, CF compare/scorecard, steer server |
+| `docs/` | SFT plan, GRPO reference, eval notes, **`NLA_AGENT_KNOWLEDGE.md`** |
+| `tests/` | Pytest (tiny-model smoke + sim-GRPO unit tests) |
+| `paper/` | Workshop + CoRL LaTeX, PDFs, repro commands |
+| `website/` | Static technical writeup (Vite + React) |
+| `data/`, `runs/`, `logs/`, `checkpoints/` | **Gitignored** — use your NFS or local paths |
 
-Do not conflate FVE with “explains what the robot sees.”
+Run Python with **`PYTHONPATH=src`**.
 
 ---
 
 ## Dependencies & secrets
 
-- **PyTorch**, **Transformers** (Qwen3), and project imports under `nla.*`.
-- **Labeling / judges:** `OPENAI_API_KEY` (and model env vars as used in labeling scripts—see `NLA_AGENT_KNOWLEDGE.md`).
-- Use a local **`.venv`**; large caches may live under **`.hf_cache/`** (see `.gitignore`).
+- **PyTorch**, **Transformers** (Qwen3), project imports under `nla.*`
+- **Labeling / judges:** `OPENAI_API_KEY` (see `docs/NLA_AGENT_KNOWLEDGE.md`)
+- Local **`.venv`**; HF cache under **`.hf_cache/`** (gitignored)
 
 ---
 
@@ -81,4 +130,10 @@ Do not conflate FVE with “explains what the robot sees.”
 PYTHONPATH=src pytest tests/
 ```
 
-Smoke tests build a **tiny** random Qwen config so CI does not need the full 4B checkpoint.
+Smoke tests use a tiny random Qwen config so CI does not need the full 4B checkpoint.
+
+---
+
+## Citation
+
+If you use this code or protocol, please cite the CoRL 2026 draft (BibTeX in `paper/main_corl.tex`) and the original NLA work (Fraser-Taliente et al., 2026).

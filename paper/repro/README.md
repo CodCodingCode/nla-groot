@@ -1,7 +1,10 @@
-# Reproducibility bundle for the nla-groot workshop paper
+# Reproducibility bundle for the nla-groot papers
+
+Interactive writeup: https://codcodingcode.github.io/nla-groot/
 
 This directory is the appendix-grade reproducibility package referenced
-from `paper/main.tex`, App. A.
+from `paper/main.tex` (workshop) and `paper/main_corl.tex` (CoRL draft),
+Appendix A.
 
 ## Contents
 

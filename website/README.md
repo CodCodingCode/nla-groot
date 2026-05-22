@@ -1,10 +1,13 @@
 # nla-groot technical writeup site
 
-Static Vite + React site that explains the nla-groot pipeline (NLA on the
-GR00T VLA backbone) and shows the V3 evaluation results, driven by a JSON
-snapshot of the actual run artifacts under `data/`.
+Static Vite + React site for the **nla-groot** project: NLA on the GR00T VLA
+backbone, the three-axis evaluation protocol, and the V3 negative result—with
+interactive charts driven by a committed JSON snapshot of run artifacts.
 
-It mirrors the workshop paper at [`paper/main.tex`](../paper/main.tex) but is
+**Live site:** https://codcodingcode.github.io/nla-groot/
+
+It mirrors the papers at [`paper/main.tex`](../paper/main.tex) (workshop) and
+[`paper/main_corl.tex`](../paper/main_corl.tex) (CoRL 2026 draft) but is
 designed to be browseable: charts are interactive, the pipeline diagram is
 inline SVG, and every figure cites its source file.
 
@@ -19,7 +22,9 @@ website/
     sections/                  # Hero, Problem, Pipeline, Protocol, Results, Takeaway, Repro
     data/snapshot.json         # generated; committed
     types.ts
-  public/figures/              # PNGs copied from data/eval/.../figures
+  public/
+    figures/                   # PNGs copied from data/eval/.../figures
+    papers/                    # PDFs copied from paper/ at build time
   index.html, vite.config.ts, tsconfig.json
 ```
 
@@ -54,27 +59,28 @@ Outputs:
 ```bash
 cd website
 npm install
+npm run build    # runs prebuild: copies paper PDFs into public/papers/
 npm run dev      # http://localhost:5173
-npm run build    # static bundle in dist/
 npm run preview  # serve dist/ locally
 ```
 
-The Vite config sets `base: "./"`, so the `dist/` output works under any
-GitHub Pages subpath (e.g. `https://<user>.github.io/<repo>/`).
+The Vite config sets `base: "./"`, so the `dist/` output works under the
+GitHub Pages subpath `https://codcodingcode.github.io/nla-groot/`.
 
-## Deploy to GitHub Pages (one-shot)
+## Deploy to GitHub Pages
 
-The simplest path is the user-/project-pages branch flow:
+Deployment is automatic via GitHub Actions (`.github/workflows/deploy-pages.yml`):
 
-```bash
-cd website && npm install && npm run build
-# Push dist/ to the gh-pages branch (use any tool, e.g. gh-pages npm pkg
-# or a tiny CI workflow). dist/ is self-contained.
-```
+1. Push to `main` (or run the workflow manually).
+2. The workflow runs `npm ci && npm run build` in `website/` and publishes
+   `website/dist/` to GitHub Pages.
 
-A GitHub Actions workflow that runs `python export_site_data.py` and
-`npm run build` on push is straightforward to add later; keeping the
-exported snapshot committed means CI does not need access to NFS data.
+**First-time setup** (repo admin, once):
+
+1. **Settings → Pages → Build and deployment → Source:** GitHub Actions.
+2. Or: `gh api repos/CodCodingCode/nla-groot/pages -X POST -f build_type=workflow`
+
+The committed `snapshot.json` means CI does not need access to NFS `data/`.
 
 ## Editing notes
 
@@ -85,5 +91,5 @@ exported snapshot committed means CI does not need access to NFS data.
   [`scripts/website/export_site_data.py`](../scripts/website/export_site_data.py)
   and the corresponding TypeScript type in
   [`src/types.ts`](src/types.ts).
-* Section copy lives one-to-one with [`paper/main.tex`](../paper/main.tex);
-  if you change the workshop paper's claim, update both.
+* Section copy should stay aligned with the papers; if you change a claim,
+  update `paper/main_corl.tex`, `paper/main.tex`, and the relevant section here.

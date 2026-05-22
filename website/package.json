@@ -6,6 +6,7 @@
   "description": "Technical writeup site for nla-groot (NLA on GR00T VLA backbone).",
   "scripts": {
     "dev": "vite",
+    "prebuild": "mkdir -p public/papers && cp ../paper/main.pdf ../paper/main_corl.pdf ../paper/abstract_corl.pdf public/papers/ 2>/dev/null || true",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

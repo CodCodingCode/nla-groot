@@ -36,7 +36,14 @@ export default function App() {
         <div className="foot">
           Snapshot generated {data.generated_at}. Numbers come from{" "}
           <code>data/sft/libero_4suite_v3</code> and{" "}
-          <code>data/eval/steerability_v1_vs_v3</code>.
+          <code>data/eval/steerability_v1_vs_v3</code>.{" "}
+          <a
+            href="https://github.com/CodCodingCode/nla-groot"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Source on GitHub
+          </a>
         </div>
       </main>
     </div>
