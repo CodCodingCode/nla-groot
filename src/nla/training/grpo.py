@@ -189,7 +189,10 @@ class GRPOConfig:
     cf_eligible_ids_path: str | None = None
     sim_policy_host: str = "localhost"
     sim_policy_port: int = 5555
-    sim_n_workers: int = 8
+    sim_n_workers: int = 18
+    # Rollouts per batched LIBERO subprocess (requires NlaPolicyServer
+    # ``get_action_batch``). 4 = one GPU forward per 4 envs per sim step.
+    sim_batch_size: int = 4
     sim_max_steps: int = 100
     sim_placement: str = "image_patch"
     sim_blend: float = 1.0
@@ -278,7 +281,7 @@ def _serialize_config(cfg: GRPOConfig) -> dict[str, Any]:
             "sim_reward_weight", "sim_counterfactual_pairs_path",
             "sim_counterfactual_pairs_paths_extra",
             "sim_require_full_batch_cf", "cf_eligible_ids_path",
-            "sim_policy_host", "sim_policy_port", "sim_n_workers",
+            "sim_policy_host", "sim_policy_port", "sim_n_workers", "sim_batch_size",
             "sim_max_steps", "sim_placement", "sim_blend",
             "sim_cache_path", "sim_rollout_python", "sim_rollout_script",
             "sim_timeout_s", "sim_seed_base", "use_intent_conditioned_prompt",
@@ -1526,6 +1529,7 @@ def run_grpo(cfg: GRPOConfig) -> dict:
             policy_host=cfg.sim_policy_host,
             policy_port=cfg.sim_policy_port,
             n_workers=cfg.sim_n_workers,
+            sim_batch_size=cfg.sim_batch_size,
             sim_max_steps=cfg.sim_max_steps,
             placement=cfg.sim_placement,
             blend=cfg.sim_blend,
@@ -1535,12 +1539,12 @@ def run_grpo(cfg: GRPOConfig) -> dict:
             timeout_s=cfg.sim_timeout_s,
         )
         logger.info(
-            "Sim reward enabled (weight=%.3f, n_workers=%d, max_steps=%d, "
-            "placement=%s, blend=%.2f); counterfactual pairs loaded from %s "
-            "(%d source_ids covered)",
-            cfg.sim_reward_weight, cfg.sim_n_workers, cfg.sim_max_steps,
-            cfg.sim_placement, cfg.sim_blend, cfg.sim_counterfactual_pairs_path,
-            len(cf_sampler),
+            "Sim reward enabled (weight=%.3f, n_workers=%d, batch_size=%d, "
+            "max_steps=%d, placement=%s, blend=%.2f); counterfactual pairs "
+            "loaded from %s (%d source_ids covered)",
+            cfg.sim_reward_weight, cfg.sim_n_workers, cfg.sim_batch_size,
+            cfg.sim_max_steps, cfg.sim_placement, cfg.sim_blend,
+            cfg.sim_counterfactual_pairs_path, len(cf_sampler),
         )
 
     while step < cfg.total_steps:

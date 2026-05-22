@@ -191,7 +191,7 @@ Trainer never imports LIBERO. Flow:
 4. Rollout connects to steer server (`--sim-policy-host/port`), sends `steer_h` each step.
 5. `predicates.py` scores trajectory → `r_sim` printed as JSON stdout.
 
-Rollouts are **CPU-bound** (MuJoCo + OSMesa rendering in subprocesses). Default **`--sim-n-workers 8`** runs up to eight LIBERO subprocesses in parallel; the steer server handles concurrent ZMQ `get_action` calls on GPU.
+Rollouts are **CPU-bound** (MuJoCo + OSMesa rendering in subprocesses). Default **`--sim-n-workers 18`** runs up to eighteen LIBERO subprocesses in parallel; the steer server handles concurrent ZMQ `get_action` calls on GPU.
 
 ---
 
@@ -238,7 +238,7 @@ Audits:
 | `--cf-eligible-ids-path` | — | Manifest from `build_grpo_cf_manifest.py` |
 | `--sim-require-full-batch-cf` | off | All-or-nothing sim gate |
 | `--sim-policy-port` | 5555 | Must match running steer server |
-| `--sim-n-workers` | **8** | Concurrent LIBERO subprocesses (CPU/OSMesa) |
+| `--sim-n-workers` | **18** | Concurrent LIBERO subprocesses (CPU/OSMesa) |
 | `--sim-max-steps` | 100 | Max sim steps per rollout |
 | `--sim-rollout-python` | — | **Required** for sim; libero_uv venv python |
 | `--disable-kl-anchor` | off | Skip ref AV; saves memory |

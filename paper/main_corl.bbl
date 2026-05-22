@@ -1,0 +1,51 @@
+\begin{thebibliography}{7}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[{NVIDIA}(2025)]{nvidia2025gr00t}
+{NVIDIA}.
+\newblock {GR00T-N1}: An open foundation model for generalist humanoid robots.
+\newblock \emph{arXiv preprint}, 2025.
+\newblock Public checkpoints: nvidia/GR00T-N1.7-3B, nvidia/GR00T-N1.7-LIBERO.
+
+\bibitem[Fraser-Taliente et~al.(2026)]{frasertaliente2026nla}
+C.~Fraser-Taliente et~al.
+\newblock Natural language autoencoders produce unsupervised explanations of
+  {LLM} activations.
+\newblock \emph{Transformer Circuits Thread}, 2026.
+\newblock Anthropic interpretability dispatch.
+
+\bibitem[Turner et~al.(2023)Turner, Thiergart, Udell, Leech, Mini, and
+  MacDiarmid]{turner2023actadd}
+A.~M. Turner, L.~Thiergart, D.~Udell, G.~Leech, U.~Mini, and M.~MacDiarmid.
+\newblock Activation addition: Steering language models without optimization.
+\newblock \emph{arXiv preprint arXiv:2308.10248}, 2023.
+
+\bibitem[Zou et~al.(2023)]{zou2023repe}
+A.~Zou et~al.
+\newblock Representation engineering: A top-down approach to {AI} transparency.
+\newblock \emph{arXiv preprint arXiv:2310.01405}, 2023.
+
+\bibitem[Hu et~al.(2022)Hu, Shen, Wallis, Allen-Zhu, Li, Wang, Wang, and
+  Chen]{hu2022lora}
+E.~J. Hu, Y.~Shen, P.~Wallis, Z.~Allen-Zhu, Y.~Li, S.~Wang, L.~Wang, and
+  W.~Chen.
+\newblock {LoRA}: Low-rank adaptation of large language models.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2022.
+
+\bibitem[Brohan et~al.(2023)]{brohan2023rt2}
+A.~Brohan et~al.
+\newblock {RT-2}: Vision-language-action models transfer web knowledge to
+  robotic control.
+\newblock In \emph{Conference on Robot Learning (CoRL)}, 2023.
+
+\bibitem[Kim et~al.(2024)]{kim2024openvla}
+M.~J. Kim et~al.
+\newblock {OpenVLA}: An open-source vision-language-action model.
+\newblock In \emph{Conference on Robot Learning (CoRL)}, 2024.
+
+\end{thebibliography}

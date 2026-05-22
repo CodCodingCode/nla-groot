@@ -218,3 +218,38 @@ These are starting points, not absolutes; tune as you accumulate data:
 | 0.55-0.70 | Acceptable: most signals positive, paper-grade with caveats |
 | 0.40-0.55 | Weak: report as honest negative result                    |
 | < 0.40    | Failed; do not claim interpretability for this regime     |
+
+---
+
+## CF sim-steer headlines (publishable rules)
+
+The closed-loop counterfactual steer track (sim-GRPO, V2 plan) has its own
+headline rules. Reviewers conflate metrics easily here; keep them explicit.
+
+**Do not report as a headline:**
+
+- `sim_predicate_pos_frac` from GRPO training logs (in-batch, noisy).
+- Aggregate `sim_reward_cache.jsonl` rates (mixed train cache, no held-out
+  guarantee; see `scripts/eval/aggregate_sim_cache.py` — marked diagnostic).
+- LIBERO native `success_any` on cross-scene CF rollouts (the loaded BDDL
+  task is not what you steered for).
+- Any predicate rate without naming it as an **xyz-heuristic on
+  `target_task`** rather than LIBERO success.
+
+**Do report as a headline:**
+
+- `delta_predicate_rate_grpo_minus_sft` on the held-out CF slice from
+  `scripts/eval/compare_cf_steer_checkpoints.py`.
+- `semantic_gap_predicate` (matched − mismatched_source intent arm) — proves
+  language is doing semantic work, not just norm injection.
+- `causal_specificity_predicate` (semantic − matched_null) and
+  `placement_specificity_predicate` (semantic − wrong_placement) — proves
+  the AR vector and its trained placement are causally specific.
+- `closed_greedy/cosine` from GRPO `metrics.jsonl` (recon guardrail; NOT a
+  steer metric — never report it alone as evidence of steering).
+
+**One-shot runner:**
+`scripts/eval/run_grpo_steer_holdout.sh` builds the held-out manifest,
+runs compare with full arm matrix, and emits
+`grpo_steer_scorecard.json` via `scripts/eval/build_grpo_steer_scorecard.py`.
+Cite the scorecard JSON in the paper; never raw `sim_predicate_pos_frac`.

@@ -29,7 +29,12 @@ import torch
 
 from gr00t.policy.policy import BasePolicy, PolicyWrapper
 
-from nla.steering.backbone_steer import SteerSpec, attach_backbone_steer
+from nla.eval.steerability.obs_batching import infer_nested_batch_size
+from nla.steering.backbone_steer import (
+    SteerSpec,
+    attach_backbone_steer,
+    attach_backbone_steer_batched,
+)
 
 # Keys we look for in the per-call ``options`` dict. The bytes variants exist
 # because msgpack_numpy decodes string keys as bytes when ``raw=True``; we use
@@ -116,12 +121,27 @@ class NlaSteerGr00tPolicy(PolicyWrapper):
         self, observation: dict[str, Any], options: dict[str, Any] | None = None
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         steer_vec, spec, disabled = self._resolve_per_call(options)
-        if disabled or (not self._enabled and steer_vec is None):
+        batch_vecs = self._resolve_steer_batch(options)
+        batch_size = infer_nested_batch_size(observation)
+        if disabled or (
+            not self._enabled and steer_vec is None and batch_vecs is None
+        ):
             return self.policy._get_action(observation, options)
-        if steer_vec is None:
-            steer_vec = self._steer_vec
         if spec is None:
             spec = self._spec
+        if batch_size > 1:
+            if batch_vecs is None:
+                if steer_vec is None:
+                    steer_vec = self._steer_vec
+                batch_vecs = [steer_vec] * batch_size
+            if len(batch_vecs) != batch_size:
+                raise ValueError(
+                    f"steer batch length {len(batch_vecs)} != observation batch {batch_size}"
+                )
+            with attach_backbone_steer_batched(self._backbone, batch_vecs, spec):
+                return self.policy._get_action(observation, options)
+        if steer_vec is None:
+            steer_vec = self._steer_vec
         with attach_backbone_steer(
             self._backbone,
             steer_vec,
@@ -162,6 +182,38 @@ class NlaSteerGr00tPolicy(PolicyWrapper):
                 spec = self._coerce_spec(options[k])
                 break
         return steer_vec, spec, disabled
+
+    def _resolve_steer_batch(
+        self,
+        options: dict[str, Any] | None,
+    ) -> list[torch.Tensor] | None:
+        """Return per-row steer vectors from ``options['steer_h_batch']``."""
+        if not options:
+            return None
+        raw = None
+        for k in ("steer_h_batch", b"steer_h_batch"):
+            if k in options and options[k] is not None:
+                raw = options[k]
+                break
+        if raw is None:
+            return None
+        if isinstance(raw, torch.Tensor):
+            t = raw.detach().float().cpu()
+            if t.dim() == 1:
+                return [t.contiguous()]
+            if t.dim() == 2:
+                return [t[i].contiguous() for i in range(t.shape[0])]
+            raise ValueError(f"steer_h_batch tensor must be [B,H]; got {tuple(t.shape)}")
+        if isinstance(raw, np.ndarray):
+            arr = np.asarray(raw, dtype=np.float32)
+            if arr.ndim == 1:
+                return [torch.from_numpy(arr)]
+            if arr.ndim == 2:
+                return [torch.from_numpy(arr[i]) for i in range(arr.shape[0])]
+            raise ValueError(f"steer_h_batch ndarray must be [B,H]; got {arr.shape}")
+        if isinstance(raw, (list, tuple)):
+            return [self._coerce_steer_vec(v) for v in raw]
+        raise TypeError(f"steer_h_batch must be tensor/ndarray/list; got {type(raw)!r}")
 
     @staticmethod
     def _coerce_steer_vec(raw: Any) -> torch.Tensor:

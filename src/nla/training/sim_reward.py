@@ -47,6 +47,20 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 
 
+def _steer_h_fingerprint(steer_h: np.ndarray | None) -> str:
+    """Stable, compact fingerprint of a steer vector for cache keying.
+
+    Causal-arm sweeps (semantic / matched_null / wrong_placement) share the
+    same (env, target_task, source_id, text, seed) tuple but apply different
+    vectors. Without a vector-aware key, the in-memory cache silently
+    returns the first arm's rollout for every subsequent arm.
+    """
+    if steer_h is None:
+        return "novec"
+    arr = np.ascontiguousarray(steer_h, dtype=np.float32)
+    return hashlib.sha1(arr.tobytes()).hexdigest()[:16]
+
+
 def sim_cache_key(
     env_name: str,
     target_task: str,
@@ -54,7 +68,15 @@ def sim_cache_key(
     text: str,
     seed: int,
     sim_max_steps: int,
+    placement: str = "image_patch",
+    steer_h_fp: str = "novec",
 ) -> str:
+    """Stable cache key for one (job, vector, placement) triple.
+
+    ``placement`` and ``steer_h_fp`` were added so causal-arm sweeps don't
+    collide on the in-memory cache: any change to the steer vector contents
+    or where it is injected must produce a fresh key.
+    """
     h = hashlib.sha1()
     h.update(env_name.encode("utf-8"))
     h.update(b"\x00")
@@ -67,6 +89,10 @@ def sim_cache_key(
     h.update(str(int(seed)).encode("utf-8"))
     h.update(b"\x00")
     h.update(str(int(sim_max_steps)).encode("utf-8"))
+    h.update(b"\x00")
+    h.update(str(placement).encode("utf-8"))
+    h.update(b"\x00")
+    h.update(str(steer_h_fp).encode("utf-8"))
     return h.hexdigest()
 
 
@@ -185,14 +211,81 @@ def _run_rollout_subprocess(
         raise RuntimeError(
             f"rollout subprocess produced empty stdout; stderr: {completed.stderr[-500:]!r}"
         )
+    from nla.eval.steerability.json_utils import extract_rollout_json
+
+    return extract_rollout_json(text, expect_array=False)
+
+
+def _run_batched_rollout_subprocess(
+    jobs: Sequence[SimRewardJob],
+    *,
+    rollout_python: str,
+    batched_rollout_script: str,
+    policy_host: str,
+    policy_port: int,
+    workdir: Path,
+    env_overrides: dict[str, str] | None,
+    timeout_s: float,
+) -> list[dict]:
+    """Shell out to ``batched_rollout.py`` for ``len(jobs)`` parallel rollouts."""
+    workdir.mkdir(parents=True, exist_ok=True)
+    payload = []
+    for job in jobs:
+        payload.append({
+            "env_name": job.env_name,
+            "target_task": job.target_task,
+            "source_id": job.source_id,
+            "seed": int(job.seed),
+            "steer_h": job.steer_h.astype(np.float32).tolist(),
+            "placement": job.placement,
+            "blend": float(job.blend),
+            "sim_max_steps": int(job.sim_max_steps),
+        })
+    jobs_path = workdir / "jobs.json"
+    jobs_path.write_text(json.dumps(payload))
+
+    cmd = [
+        rollout_python,
+        batched_rollout_script,
+        "--jobs-json", str(jobs_path),
+        "--policy-host", policy_host,
+        "--policy-port", str(int(policy_port)),
+        "--max-episode-steps", str(int(jobs[0].sim_max_steps)),
+    ]
+    env = os.environ.copy()
+    env.setdefault("MUJOCO_GL", "osmesa")
+    env.setdefault("PYOPENGL_PLATFORM", "osmesa")
+    if env_overrides:
+        env.update(env_overrides)
+
+    completed = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout_s, env=env,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"batched rollout failed (rc={completed.returncode}); "
+            f"stderr tail: {completed.stderr[-800:]!r}"
+        )
+    text = completed.stdout.strip()
+    if not text:
+        raise RuntimeError(
+            f"batched rollout empty stdout; stderr: {completed.stderr[-500:]!r}"
+        )
+    from nla.eval.steerability.json_utils import extract_rollout_json
+
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        # Find the first '{' and try again.
-        idx = text.find("{")
-        if idx < 0:
-            raise
-        return json.loads(text[idx:])
+        parsed = extract_rollout_json(text, expect_array=True)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise RuntimeError(
+            f"batched rollout JSON parse failed: {e}; stdout tail: {text[-400:]!r}"
+        ) from e
+    if not isinstance(parsed, list):
+        raise RuntimeError(f"batched rollout expected JSON list, got {type(parsed)!r}")
+    if len(parsed) != len(jobs):
+        raise RuntimeError(
+            f"batched rollout returned {len(parsed)} summaries, expected {len(jobs)}"
+        )
+    return parsed
 
 
 # ----------------------------------------------------------------------------
@@ -215,11 +308,13 @@ class SimRewardWorker:
         policy_host: str = "localhost",
         policy_port: int = 5555,
         n_workers: int = 4,
+        sim_batch_size: int = 1,
         sim_max_steps: int = 100,
         placement: str = "image_patch",
         blend: float = 1.0,
         rollout_python: str | None = None,
         rollout_script: str | None = None,
+        batched_rollout_script: str | None = None,
         cache_path: str | Path | None = None,
         timeout_s: float = 240.0,
         env_overrides: dict[str, str] | None = None,
@@ -228,6 +323,7 @@ class SimRewardWorker:
         self.policy_host = policy_host
         self.policy_port = int(policy_port)
         self.n_workers = max(1, int(n_workers))
+        self.sim_batch_size = max(1, int(sim_batch_size))
         self.sim_max_steps = int(sim_max_steps)
         self.placement = str(placement)
         self.blend = float(blend)
@@ -240,11 +336,15 @@ class SimRewardWorker:
             "NLA_ROLLOUT_PYTHON", "python"
         )
         # Default to the in-tree rollout.py.
+        steer_dir = Path(__file__).resolve().parents[2] / "nla" / "eval" / "steerability"
         if rollout_script is None:
-            here = Path(__file__).resolve().parents[2] / "nla" / "eval" / "steerability" / "rollout.py"
-            self.rollout_script = str(here)
+            self.rollout_script = str(steer_dir / "rollout.py")
         else:
             self.rollout_script = str(rollout_script)
+        if batched_rollout_script is None:
+            self.batched_rollout_script = str(steer_dir / "batched_rollout.py")
+        else:
+            self.batched_rollout_script = str(batched_rollout_script)
 
         # Scratch dir for per-call steer_h .npy files. Default: TMP/sim_reward.
         sd = scratch_dir or os.environ.get("NLA_SIM_REWARD_SCRATCH")
@@ -257,9 +357,10 @@ class SimRewardWorker:
         if self._cache_path is not None:
             self._cache_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info(
-            "SimRewardWorker(host=%s:%d, n_workers=%d, sim_max_steps=%d, "
-            "placement=%s, blend=%.2f, python=%s, cache=%s, cached_entries=%d)",
-            self.policy_host, self.policy_port, self.n_workers,
+            "SimRewardWorker(host=%s:%d, n_workers=%d, sim_batch_size=%d, "
+            "sim_max_steps=%d, placement=%s, blend=%.2f, python=%s, cache=%s, "
+            "cached_entries=%d)",
+            self.policy_host, self.policy_port, self.n_workers, self.sim_batch_size,
             self.sim_max_steps, self.placement, self.blend,
             self.rollout_python, self._cache_path, len(self._cache),
         )
@@ -291,13 +392,18 @@ class SimRewardWorker:
         import time
         results: list[SimRewardResult | None] = [None] * len(jobs)
 
+        def _job_key(job: SimRewardJob) -> str:
+            return sim_cache_key(
+                job.env_name, job.target_task, job.source_id,
+                job.text, job.seed, job.sim_max_steps,
+                placement=job.placement,
+                steer_h_fp=_steer_h_fingerprint(job.steer_h),
+            )
+
         # Resolve cache hits up front.
         pending_idx: list[int] = []
         for i, job in enumerate(jobs):
-            key = sim_cache_key(
-                job.env_name, job.target_task, job.source_id,
-                job.text, job.seed, job.sim_max_steps,
-            )
+            key = _job_key(job)
             cached = self._cache.get(key)
             if cached is not None:
                 results[i] = SimRewardResult(
@@ -320,39 +426,11 @@ class SimRewardWorker:
         if not pending_idx:
             return [r for r in results if r is not None]  # all cached
 
-        # Dispatch pending jobs in a thread pool.
-        def _one(i: int) -> tuple[int, SimRewardResult]:
+        def _result_from_summary(
+            i: int, summary: dict, *, elapsed: float,
+        ) -> tuple[int, SimRewardResult]:
             job = jobs[i]
-            key = sim_cache_key(
-                job.env_name, job.target_task, job.source_id,
-                job.text, job.seed, job.sim_max_steps,
-            )
-            workdir = self._scratch / key
-            t0 = time.time()
-            try:
-                summary = _run_rollout_subprocess(
-                    job,
-                    rollout_python=self.rollout_python,
-                    rollout_script=self.rollout_script,
-                    policy_host=self.policy_host,
-                    policy_port=self.policy_port,
-                    workdir=workdir,
-                    env_overrides=self.env_overrides,
-                    timeout_s=self.timeout_s,
-                )
-            except Exception as e:
-                err = repr(e)
-                logger.warning("sim job failed (key=%s): %s", key[:12], err)
-                res = SimRewardResult(
-                    key=key, r_sim=0.0, predicate=0.0, r_dist=0.0,
-                    r_displace=0.0, r_contact=0.0, n_steps=0,
-                    early_stopped=False, elapsed_s=time.time() - t0,
-                    cached=False, success_any=False, error=err,
-                )
-                # Don't cache errors -- a retry next epoch should re-attempt.
-                return i, res
-
-            elapsed = time.time() - t0
+            key = _job_key(job)
             breakdown = summary.get("sim_score_breakdown") or {}
             res = SimRewardResult(
                 key=key,
@@ -369,31 +447,116 @@ class SimRewardWorker:
                 error=None,
             )
             entry = {
-                "key":           res.key,
-                "r_sim":         res.r_sim,
-                "predicate":     res.predicate,
-                "r_dist":        res.r_dist,
-                "r_displace":    res.r_displace,
-                "r_contact":     res.r_contact,
-                "n_steps":       res.n_steps,
+                "key": res.key,
+                "r_sim": res.r_sim,
+                "predicate": res.predicate,
+                "r_dist": res.r_dist,
+                "r_displace": res.r_displace,
+                "r_contact": res.r_contact,
+                "n_steps": res.n_steps,
                 "early_stopped": res.early_stopped,
-                "elapsed_s":     res.elapsed_s,
-                "success_any":   res.success_any,
-                "env_name":      job.env_name,
-                "target_task":   job.target_task,
-                "source_id":     job.source_id,
-                "text":          job.text,
-                "seed":          job.seed,
+                "elapsed_s": res.elapsed_s,
+                "success_any": res.success_any,
+                "env_name": job.env_name,
+                "target_task": job.target_task,
+                "source_id": job.source_id,
+                "text": job.text,
+                "seed": job.seed,
                 "sim_max_steps": job.sim_max_steps,
             }
             self._append_cache(entry)
             return i, res
 
+        def _error_result(i: int, err: str, elapsed: float) -> tuple[int, SimRewardResult]:
+            job = jobs[i]
+            key = _job_key(job)
+            logger.warning("sim job failed (key=%s): %s", key[:12], err)
+            return i, SimRewardResult(
+                key=key, r_sim=0.0, predicate=0.0, r_dist=0.0,
+                r_displace=0.0, r_contact=0.0, n_steps=0,
+                early_stopped=False, elapsed_s=elapsed,
+                cached=False, success_any=False, error=err,
+            )
+
+        def _one(i: int) -> tuple[int, SimRewardResult]:
+            job = jobs[i]
+            key = _job_key(job)
+            workdir = self._scratch / key
+            t0 = time.time()
+            try:
+                summary = _run_rollout_subprocess(
+                    job,
+                    rollout_python=self.rollout_python,
+                    rollout_script=self.rollout_script,
+                    policy_host=self.policy_host,
+                    policy_port=self.policy_port,
+                    workdir=workdir,
+                    env_overrides=self.env_overrides,
+                    timeout_s=self.timeout_s,
+                )
+            except Exception as e:
+                return _error_result(i, repr(e), time.time() - t0)
+            return _result_from_summary(i, summary, elapsed=time.time() - t0)
+
+        def _batch(chunk_idx: list[int]) -> list[tuple[int, SimRewardResult]]:
+            chunk_jobs = [jobs[i] for i in chunk_idx]
+            batch_key = sim_cache_key(
+                chunk_jobs[0].env_name,
+                chunk_jobs[0].target_task,
+                "batch",
+                str(len(chunk_idx)),
+                chunk_jobs[0].seed,
+                chunk_jobs[0].sim_max_steps,
+            )
+            workdir = self._scratch / f"batch_{batch_key[:16]}"
+            t0 = time.time()
+            timeout = self.timeout_s * max(1.0, len(chunk_idx) * 0.5)
+            try:
+                summaries = _run_batched_rollout_subprocess(
+                    chunk_jobs,
+                    rollout_python=self.rollout_python,
+                    batched_rollout_script=self.batched_rollout_script,
+                    policy_host=self.policy_host,
+                    policy_port=self.policy_port,
+                    workdir=workdir,
+                    env_overrides=self.env_overrides,
+                    timeout_s=timeout,
+                )
+            except Exception as e:
+                err = repr(e)
+                elapsed = (time.time() - t0) / max(1, len(chunk_idx))
+                return [_error_result(i, err, elapsed) for i in chunk_idx]
+            elapsed_each = (time.time() - t0) / max(1, len(chunk_idx))
+            return [
+                _result_from_summary(i, summary, elapsed=elapsed_each)
+                for i, summary in zip(chunk_idx, summaries)
+            ]
+
+        batch_sz = self.sim_batch_size
+        if batch_sz <= 1:
+            work_items: list[tuple[str, list[int]]] = [
+                ("single", [i]) for i in pending_idx
+            ]
+        else:
+            work_items = []
+            for start in range(0, len(pending_idx), batch_sz):
+                work_items.append(
+                    ("batch", pending_idx[start : start + batch_sz]),
+                )
+
+        def _dispatch(item: tuple[str, list[int]]) -> list[tuple[int, SimRewardResult]]:
+            kind, idxs = item
+            if kind == "single" and len(idxs) == 1:
+                return [_one(idxs[0])]
+            if kind == "batch" and len(idxs) > 1:
+                return _batch(idxs)
+            return [_one(i) for i in idxs]
+
         with ThreadPoolExecutor(max_workers=self.n_workers) as pool:
-            futures = [pool.submit(_one, i) for i in pending_idx]
+            futures = [pool.submit(_dispatch, item) for item in work_items]
             for fut in as_completed(futures):
-                i, res = fut.result()
-                results[i] = res
+                for i, res in fut.result():
+                    results[i] = res
 
         # All slots now filled.
         return [r for r in results if r is not None]

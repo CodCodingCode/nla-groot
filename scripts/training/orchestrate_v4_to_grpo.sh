@@ -51,7 +51,7 @@ SFT_TIMEOUT_S="${SFT_TIMEOUT_S:-32400}"  # 9h default, override via env (gives ~
 STEER_READY_TIMEOUT_S="${STEER_READY_TIMEOUT_S:-300}"
 # GR00T policy checkpoint for steer server + sim-eval (prefer .env GROOT_MODEL_PATH).
 DEFAULT_GROOT_REL="checkpoints/GR00T-N1.7-LIBERO/libero_goal"
-PILOT_SIM_N_WORKERS_FALLBACK="${PILOT_SIM_N_WORKERS_FALLBACK:-8}"
+PILOT_SIM_N_WORKERS_FALLBACK="${PILOT_SIM_N_WORKERS_FALLBACK:-18}"
 # Overnight-scale GRPO pilot (override anytime before launch).
 PILOT_GRPO_TOTAL_STEPS="${PILOT_GRPO_TOTAL_STEPS:-1000}"
 PILOT_GRPO_EVAL_EVERY="${PILOT_GRPO_EVAL_EVERY:-50}"

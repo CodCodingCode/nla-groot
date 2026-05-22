@@ -107,7 +107,7 @@ def _load_steer_text(config: ServerConfig) -> str:
 def main(config: ServerConfig) -> None:
     from gr00t.data.embodiment_tags import EmbodimentTag
     from gr00t.policy.gr00t_policy import Gr00tPolicy
-    from gr00t.policy.server_client import PolicyServer
+    from nla.eval.nla_policy_server import NlaPolicyServer
 
     from nla.extraction._compat import apply_all as apply_groot_compat
 
@@ -188,9 +188,10 @@ def main(config: ServerConfig) -> None:
     else:
         print("  Steering:       disabled (no --ar-dir provided)", flush=True)
 
-    server = PolicyServer(policy=policy, host=config.host, port=config.port)
+    server = NlaPolicyServer(policy=policy, host=config.host, port=config.port)
     print(
-        f"\nServer ready — listening on {config.host}:{config.port}\n",
+        f"\nServer ready — listening on {config.host}:{config.port} "
+        f"(endpoints: get_action, get_action_batch, …)\n",
         flush=True,
     )
 

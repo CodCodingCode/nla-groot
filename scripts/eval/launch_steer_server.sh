@@ -204,7 +204,9 @@ SERVER_PID=$!
 echo "${SERVER_PID}" > "${PID_FILE}"
 disown "${SERVER_PID}" 2>/dev/null || true
 
-READY_PATTERN='Server is ready and listening'
+# PolicyServer.run prints "Server is ready and listening"; Nla launcher
+# also prints "Server ready — listening" before calling run().
+READY_PATTERN='Server ready'
 deadline=$(( $(date +%s) + READY_TIMEOUT ))
 ready=0
 while [[ $(date +%s) -lt ${deadline} ]]; do

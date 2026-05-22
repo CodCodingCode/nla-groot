@@ -135,6 +135,24 @@ The recommended A/B is to run the same client command twice — once with the
 server in passthrough (no `--ar-dir` or `--steer-off`) and once with the steer
 hook on — and compare success rates and rollout videos that the client writes.
 
+## Batched policy inference (sim-GRPO speedup)
+
+For GRPO sim rewards, restart the steer server with the in-tree launcher
+(it uses :class:`nla.eval.nla_policy_server.NlaPolicyServer`, which adds
+``get_action_batch``). Then pass ``--sim-batch-size 4`` (or match ``B×K``)
+to ``run_grpo.py``:
+
+```bash
+# Restart server (same flags as before)
+bash scripts/eval/launch_steer_server.sh --sft-dir data/sft/... --port 5556 -- ...
+
+# GRPO uses batched_rollout.py: N envs per subprocess, one GPU forward per step
+PYTHONPATH=src .venv/bin/python scripts/training/run_grpo.py \
+  ... --sim-batch-size 4 --sim-n-workers 18
+```
+
+No SFT retrain is required: same checkpoints, batched serving only.
+
 ## What “steering worked” means here
 
 In closed-loop sim, steering is the **behavioral** answer the offline Δaction

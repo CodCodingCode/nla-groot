@@ -44,7 +44,7 @@ Example (LIBERO, sim-success steerability GRPO)::
         --sim-reward-weight 0.5 \\
         --sim-counterfactual-pairs-path data/grpo/cf_pairs.jsonl \\
         --sim-policy-host localhost --sim-policy-port 5555 \\
-        --sim-n-workers 8 --sim-max-steps 100 \\
+        --sim-n-workers 18 --sim-max-steps 100 \\
         --sim-placement image_patch --sim-blend 1.0
 """
 
@@ -203,12 +203,17 @@ def _build_parser() -> argparse.ArgumentParser:
                         "on. The trainer fans out short rollouts to this one "
                         "server; the server should have been launched with the "
                         "same AR your SFT dir holds.")
-    p.add_argument("--sim-n-workers", type=int, default=8,
+    p.add_argument("--sim-n-workers", type=int, default=18,
                    help="Number of concurrent in-flight LIBERO rollout "
                         "subprocesses per GRPO step (CPU/OSMesa-bound; "
                         "default 8 matches profile_sim_worker.py for "
                         "B=4/K=4). Each worker holds one ZMQ client to "
                         "the steer server.")
+    p.add_argument("--sim-batch-size", type=int, default=4,
+                   help="LIBERO rollouts per batched subprocess (calls "
+                        "get_action_batch on the steer server). Requires "
+                        "NlaPolicyServer (restart steer server after upgrade). "
+                        "1 = legacy one-rollout-per-subprocess.")
     p.add_argument("--sim-max-steps", type=int, default=100,
                    help="Max simulator steps per rollout (capped further by "
                         "early-stop-on-predicate). Short rollouts speed up "
@@ -395,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
         sim_policy_host=args.sim_policy_host,
         sim_policy_port=args.sim_policy_port,
         sim_n_workers=args.sim_n_workers,
+        sim_batch_size=args.sim_batch_size,
         sim_max_steps=args.sim_max_steps,
         sim_placement=args.sim_placement,
         sim_blend=args.sim_blend,

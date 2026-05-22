@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator, Literal, Sequence
 
 import numpy as np
 import torch
@@ -147,6 +147,57 @@ class BackboneFeaturesSteerHook:
         self._handle = None
 
 
+class BatchedBackboneFeaturesSteerHook:
+    """Apply a distinct steer vector to each batch row in one backbone forward."""
+
+    def __init__(
+        self,
+        steer_vecs: Sequence[torch.Tensor],
+        spec: SteerSpec,
+    ) -> None:
+        vecs: list[torch.Tensor] = []
+        for v in steer_vecs:
+            if v.dim() == 2 and v.shape[0] == 1:
+                v = v.squeeze(0)
+            if v.dim() != 1:
+                raise ValueError(f"each steer_vec must be [H]; got {tuple(v.shape)}")
+            if int(v.shape[0]) != BACKBONE_EMBEDDING_DIM:
+                raise ValueError(
+                    f"steer dim {v.shape[0]} != BACKBONE_EMBEDDING_DIM={BACKBONE_EMBEDDING_DIM}"
+                )
+            vecs.append(v.detach().float().cpu().contiguous())
+        if not vecs:
+            raise ValueError("steer_vecs must be non-empty")
+        self._steer_cpu = vecs
+        self.spec = spec
+        self._handle: torch.utils.hooks.RemovableHandle | None = None
+
+    def __call__(self, module: torch.nn.Module, inputs: tuple[Any, ...], output: Any) -> None:
+        del module, inputs
+        feats = output["backbone_features"]
+        attn = output["backbone_attention_mask"]
+        img_m = output["image_mask"]
+        b = int(feats.shape[0])
+        if len(self._steer_cpu) != b:
+            raise ValueError(
+                f"steer_vecs length {len(self._steer_cpu)} != batch size {b}"
+            )
+        blend = max(0.0, min(1.0, float(self.spec.blend)))
+        new_feats = feats.clone()
+        for bi in range(b):
+            idxs = resolve_steer_indices(attn, img_m, self.spec, batch_index=bi)
+            steer = self._steer_cpu[bi].to(device=feats.device, dtype=feats.dtype)
+            for t in idxs:
+                if blend <= 0.0:
+                    continue
+                base = feats[bi, t]
+                if blend >= 1.0:
+                    new_feats[bi, t] = steer
+                else:
+                    new_feats[bi, t] = (1.0 - blend) * base + blend * steer
+        output["backbone_features"] = new_feats
+
+
 @contextlib.contextmanager
 def attach_backbone_steer(
     backbone: torch.nn.Module,
@@ -157,6 +208,23 @@ def attach_backbone_steer(
 ) -> Iterator[BackboneFeaturesSteerHook]:
     """Register :class:`BackboneFeaturesSteerHook` on ``backbone.forward``."""
     hook_impl = BackboneFeaturesSteerHook(steer_vec, spec, batch_index=batch_index)
+    handle = backbone.register_forward_hook(hook_impl)
+    hook_impl._handle = handle
+    try:
+        yield hook_impl
+    finally:
+        handle.remove()
+        hook_impl._handle = None
+
+
+@contextlib.contextmanager
+def attach_backbone_steer_batched(
+    backbone: torch.nn.Module,
+    steer_vecs: Sequence[torch.Tensor],
+    spec: SteerSpec,
+) -> Iterator[BatchedBackboneFeaturesSteerHook]:
+    """Register :class:`BatchedBackboneFeaturesSteerHook` on ``backbone.forward``."""
+    hook_impl = BatchedBackboneFeaturesSteerHook(steer_vecs, spec)
     handle = backbone.register_forward_hook(hook_impl)
     hook_impl._handle = handle
     try:

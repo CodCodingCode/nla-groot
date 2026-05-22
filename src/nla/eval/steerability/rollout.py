@@ -286,7 +286,9 @@ def run_one_rollout(
         "early_stopped": bool(early_stopped),
     })
     if output_dir is not None:
-        (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=float))
+        from nla.eval.steerability.json_utils import dumps_rollout_json
+
+        (output_dir / "summary.json").write_text(dumps_rollout_json(summary))
     env.close()
     if return_trajectory:
         summary["_trajectory"] = traj
@@ -407,7 +409,9 @@ def _cli() -> None:
             summary["r_sim"] = None
             summary["sim_score_breakdown"] = None
 
-    print(json.dumps(summary, indent=2, default=float))
+    from nla.eval.steerability.json_utils import dumps_rollout_json
+
+    print(dumps_rollout_json(summary))
 
 
 if __name__ == "__main__":

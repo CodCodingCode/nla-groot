@@ -18,6 +18,7 @@ ACT_COMBINED="${ACT_COMBINED:-data/activations/libero_4suite_v4_combined}"
 LBL_COMBINED="${LBL_COMBINED:-data/labels/libero_4suite_v5_combined}"
 SFT_DIR="${SFT_DIR:-data/sft/libero_4suite_v5_base_qwen}"
 GRPO_DIR="${GRPO_DIR:-data/grpo/libero_4suite_v5_base_qwen_grpo}"
+SKIP_GRPO="${SKIP_GRPO:-1}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [post_guard] $*" | tee -a "$GUARD_LOG"; }
 
@@ -39,6 +40,7 @@ while [[ ! -f "$SFT_OK" ]]; do sleep "$POLL_SECS"; done
 
 SFT_DIR=$(resolve_sft_dir)
 log "using SFT_DIR=$SFT_DIR"
+mkdir -p "$GRPO_DIR"
 
 # Metrics check (non-fatal)
 if [[ -f "${SFT_DIR}/metrics.jsonl" ]]; then
@@ -59,6 +61,12 @@ fi
   --out-jsonl "${SFT_DIR}/samples_guard.jsonl" \
   >> "${GRPO_DIR}/dump_samples.log" 2>&1 || true
 
+if [[ "${SKIP_GRPO}" == "1" ]]; then
+  log "SKIP_GRPO=1 — leaving GRPO to manual run; writing pipeline_complete.flag"
+  date -Iseconds > "$DONE_FLAG"
+  exit 0
+fi
+
 attempt=1
 while [[ "$attempt" -le 3 ]]; do
   mkdir -p "$GRPO_DIR"
@@ -70,10 +78,10 @@ while [[ "$attempt" -le 3 ]]; do
     "$PYTHON" scripts/training/run_grpo.py \
       --sft-dir "$SFT_DIR" \
       --activations-root "$ACT_COMBINED" \
-      --labels-jsonl "${LBL_COMBINED}/labels.jsonl" \
       --output-dir "${GRPO_DIR}_a${attempt}" \
       --beta 0.02 --total-steps 500 \
-      --rollouts-per-activation 8 \
+      --batch-size 2 --rollouts-per-activation 4 \
+      --gradient-checkpointing --disable-kl-anchor \
       --eval-every 50 --save-every 100 \
       >> "${GRPO_DIR}_a${attempt}/grpo.log" 2>&1
   rc=$?

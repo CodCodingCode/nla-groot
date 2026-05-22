@@ -49,6 +49,85 @@ def test_sim_cache_key_is_stable_and_collision_free():
     assert sim_cache_key("env_A", "task_A", "src_1", "text one", 0, 200) != k1
 
 
+def test_sim_cache_key_includes_placement_and_steer_fingerprint():
+    """Regression: causal-arm sweeps (semantic / matched_null / wrong_placement)
+    share the (env, task, source, text, seed, steps) tuple but vary the steer
+    vector and placement. The old key formula collided on all three arms,
+    causing the in-memory cache to silently return the first arm's rollout
+    for every subsequent arm. The new key must flip on either field.
+    """
+    base_args = ("env_A", "task_A", "src_1", "text one", 0, 100)
+    k_semantic = sim_cache_key(*base_args, placement="image_patch", steer_h_fp="hash_real")
+    k_wrong_place = sim_cache_key(*base_args, placement="last_text", steer_h_fp="hash_real")
+    k_null_vec = sim_cache_key(*base_args, placement="image_patch", steer_h_fp="hash_null")
+    assert len({k_semantic, k_wrong_place, k_null_vec}) == 3
+
+    # Defaults still produce a stable key for callers that don't pass extras
+    # (e.g. legacy training paths that always use the same placement/vector).
+    legacy = sim_cache_key(*base_args)
+    legacy_again = sim_cache_key(*base_args)
+    assert legacy == legacy_again
+
+
+def test_simrewardworker_compute_runs_each_causal_arm(monkeypatch, tmp_path):
+    """Regression: with a shared (text, source) but different steer_h / placement,
+    SimRewardWorker.compute() must invoke a fresh rollout per arm instead of
+    silently returning the first arm's result via the in-memory cache.
+    """
+    calls: list[tuple[str, str]] = []  # (fingerprint, placement)
+
+    def fake_rollout(job, **_kw):
+        from nla.training.sim_reward import _steer_h_fingerprint
+        fp = _steer_h_fingerprint(job.steer_h)
+        calls.append((fp, job.placement))
+        return {
+            "r_sim": float(len(calls)),
+            "n_steps": 1,
+            "early_stopped": True,
+            "success_any": False,
+            "sim_score_breakdown": {
+                "predicate": float(len(calls)) / 10.0,
+                "r_dist": 0.0, "r_displace": 0.0, "r_contact": 0.0,
+            },
+        }
+
+    monkeypatch.setattr(
+        "nla.training.sim_reward._run_rollout_subprocess", fake_rollout
+    )
+
+    worker = SimRewardWorker(
+        policy_host="x", policy_port=0,
+        n_workers=1,
+        rollout_python="python", rollout_script="x.py",
+        cache_path=None,
+        scratch_dir=str(tmp_path),
+    )
+
+    base = dict(
+        env_name="env_A", target_task="task_A",
+        source_id="src_1", text="text one",
+        seed=0, sim_max_steps=10, blend=1.0,
+    )
+    job_semantic = SimRewardJob(
+        steer_h=np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        placement="image_patch", **base,
+    )
+    job_null = SimRewardJob(
+        steer_h=np.array([-0.1, 0.5, 0.7], dtype=np.float32),
+        placement="image_patch", **base,
+    )
+    job_wrong_place = SimRewardJob(
+        steer_h=np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        placement="last_text", **base,
+    )
+
+    results = worker.compute([job_semantic, job_null, job_wrong_place])
+    assert len(results) == 3
+    assert len(calls) == 3, f"each arm must invoke a fresh rollout, got {calls}"
+    # Three distinct r_sim values prove no in-memory cache short-circuit.
+    assert len({r.r_sim for r in results}) == 3
+
+
 def test_load_sim_cache_handles_missing_and_corrupt(tmp_path: Path):
     assert load_sim_cache(None) == {}
     assert load_sim_cache(tmp_path / "nonexistent.jsonl") == {}
