@@ -42,6 +42,46 @@ Do **not** conflate Axis 1 FVE/cosine with “explains what the robot sees.” S
 
 ---
 
+## Related work & how this repo differs
+
+Most VLA “interpretability” work falls into a few buckets. **nla-groot** sits in a different one—and its main contribution is not “we built a better explainer,” but **“here’s a protocol that catches when explainers lie.”**
+
+### What came before
+
+| Line of work | Typical question | Examples |
+|--------------|------------------|----------|
+| **Classical robotics** | What is the explicit model of motion/planning? | Kinematics, dynamics, planners—transparent by construction; VLAs trade this for generalization |
+| **VLA capability** | Does the policy work on tasks? | [RT-2](https://robotics-transformer2.github.io/), [OpenVLA](https://openvla.github.io/), [GR00T](https://developer.nvidia.com/isaac/gr00t), Octo—success metrics, not internal readouts |
+| **Probing / linear decoders** | Is property X decodable from layer L? | Alain & Bengio probes; recent cross-VLA studies on action decodability and injection |
+| **SAEs & found steering directions** | What sparse features exist, and can we activate them? | Anthropic SAE line; [Haon et al., CoRL 2025](https://vla-mech-interp.github.io/)—project FFN activations onto the vocab basis, find semantic directions (speed, direction), steer π0/OpenVLA **without retraining** |
+| **LLM activation steering** | Can we add a vector to change behavior? | RepE, activation addition (Turner, Zou)—assumes you already know which direction means what |
+| **NLA on LLMs** | Can activations be read/written as natural language? | [Fraser-Taliente et al., 2026](https://transformer-circuits.pub/2026/nla/index.html)—AV(`h`→text), AR(text→`ĥ`); validated mainly via reconstruction/retrieval |
+
+The closest **VLA-space** prior is Haon et al.: they **discover** sparse, vocab-aligned FFN directions and report **positive zero-shot steering** in LIBERO and on a real UR5. The closest **methodological** prior is NLA on LLMs: a full natural-language codec on activations.
+
+### What nla-groot adds
+
+**1. A different interface.** Haon et al. steer identified neurons/directions. We port the **NLA recipe** to GR00T layer-16 activations (`last_text`, `image_patch`, `anchor`): AV produces captions, AR reconstructs vectors, and AR(text) is injected as a live backbone steer. NL interfaces are seductive—captions *look* like explanations—so we ask whether they are actually grounded.
+
+**2. A different falsification test.** Prior work often stops at “we found a decodable direction” or “steering changed behavior.” We split the claim into three axes (see above):
+
+- **Axis 1 (codec)** — often treated as sufficient in the NLA line
+- **Axis 2 (grounding)** — do captions match **cached frames**? Probes don’t test pixel alignment of natural language
+- **Axis 3 (semantic steering)** — does **matched text beat wrong text** in sim (`Δ_cw > 0`)? “Behavior changed” ≠ “language was causal”
+
+**3. A negative result with tooling.** On our main LIBERO checkpoint, Axis 1 passes while Axes 2–3 fail: AV captions collapse to reusable templates, **`image_patch` retrieval margin ≈ chance** while pooled metrics look fine, and steering **dampens motion symmetrically** for both correct and wrong language. That complements Haon’s positive steering demos—one shows discovered directions can control robots; we show **trained NL autoencoders can look successful while not grounding vision or language causally**.
+
+**4. Confounds and stratification most papers under-discuss.** Gold labels come from a multimodal teacher that sees **frames + instruction**, not `h`—SFT optimizes `P(teacher text | h)`, not faithful “what h encodes.” We also stratify by **token role** because aggregate PASS hides vision-slot collapse on `image_patch`.
+
+### One-line positioning
+
+> **Haon et al. ask:** “What directions in the VLA mean something, and can we steer them?”  
+> **nla-groot asks:** “If we build a natural-language read/write interface on VLA activations, does it ground in vision and steer by semantics—or does the codec metric lie?”
+
+The repo ships both the **cautionary evaluation standard** (scorecard, judges, CF sim-steer holdout) and the **pipeline to try to fix what the negative result exposes** (SFT hardening, sim-GRPO, null controls).
+
+---
+
 ## Pipeline (high level)
 
 ```
