@@ -243,3 +243,93 @@ def test_wrong_placement_must_differ(tmp_path: Path) -> None:
     )
     assert res.returncode == 2, (res.stdout, res.stderr)
     assert "must differ" in res.stderr
+
+
+def test_language_swap_is_default(tmp_path: Path) -> None:
+    """``--eval-protocol`` defaults to ``language_swap`` (eval-v2)."""
+    sft = _make_sft(tmp_path / "sft")
+    grpo_av = _make_grpo_av(tmp_path / "grpo_av")
+    pairs = tmp_path / "pairs.jsonl"
+    _write_pairs(pairs, [_row("goal__traj000000_step000000")])
+    res = _run(
+        "--sft-dir", str(sft),
+        "--grpo-av-dir", str(grpo_av),
+        "--pairs-path", str(pairs),
+        "--activations-root", str(tmp_path / "acts"),
+        "--out-json", str(tmp_path / "out.json"),
+        "--n-samples", "1",
+        "--dry-run",
+        expect_rc=0,
+    )
+    assert "eval_protocol=language_swap" in res.stdout, res.stdout
+
+
+def test_legacy_eval_protocol_opt_in(tmp_path: Path) -> None:
+    """``--eval-protocol legacy`` is still selectable for regression sweeps."""
+    sft = _make_sft(tmp_path / "sft")
+    grpo_av = _make_grpo_av(tmp_path / "grpo_av")
+    pairs = tmp_path / "pairs.jsonl"
+    _write_pairs(pairs, [_row("goal__traj000000_step000000")])
+    res = _run(
+        "--sft-dir", str(sft),
+        "--grpo-av-dir", str(grpo_av),
+        "--pairs-path", str(pairs),
+        "--activations-root", str(tmp_path / "acts"),
+        "--out-json", str(tmp_path / "out.json"),
+        "--eval-protocol", "legacy",
+        "--n-samples", "1",
+        "--dry-run",
+        expect_rc=0,
+    )
+    assert "eval_protocol=legacy" in res.stdout, res.stdout
+
+
+def test_no_steer_arm_accepted(tmp_path: Path) -> None:
+    """``--causal-arms ...,no_steer`` is accepted (new arm)."""
+    sft = _make_sft(tmp_path / "sft")
+    grpo_av = _make_grpo_av(tmp_path / "grpo_av")
+    pairs = tmp_path / "pairs.jsonl"
+    _write_pairs(pairs, [_row("goal__traj000000_step000000")])
+    res = _run(
+        "--sft-dir", str(sft),
+        "--grpo-av-dir", str(grpo_av),
+        "--pairs-path", str(pairs),
+        "--activations-root", str(tmp_path / "acts"),
+        "--out-json", str(tmp_path / "out.json"),
+        "--causal-arms", "semantic,no_steer",
+        "--n-samples", "1",
+        "--dry-run",
+        expect_rc=0,
+    )
+    assert "no_steer" in res.stdout, res.stdout
+
+
+def test_reuse_sft_from_flag_parses(tmp_path: Path) -> None:
+    """--reuse-sft-from is accepted; dry-run exits before cache is loaded."""
+    sft = _make_sft(tmp_path / "sft")
+    grpo_av = _make_grpo_av(tmp_path / "grpo_av")
+    pairs = tmp_path / "pairs.jsonl"
+    _write_pairs(pairs, [_row(f"goal__traj{i:06d}_step{i:06d}") for i in range(3)])
+    sft_cache = tmp_path / "sft_cache.json"
+    sft_cache.write_text(json.dumps({
+        "version": 1,
+        "sim_config": {
+            "sim_max_steps": 100,
+            "sim_placement": "image_patch",
+            "sim_blend": 1.0,
+        },
+        "samples": [],
+    }))
+    res = _run(
+        "--sft-dir", str(sft),
+        "--grpo-av-dir", str(grpo_av),
+        "--pairs-path", str(pairs),
+        "--activations-root", str(tmp_path / "acts"),
+        "--out-json", str(tmp_path / "out.json"),
+        "--reuse-sft-from", str(sft_cache),
+        "--write-sft-cache", str(tmp_path / "new_cache.json"),
+        "--n-samples", "3",
+        "--dry-run",
+        expect_rc=0,
+    )
+    assert "CF steer compare: 3 samples" in res.stdout

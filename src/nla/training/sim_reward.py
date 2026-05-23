@@ -70,12 +70,16 @@ def sim_cache_key(
     sim_max_steps: int,
     placement: str = "image_patch",
     steer_h_fp: str = "novec",
+    policy_language_override: str | None = None,
+    steer_disabled: bool = False,
+    w_predicate: float | None = None,
 ) -> str:
-    """Stable cache key for one (job, vector, placement) triple.
+    """Stable cache key for one (job, vector, placement, lang, disabled) tuple.
 
-    ``placement`` and ``steer_h_fp`` were added so causal-arm sweeps don't
-    collide on the in-memory cache: any change to the steer vector contents
-    or where it is injected must produce a fresh key.
+    Eval-v2 (``language_swap`` / ``no_steer``) varies the policy language
+    and the disabled flag while sharing the other fields, so those must
+    flow into the key too or the in-memory cache silently returns a stale
+    arm's rollout. Default args keep legacy callers byte-identical.
     """
     h = hashlib.sha1()
     h.update(env_name.encode("utf-8"))
@@ -93,6 +97,17 @@ def sim_cache_key(
     h.update(str(placement).encode("utf-8"))
     h.update(b"\x00")
     h.update(str(steer_h_fp).encode("utf-8"))
+    if policy_language_override is not None or steer_disabled:
+        # Only mix the v2 fields into the hash when one of them deviates
+        # from the legacy default, so cache files produced before this
+        # change are still read back with the same key.
+        h.update(b"\x00")
+        h.update(("lang=" + (policy_language_override or "")).encode("utf-8"))
+        h.update(b"\x00")
+        h.update(("noop=" + ("1" if steer_disabled else "0")).encode("utf-8"))
+    if w_predicate is not None:
+        h.update(b"\x00")
+        h.update(("wpred=" + f"{float(w_predicate):.6g}").encode("utf-8"))
     return h.hexdigest()
 
 
@@ -126,7 +141,16 @@ def load_sim_cache(path: str | Path | None) -> dict[str, dict]:
 
 @dataclass(frozen=True)
 class SimRewardJob:
-    """One unit of sim-side work."""
+    """One unit of sim-side work.
+
+    Optional eval-v2 fields (default ``None`` / ``False`` for byte-compat
+    with legacy callers):
+
+    - ``policy_language_override``: override the policy obs language slot
+      with this string every step (language_swap protocol).
+    - ``steer_disabled``: tell the NlaSteerGr00tPolicy wrapper to skip the
+      steer hook entirely (no_steer causal arm).
+    """
 
     env_name: str
     target_task: str
@@ -137,6 +161,12 @@ class SimRewardJob:
     sim_max_steps: int
     placement: str
     blend: float
+    policy_language_override: str | None = None
+    steer_disabled: bool = False
+    # Override ``DEFAULT_SHAPING.w_predicate`` (2.0) inside the rollout
+    # subprocess's :func:`predicates.score` call. ``None`` preserves the
+    # legacy code default so pre-2026-05 cache files keep matching keys.
+    w_predicate: float | None = None
 
 
 @dataclass(frozen=True)
@@ -188,6 +218,12 @@ def _run_rollout_subprocess(
         "--no-frames",
         "--early-stop-on-success",
     ]
+    if job.policy_language_override:
+        cmd.extend(["--policy-language-override", str(job.policy_language_override)])
+    if job.steer_disabled:
+        cmd.append("--steer-disabled")
+    if job.w_predicate is not None:
+        cmd.extend(["--w-predicate", f"{float(job.w_predicate):.6g}"])
     env = os.environ.copy()
     # Default to CPU rendering; LIBERO+osmesa works without a GPU display
     # and matches the steerability harness defaults.
@@ -231,7 +267,7 @@ def _run_batched_rollout_subprocess(
     workdir.mkdir(parents=True, exist_ok=True)
     payload = []
     for job in jobs:
-        payload.append({
+        item = {
             "env_name": job.env_name,
             "target_task": job.target_task,
             "source_id": job.source_id,
@@ -240,7 +276,14 @@ def _run_batched_rollout_subprocess(
             "placement": job.placement,
             "blend": float(job.blend),
             "sim_max_steps": int(job.sim_max_steps),
-        })
+        }
+        if job.policy_language_override:
+            item["policy_language_override"] = str(job.policy_language_override)
+        if job.steer_disabled:
+            item["steer_disabled"] = True
+        if job.w_predicate is not None:
+            item["w_predicate"] = float(job.w_predicate)
+        payload.append(item)
     jobs_path = workdir / "jobs.json"
     jobs_path.write_text(json.dumps(payload))
 
@@ -398,6 +441,9 @@ class SimRewardWorker:
                 job.text, job.seed, job.sim_max_steps,
                 placement=job.placement,
                 steer_h_fp=_steer_h_fingerprint(job.steer_h),
+                policy_language_override=job.policy_language_override,
+                steer_disabled=job.steer_disabled,
+                w_predicate=job.w_predicate,
             )
 
         # Resolve cache hits up front.
@@ -464,6 +510,12 @@ class SimRewardWorker:
                 "seed": job.seed,
                 "sim_max_steps": job.sim_max_steps,
             }
+            if job.policy_language_override is not None:
+                entry["policy_language_override"] = str(job.policy_language_override)
+            if job.steer_disabled:
+                entry["steer_disabled"] = True
+            if job.w_predicate is not None:
+                entry["w_predicate"] = float(job.w_predicate)
             self._append_cache(entry)
             return i, res
 
@@ -599,8 +651,19 @@ def assemble_jobs(
     sim_max_steps: int,
     placement: str,
     blend: float,
+    policy_language_overrides: Sequence[str | None] | None = None,
+    steer_disabled: bool | Sequence[bool] = False,
+    w_predicate: float | None = None,
 ) -> list[SimRewardJob]:
-    """Zip the per-row inputs into a list of :class:`SimRewardJob`s."""
+    """Zip the per-row inputs into a list of :class:`SimRewardJob`s.
+
+    ``policy_language_overrides`` / ``steer_disabled`` are optional per-row
+    eval-v2 fields. ``steer_disabled`` accepts either a single bool (applied
+    to every row) or a per-row sequence. ``w_predicate`` is broadcast to
+    every job (single float) since all rows in one GRPO group share the
+    same shaping weights. Default ``None`` / ``False`` preserves the
+    legacy behaviour.
+    """
     steer_np = steer_vecs.float().cpu().contiguous().numpy()
     seeds = list(seeds)
     n = len(rollout_texts)
@@ -608,6 +671,18 @@ def assemble_jobs(
         f"length mismatch: texts={n} steer={steer_np.shape[0]} tasks={len(target_tasks)} "
         f"envs={len(target_env_names)} ids={len(source_ids)} seeds={len(seeds)}"
     )
+    if policy_language_overrides is not None and len(policy_language_overrides) != n:
+        raise AssertionError(
+            f"policy_language_overrides length {len(policy_language_overrides)} != {n}"
+        )
+    if isinstance(steer_disabled, bool):
+        steer_disabled_seq = [steer_disabled] * n
+    else:
+        steer_disabled_seq = list(steer_disabled)
+        if len(steer_disabled_seq) != n:
+            raise AssertionError(
+                f"steer_disabled length {len(steer_disabled_seq)} != {n}"
+            )
     jobs: list[SimRewardJob] = []
     for i in range(n):
         jobs.append(SimRewardJob(
@@ -620,5 +695,10 @@ def assemble_jobs(
             sim_max_steps=int(sim_max_steps),
             placement=placement,
             blend=blend,
+            policy_language_override=(
+                policy_language_overrides[i] if policy_language_overrides else None
+            ),
+            steer_disabled=bool(steer_disabled_seq[i]),
+            w_predicate=w_predicate,
         ))
     return jobs

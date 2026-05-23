@@ -49,6 +49,42 @@ def test_sim_cache_key_is_stable_and_collision_free():
     assert sim_cache_key("env_A", "task_A", "src_1", "text one", 0, 200) != k1
 
 
+def test_sim_cache_key_includes_language_swap_and_steer_disabled_fields():
+    """Regression: eval-v2 adds two new per-job knobs
+    (``policy_language_override`` for the language_swap arm and
+    ``steer_disabled`` for the no_steer arm) that share the
+    (env, task, source, text, seed, steps, placement, steer_h) tuple
+    with the matched arm. The cache key must flip when either is set,
+    or compute() returns the matched arm's rollout for the new arms.
+    """
+    base_args = ("env_A", "task_A", "src_1", "text one", 0, 100)
+    k_default = sim_cache_key(*base_args)
+    k_lang = sim_cache_key(*base_args, policy_language_override="put the wine bottle")
+    k_disabled = sim_cache_key(*base_args, steer_disabled=True)
+    k_both = sim_cache_key(
+        *base_args,
+        policy_language_override="put the wine bottle",
+        steer_disabled=True,
+    )
+    k_wpred = sim_cache_key(*base_args, w_predicate=1.0)
+    assert len({k_default, k_lang, k_disabled, k_both, k_wpred}) == 5
+
+
+def test_sim_cache_key_legacy_defaults_byte_identical():
+    """The default eval-v2 args must hash to the same key the legacy
+    (pre-2026-05) callers produced. This keeps GRPO sim caches written
+    before the language_swap fields existed readable by the new code.
+    """
+    legacy = sim_cache_key("env_A", "task_A", "src_1", "text one", 0, 100)
+    v2_defaults = sim_cache_key(
+        "env_A", "task_A", "src_1", "text one", 0, 100,
+        policy_language_override=None,
+        steer_disabled=False,
+        w_predicate=None,
+    )
+    assert legacy == v2_defaults
+
+
 def test_sim_cache_key_includes_placement_and_steer_fingerprint():
     """Regression: causal-arm sweeps (semantic / matched_null / wrong_placement)
     share the (env, task, source, text, seed, steps) tuple but vary the steer

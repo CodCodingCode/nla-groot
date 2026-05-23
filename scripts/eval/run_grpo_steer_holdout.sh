@@ -19,7 +19,25 @@
 #   NARRATIVE (publishable | audit), PAIRS_PRIMARY, PAIRS_EXTRA (space-sep),
 #   SIM_BATCH_SIZE (default 4: rollouts per batched subprocess; set to 1 to
 #                   replay the legacy one-rollout-per-process behavior),
-#   SIM_N_WORKERS (default auto: 1 when batched, else min(4, total_jobs))
+#   SIM_N_WORKERS (default auto: 1 when batched, else min(4, total_jobs)),
+#   REUSE_SFT_FROM (path to prior compare JSON or SFT cache; skips SFT sim),
+#   WRITE_SFT_CACHE (path to write slim SFT-only cache for reuse).
+#
+# Two-tier presets (set EVAL_TIER to override the defaults above):
+#   EVAL_TIER=screen      → N_SAMPLES=32, matched/semantic arms only
+#                           (~30-45 min after batching refactor; go/no-go).
+#   EVAL_TIER=publishable → full defaults (N_SAMPLES=64, all arms +
+#                           no_steer, ~4h).
+#
+# Eval protocol (default: language_swap, eval-v2 honest semantic_gap):
+#   EVAL_PROTOCOL=language_swap → override the policy obs language per
+#                                 intent arm so matched/mismatched_source
+#                                 actually differ in the policy's language
+#                                 channel (recommended default).
+#   EVAL_PROTOCOL=legacy        → keep the env's BDDL task_description
+#                                 (reproduces pre-2026-05 numbers, but
+#                                 semantic_gap is structurally zero).
+# See docs/evals/sim_steer_rollout.md and scripts/eval/eval_protocol.md.
 
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -30,7 +48,6 @@ SFT_DIR="${SFT_DIR:-data/sft/libero_4suite_v5_base_qwen}"
 GRPO_AV_DIR="${GRPO_AV_DIR:-data/grpo/libero_4suite_v5_sim_grpo_v2_pilot/av}"
 ACT_ROOT="${ACT_ROOT:-data/activations/libero_4suite_v4_combined}"
 STEER_PORT="${STEER_PORT:-5556}"
-N_SAMPLES="${N_SAMPLES:-64}"
 OUT_DIR="${OUT_DIR:-data/eval/grpo_steer_holdout}"
 NARRATIVE="${NARRATIVE:-publishable}"
 PAIRS_PRIMARY="${PAIRS_PRIMARY:-data/grpo/libero_goal_counterfactual_pairs.jsonl}"
@@ -39,11 +56,33 @@ PYTHON="${PYTHON_BIN:-.venv/bin/python}"
 LIBERO_PY="${LIBERO_PY:-third_party/Isaac-GR00T/gr00t/eval/sim/LIBERO/libero_uv/.venv/bin/python}"
 HELD_OUT_FRACTION="${HELD_OUT_FRACTION:-0.05}"
 SEED="${SEED:-0}"
-INTENT_ARMS="${INTENT_ARMS:-matched,mismatched_source}"
-CAUSAL_ARMS="${CAUSAL_ARMS:-semantic,matched_null,wrong_placement}"
 SLICE="${SLICE:-all}"
 SIM_BATCH_SIZE="${SIM_BATCH_SIZE:-4}"
 SIM_N_WORKERS="${SIM_N_WORKERS:-}"  # empty = auto in compare
+REUSE_SFT_FROM="${REUSE_SFT_FROM:-}"
+WRITE_SFT_CACHE="${WRITE_SFT_CACHE:-}"
+EVAL_TIER="${EVAL_TIER:-publishable}"
+EVAL_PROTOCOL="${EVAL_PROTOCOL:-language_swap}"
+
+# Two-tier presets. Explicit N_SAMPLES / INTENT_ARMS / CAUSAL_ARMS env vars
+# still override (set after the preset so the user wins).
+case "$EVAL_TIER" in
+  screen)
+    : "${N_SAMPLES:=32}"
+    : "${INTENT_ARMS:=matched}"
+    : "${CAUSAL_ARMS:=semantic,no_steer}"
+    ;;
+  publishable)
+    : "${N_SAMPLES:=64}"
+    : "${INTENT_ARMS:=matched,mismatched_source}"
+    : "${CAUSAL_ARMS:=semantic,no_steer,matched_null,wrong_placement}"
+    ;;
+  *)
+    echo "[holdout-eval] FATAL: unknown EVAL_TIER=${EVAL_TIER} (expected screen|publishable)" >&2
+    exit 2
+    ;;
+esac
+echo "[holdout-eval] EVAL_TIER=${EVAL_TIER} EVAL_PROTOCOL=${EVAL_PROTOCOL} N_SAMPLES=${N_SAMPLES} INTENT=${INTENT_ARMS} CAUSAL=${CAUSAL_ARMS}"
 
 mkdir -p "$OUT_DIR"
 
@@ -75,6 +114,13 @@ COMPARE_EXTRA=()
 if [[ -n "$SIM_N_WORKERS" ]]; then
   COMPARE_EXTRA+=(--sim-n-workers "$SIM_N_WORKERS")
 fi
+if [[ -n "$REUSE_SFT_FROM" ]]; then
+  COMPARE_EXTRA+=(--reuse-sft-from "$REUSE_SFT_FROM")
+  echo "[holdout-eval] reusing SFT arm results from $REUSE_SFT_FROM"
+fi
+if [[ -n "$WRITE_SFT_CACHE" ]]; then
+  COMPARE_EXTRA+=(--write-sft-cache "$WRITE_SFT_CACHE")
+fi
 "$PYTHON" scripts/eval/compare_cf_steer_checkpoints.py \
   --sft-dir "$SFT_DIR" \
   --grpo-av-dir "$GRPO_AV_DIR" \
@@ -89,6 +135,7 @@ fi
   --conditions sft_av,grpo_av \
   --intent-arms "$INTENT_ARMS" \
   --causal-arms "$CAUSAL_ARMS" \
+  --eval-protocol "$EVAL_PROTOCOL" \
   --policy-port "$STEER_PORT" \
   --sim-rollout-python "$LIBERO_PY" \
   --sim-batch-size "$SIM_BATCH_SIZE" \

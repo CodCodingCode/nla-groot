@@ -90,7 +90,7 @@ def render_panel(obs: dict, success: bool, t: int) -> np.ndarray:
     return panel
 
 
-def _to_server_obs(obs: dict) -> dict:
+def _to_server_obs(obs: dict, *, policy_language_override: str | None = None) -> dict:
     """Pack the LIBERO env observation into the format the GR00T server expects.
 
     The NLA steer server (``scripts/eval/run_gr00t_server_nla_steer.py``)
@@ -112,6 +112,14 @@ def _to_server_obs(obs: dict) -> dict:
     requires for the (B, T) language slot. Other prefixes (``annotation``)
     are passed through into their own sub-dict so the wrapper is forward-
     compatible with future modality keys without code changes.
+
+    When ``policy_language_override`` is non-empty, every language slot the
+    server would receive is replaced with that string (still wrapped as the
+    required ``[[str]]`` (B=1, T=1) container). This is what the eval-v2
+    ``language_swap`` protocol uses to feed the policy the intent-arm text
+    instead of the loaded BDDL task; without it the matched and mismatched
+    intent arms share the same native language channel and the
+    ``semantic_gap_predicate`` metric is structurally zero.
     """
     out: dict[str, dict[str, Any]] = {}
     for k, v in obs.items():
@@ -152,6 +160,15 @@ def _to_server_obs(obs: dict) -> dict:
     # of them are empty (e.g. a vision-only model). Ensure they're present.
     for required in ("video", "state", "language"):
         out.setdefault(required, {})
+    if policy_language_override:
+        override = str(policy_language_override)
+        # Rewrite every (B=1, T=1) language slot that ``_to_server_obs``
+        # populated above. We touch only existing keys so the model's
+        # modality validator (which checks for the canonical
+        # ``annotation.human.action.task_description`` key) still sees a
+        # populated slot under whatever name the env uses.
+        for k in list(out["language"].keys()):
+            out["language"][k] = [[override]]
     return out
 
 
@@ -208,6 +225,7 @@ def run_one_rollout(
     early_stop_check_every: int = 1,
     capture_frames: bool = True,
     return_trajectory: bool = False,
+    policy_language_override: str | None = None,
 ) -> dict[str, Any]:
     """Run one LIBERO rollout against a (possibly NLA-steered) policy server.
 
@@ -215,7 +233,10 @@ def run_one_rollout(
 
     - ``options``: passed verbatim to every ``client.get_action(obs, options)``
       call. The NLA wrapper reads ``options["steer_h"]`` per request so a
-      single server can score many different (text, intent) pairs.
+      single server can score many different (text, intent) pairs. Set
+      ``options['steer_disabled'] = True`` to short-circuit the steer hook
+      for the no-steer causal arm (the wrapper falls back to the base
+      policy without applying ``steer_h``).
     - ``early_stop_on_predicate``: callable that takes the *partial*
       :class:`ObjectStateLogger.to_dict()` trajectory and returns True to
       cut the rollout short. Used by the GRPO worker to abort as soon as
@@ -224,6 +245,11 @@ def run_one_rollout(
       of every ``N`` sim steps; checks are cheap (numpy) but not free.
     - ``capture_frames`` / ``return_trajectory``: turn off MP4/parquet
       writes when used as a reward function (we only care about the score).
+    - ``policy_language_override``: when set, every observation sent to the
+      policy has its ``language.*`` slots overwritten with this string.
+      Used by the eval-v2 ``language_swap`` protocol to feed the policy
+      the intent-arm text instead of the loaded BDDL task; the underlying
+      sim still loads the target scene unchanged.
     """
     from gr00t.policy.server_client import PolicyClient
     from nla.eval.steerability.object_logger import ObjectStateLogger, episode_summary
@@ -243,7 +269,10 @@ def run_one_rollout(
 
     early_stopped = False
     while t < max_episode_steps:
-        action_chunk, _ = client.get_action(_to_server_obs(obs), options=options)
+        action_chunk, _ = client.get_action(
+            _to_server_obs(obs, policy_language_override=policy_language_override),
+            options=options,
+        )
         sub_actions = _unpack_action_chunk(action_chunk, n_action_steps=n_action_steps)
         if not sub_actions:
             break
@@ -345,6 +374,27 @@ def _cli() -> None:
         "--no-frames", action="store_true",
         help="Skip MP4 frame capture (saves ~30% wall time on long rollouts).",
     )
+    parser.add_argument(
+        "--policy-language-override", default=None,
+        help="Replace the policy obs language slot with this string on every "
+             "step (eval-v2 language_swap protocol). When omitted the env's "
+             "native BDDL task_description is forwarded unchanged.",
+    )
+    parser.add_argument(
+        "--steer-disabled", action="store_true",
+        help="Send options['steer_disabled']=True every step. The "
+             "NlaSteerGr00tPolicy wrapper short-circuits to the base policy "
+             "without applying steer_h (no-steer causal arm).",
+    )
+    parser.add_argument(
+        "--w-predicate", type=float, default=None,
+        help="Override the predicate term weight inside the sim shaping "
+             "score (DEFAULT_SHAPING.w_predicate=2.0 in "
+             "nla.eval.steerability.predicates). Only consulted when "
+             "--target-task is set. Lower values (e.g. 1.0) densify the "
+             "shaping terms relative to the binary predicate, useful for "
+             "GRPO contrastive runs that want more within-group variance.",
+    )
     args = parser.parse_args()
 
     # Resolve tracked-bodies from the target task spec when omitted.
@@ -370,6 +420,14 @@ def _cli() -> None:
             if args.steer_blend is not None:
                 spec_dict["blend"] = float(args.steer_blend)
             options["steer_spec"] = spec_dict
+    if args.steer_disabled:
+        # Wins over steer_h: the wrapper reads steer_disabled first and
+        # falls through to the base policy. The vector is harmless extra
+        # bytes on the wire but we leave it so the calling job code can
+        # still verify the artifact exists for the no_steer arm.
+        if options is None:
+            options = {}
+        options["steer_disabled"] = True
 
     early_stop_cb = None
     if args.early_stop_on_success and target_task:
@@ -396,13 +454,29 @@ def _cli() -> None:
         early_stop_on_predicate=early_stop_cb,
         capture_frames=not args.no_frames,
         return_trajectory=bool(target_task),
+        policy_language_override=args.policy_language_override,
     )
 
     if target_task:
-        from nla.eval.steerability.predicates import score as predicate_score
+        from nla.eval.steerability.predicates import (
+            DEFAULT_SHAPING,
+            ShapingWeights,
+            score as predicate_score,
+        )
         traj = summary.pop("_trajectory", None)
         if traj is not None:
-            score_breakdown = predicate_score(traj, target_task)
+            weights = None
+            if args.w_predicate is not None:
+                weights = ShapingWeights(
+                    w_predicate=float(args.w_predicate),
+                    w_dist=DEFAULT_SHAPING.w_dist,
+                    w_displace=DEFAULT_SHAPING.w_displace,
+                    w_contact=DEFAULT_SHAPING.w_contact,
+                    d_max=DEFAULT_SHAPING.d_max,
+                    disp_max=DEFAULT_SHAPING.disp_max,
+                    contact_near_m=DEFAULT_SHAPING.contact_near_m,
+                )
+            score_breakdown = predicate_score(traj, target_task, weights=weights)
             summary["r_sim"] = score_breakdown["r"]
             summary["sim_score_breakdown"] = score_breakdown
         else:

@@ -40,6 +40,8 @@ class _RolloutSlot:
     done: bool = False
     early_stopped: bool = False
     options: dict[str, Any] | None = None
+    policy_language_override: str | None = None
+    w_predicate: float | None = None
 
 
 def run_batched_rollouts(
@@ -84,6 +86,11 @@ def run_batched_rollouts(
                 "blend": float(job.get("blend", 1.0)),
             },
         }
+        if job.get("steer_disabled"):
+            options["steer_disabled"] = True
+        lang_override = job.get("policy_language_override") or None
+        w_pred_raw = job.get("w_predicate")
+        w_pred = float(w_pred_raw) if w_pred_raw is not None else None
         slots.append(
             _RolloutSlot(
                 env_name=job["env_name"],
@@ -94,9 +101,11 @@ def run_batched_rollouts(
                 placement=job.get("placement", "image_patch"),
                 blend=float(job.get("blend", 1.0)),
                 env=env,
-                client_obs=_to_server_obs(obs),
+                client_obs=_to_server_obs(obs, policy_language_override=lang_override),
                 logger=logger,
                 options=options,
+                policy_language_override=lang_override,
+                w_predicate=w_pred,
             )
         )
 
@@ -147,7 +156,9 @@ def run_batched_rollouts(
                 obs, reward, done, truncated, info = slot.env.step(sub_action)
                 slot.logger.log_step(reward=reward, info=info)
                 slot.t += 1
-                slot.client_obs = _to_server_obs(obs)
+                slot.client_obs = _to_server_obs(
+                    obs, policy_language_override=slot.policy_language_override,
+                )
                 if slot.t >= max_episode_steps:
                     slot.done = True
                     break
@@ -176,8 +187,23 @@ def run_batched_rollouts(
             "max_episode_steps": max_episode_steps,
             "early_stopped": bool(slot.early_stopped),
         })
-        from nla.eval.steerability.predicates import score as predicate_score
-        score_breakdown = predicate_score(traj, slot.target_task)
+        from nla.eval.steerability.predicates import (
+            DEFAULT_SHAPING,
+            ShapingWeights,
+            score as predicate_score,
+        )
+        weights = None
+        if slot.w_predicate is not None:
+            weights = ShapingWeights(
+                w_predicate=float(slot.w_predicate),
+                w_dist=DEFAULT_SHAPING.w_dist,
+                w_displace=DEFAULT_SHAPING.w_displace,
+                w_contact=DEFAULT_SHAPING.w_contact,
+                d_max=DEFAULT_SHAPING.d_max,
+                disp_max=DEFAULT_SHAPING.disp_max,
+                contact_near_m=DEFAULT_SHAPING.contact_near_m,
+            )
+        score_breakdown = predicate_score(traj, slot.target_task, weights=weights)
         summary["r_sim"] = score_breakdown["r"]
         summary["sim_score_breakdown"] = score_breakdown
         summary["n_steps"] = slot.t

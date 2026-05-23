@@ -156,6 +156,62 @@ Script target: wire `scripts/eval/steerability_eval.py` (or existing orchestrato
 - [ ] CF manifest + audits: `build_grpo_cf_manifest.py`, `audit_cf_pairs_sim_feasibility.py`
 - [ ] Implement **sim shaping CLI** (Pillar A)
 - [ ] `pytest tests/test_grpo_sim_reward.py tests/test_predicates.py -q`
+- [ ] **SFT prereqs for the V2 pilot** — see [§4a SFT prerequisites](#4a-sft-prerequisites-for-the-v2-pilot)
+
+### 4a. SFT prerequisites for the V2 pilot
+
+The V2 pilot launcher
+(`scripts/training/launch_v5_sim_grpo_v2_pilot.sh`) is configured to
+reward the **gap** between matched and mismatched intent arms under the
+new `language_swap` protocol (`scripts/eval/eval_protocol.md`).
+That reward signal is much weaker when the SFT base has collapsed onto
+a few template captions, so the V2 pilot should be initialized from an
+SFT checkpoint that has already been refreshed with the two data-side
+fixes below before any long GRPO run.
+
+1. **Hard negatives for the AR contrastive loss.** Re-mine the
+   `topk_cosine` index from the freshest extraction shard with
+   `scripts/training/mine_hard_negatives.py`, then point `run_sft.py
+   --ar-nce-hard-negative-source topk_cosine --ar-nce-hard-negative-index-path ...`
+   at it. This restores the negative spread the AR uses to discriminate
+   intents and is a prerequisite for the contrastive sim reward
+   (`--sim-contrastive-weight`) to find any gap on the policy side.
+
+2. **Quality-weighted SFT.** Grade a stratified sample with
+   `scripts/eval/llm_judge_av_captions.py`, then run
+
+   ```bash
+   PYTHONPATH=src .venv/bin/python scripts/training/build_quality_weights.py \
+     --labels-jsonl data/labels/libero_4suite_v5_combined/labels.jsonl \
+     --judge-jsonl  data/labels/libero_4suite_v5_combined/judge.jsonl \
+     --output-jsonl data/labels/libero_4suite_v5_combined/labels_weighted.jsonl
+   ```
+
+   to emit a patched labels JSONL with per-row `quality_weight` and
+   `quality_axes`. The script joins judge verdicts to labels on
+   `(source_example_id, position_index, position_type)` (the same
+   composite key `llm_judge_av_captions.py` already uses), and falls
+   back to the per-`position_type` mean for ungraded rows. Then SFT
+   with:
+
+   ```bash
+   PYTHONPATH=src .venv/bin/python scripts/training/run_sft.py \
+     --labels-jsonl data/labels/libero_4suite_v5_combined/labels_weighted.jsonl \
+     --use-quality-weights \
+     ...
+   ```
+
+   The dataset loader (`nla.training.dataset._extract_quality_weight`)
+   already reads `quality_weight` / `quality_axes` from each label row,
+   so no SFT code changes are required — the prerequisite is purely
+   that the labels carry the field, which `build_quality_weights.py`
+   guarantees.
+
+After (1) + (2), launch the V2 pilot with
+`scripts/training/launch_v5_sim_grpo_v2_pilot.sh`; the new defaults
+(`sim_blend=0.4`, `judge=0.25`, `sim_contrastive_weight=0.5`,
+`sim_null_control_weight=0.25`, `sim_eval_protocol=language_swap`)
+turn the gap-first eval into the train objective.
 
 ### Phase 1 — V2 smoke (30 min wall)
 

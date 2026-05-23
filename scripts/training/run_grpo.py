@@ -100,6 +100,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save-every", type=int, default=100)
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--eval-max-examples", type=int, default=64)
+    p.add_argument("--save-step-snapshots", action="store_true",
+                   help="In addition to overwriting av/ each save, also "
+                        "snapshot to av_steps/step_{N}/ (and ar_steps/...). "
+                        "Enables multi-checkpoint sweeps in "
+                        "compare_cf_steer_checkpoints.py without re-training.")
 
     p.add_argument("--gradient-checkpointing", action="store_true")
     p.add_argument("--held-out-fraction", type=float, default=0.05)
@@ -252,6 +257,45 @@ def _build_parser() -> argparse.ArgumentParser:
                         "task. Pass this to fall back to the descriptive prompt "
                         "for ablations.")
 
+    # Eval-v2 train-side knobs (mirror the compare-script ``--eval-protocol``
+    # flag and add contrastive sim rewards). All default to OFF / legacy so a
+    # baseline run's saved config.json is byte-identical to pre-2026-05.
+    p.add_argument("--sim-eval-protocol",
+                   default="legacy",
+                   choices=["legacy", "language_swap"],
+                   help="``language_swap``: override the policy obs language "
+                        "with each row's target_intent during the matched "
+                        "sim rollout (train-side parity with the holdout "
+                        "compare script's eval-v2 default). ``legacy`` "
+                        "(default) keeps the env's BDDL task_description "
+                        "for byte-identical pre-2026-05 behaviour.")
+    p.add_argument("--sim-contrastive-weight", type=float, default=0.0,
+                   help="When > 0, run a second sim rollout per row with "
+                        "policy_language_override=source_intent (same AV "
+                        "text, same AR steer_h) and add "
+                        "``w * (pred_matched - pred_mismatched)`` to "
+                        "r_sim before the blend. Doubles sim cost; gates "
+                        "the train-side analog of semantic_gap_predicate. "
+                        "Pilot default is 0.5 in the V2-eval-v2 launcher "
+                        "but the CLI default stays 0 so legacy runs are "
+                        "byte-identical.")
+    p.add_argument("--sim-null-control-weight", type=float, default=0.0,
+                   help="When > 0, run a sim rollout per row with the "
+                        "matched AV text + language but a norm-matched "
+                        "Gaussian replacing the steer vector, and add "
+                        "``w * (pred_matched - pred_null)`` to r_sim "
+                        "(train analog of causal_specificity_predicate). "
+                        "Triples sim cost when paired with --sim-"
+                        "contrastive-weight. Pilot default 0.25; CLI "
+                        "default 0 for byte-identical legacy runs.")
+    p.add_argument("--sim-w-predicate", type=float, default=2.0,
+                   help="Predicate-term weight inside the sim shaping "
+                        "score (see nla.eval.steerability.predicates."
+                        "ShapingWeights). Default 2.0 = legacy / byte-"
+                        "identical. Lower this (e.g. 1.0) to densify the "
+                        "sim reward and give GRPO groups more within-"
+                        "group variance.")
+
     # ---- SimpleVLA-RL-inspired knobs (off / auto by default) -----------
     p.add_argument(
         "--dynamic-sampling", dest="dynamic_sampling",
@@ -378,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
         save_every=args.save_every,
         log_every=args.log_every,
         eval_max_examples=args.eval_max_examples,
+        save_step_snapshots=args.save_step_snapshots,
         gradient_checkpointing=args.gradient_checkpointing,
         held_out_fraction=args.held_out_fraction,
         position_mix=position_mix,
@@ -410,6 +455,10 @@ def main(argv: list[str] | None = None) -> int:
         sim_timeout_s=args.sim_timeout_s,
         sim_seed_base=args.sim_seed_base,
         use_intent_conditioned_prompt=not args.no_intent_conditioned_prompt,
+        sim_eval_protocol=args.sim_eval_protocol,
+        sim_contrastive_weight=args.sim_contrastive_weight,
+        sim_null_control_weight=args.sim_null_control_weight,
+        sim_w_predicate=args.sim_w_predicate,
         dynamic_sampling=args.dynamic_sampling,
         dynamic_sampling_threshold=args.dynamic_sampling_threshold,
         use_ppo_clip=args.use_ppo_clip,

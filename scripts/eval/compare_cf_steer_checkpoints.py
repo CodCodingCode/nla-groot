@@ -87,12 +87,42 @@ def _build_parser() -> argparse.ArgumentParser:
                         "vector: semantic (real ĥ at trained placement), "
                         "matched_null (Gaussian draw rescaled to ||ĥ||), "
                         "wrong_placement (real ĥ at --wrong-placement instead "
-                        "of --sim-placement). Default 'semantic' = legacy.")
+                        "of --sim-placement), no_steer (no steer hook at all "
+                        "-- options['steer_disabled']=True so the policy "
+                        "behaves like an unsteered baseline). The "
+                        "matched/no_steer pair gives the publishable "
+                        "``steer_lift_predicate`` metric (semantic - "
+                        "no_steer). Default 'semantic' = legacy.")
     p.add_argument("--wrong-placement", default="last_text",
                    help="Placement used by the wrong_placement causal arm "
                         "(default last_text). Must differ from --sim-placement.")
+    p.add_argument("--eval-protocol", default="language_swap",
+                   choices=["legacy", "language_swap"],
+                   help="``language_swap`` (default, eval-v2): override the "
+                        "policy obs language slot with the intent-arm text "
+                        "per arm (matched=target_intent, mismatched_source="
+                        "source_intent). The simulator still loads the "
+                        "target BDDL scene; only the policy's language "
+                        "channel changes per arm. Required for honest "
+                        "semantic_gap measurement -- legacy auto-fed the "
+                        "target BDDL task to both arms so matched and "
+                        "mismatched_source were structurally identical. "
+                        "``legacy``: keep the env's native BDDL "
+                        "task_description (matches pre-2026-05 behaviour).")
     p.add_argument("--reuse-pairs-json", default=None,
                    help="Use sample list from a prior compare JSON (same rows).")
+    p.add_argument("--reuse-sft-from", default=None,
+                   help="Path to a prior compare JSON (or SFT cache JSON "
+                        "written by --write-sft-cache). For each "
+                        "source_example_id, all sft_av* condition results "
+                        "are reused instead of re-run. Useful when sweeping "
+                        "multiple GRPO checkpoints against a fixed SFT "
+                        "baseline. Ignored in --video-dir mode.")
+    p.add_argument("--write-sft-cache", default=None,
+                   help="If set, after the run, write a JSON containing only "
+                        "the sft_av* condition results — usable as "
+                        "--reuse-sft-from input for subsequent GRPO-"
+                        "checkpoint comparisons.")
     p.add_argument("--only-source-id", default=None,
                    help="Run only this activation id (e.g. the predicate hit).")
     p.add_argument("--sim-timeout-s", type=float, default=300.0)
@@ -150,6 +180,10 @@ def _run_rollout_video(
         "--fps", "20",
         "--steps-per-render", "1",
     ]
+    if getattr(job, "policy_language_override", None):
+        cmd.extend(["--policy-language-override", str(job.policy_language_override)])
+    if getattr(job, "steer_disabled", False):
+        cmd.append("--steer-disabled")
     for b in bodies:
         cmd.extend(["--tracked-bodies", b])
 
@@ -239,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
     causal_arms = [a.strip() for a in args.causal_arms.split(",") if a.strip()]
-    _VALID_CAUSAL_ARMS = {"semantic", "matched_null", "wrong_placement"}
+    _VALID_CAUSAL_ARMS = {"semantic", "matched_null", "wrong_placement", "no_steer"}
     for arm in causal_arms:
         if arm not in _VALID_CAUSAL_ARMS:
             print(
@@ -255,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    eval_protocol = args.eval_protocol
 
     for label, p in [
         ("sft-dir", sft_dir),
@@ -339,7 +374,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FATAL: no pair for {args.only_source_id}", file=sys.stderr)
             return 2
 
-    print(f"CF steer compare: {len(samples)} samples")
+    print(
+        f"CF steer compare: {len(samples)} samples "
+        f"(eval_protocol={eval_protocol}, intent_arms={intent_arms}, "
+        f"causal_arms={causal_arms})"
+    )
     for i, row in enumerate(samples):
         print(f"  [{i}] {row['source_example_id']} -> {row['target_task']}")
     if args.dry_run:
@@ -369,17 +408,20 @@ def main(argv: list[str] | None = None) -> int:
         causal_arm: str,
         trained_placement: str,
         wrong_placement: str,
-    ) -> tuple[torch.Tensor, str]:
-        """Return (steer_vec, placement) for a given causal arm.
+    ) -> tuple[torch.Tensor, str, bool]:
+        """Return (steer_vec, placement, steer_disabled) for a given causal arm.
 
         ``semantic``         keeps the AR(text) vector and trained placement.
         ``matched_null``     replaces the vector with a Gaussian rescaled to
                              the same L2 norm; placement stays trained.
         ``wrong_placement``  keeps the AR vector but moves it to a different
                              token role.
+        ``no_steer``         keeps the AR vector on the wire (only as a
+                             placeholder) but sets ``steer_disabled`` so the
+                             policy short-circuits to the base inference path.
         """
         if causal_arm == "semantic":
-            return steer_real, trained_placement
+            return steer_real, trained_placement, False
         if causal_arm == "matched_null":
             # Deterministic per (seed_base, sample_index) so re-runs are
             # reproducible. Re-norm to the trained-placement vector's L2.
@@ -389,9 +431,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 for b in range(steer_real.shape[0])
             ], dim=0)
-            return null.to(steer_real.device), trained_placement
+            return null.to(steer_real.device), trained_placement, False
         if causal_arm == "wrong_placement":
-            return steer_real, wrong_placement
+            return steer_real, wrong_placement, False
+        if causal_arm == "no_steer":
+            return steer_real, trained_placement, True
         raise ValueError(f"unknown causal arm: {causal_arm!r}")
 
     reader = ActivationShardReader(args.activations_root)
@@ -401,6 +445,43 @@ def main(argv: list[str] | None = None) -> int:
 
     cond_list = [c.strip() for c in args.conditions.split(",") if c.strip()]
     av_by_cond = {"sft_av": av_sft, "grpo_av": av_grpo}
+
+    # SFT-arm cache: speeds up multi-checkpoint GRPO sweeps by skipping the
+    # (identical) SFT sim rollouts. Compatible inputs are either a full prior
+    # compare JSON or the slim cache written by --write-sft-cache.
+    sft_cache: dict[str, dict] = {}
+    if args.reuse_sft_from and args.video_dir is None:
+        prev = json.loads(Path(args.reuse_sft_from).read_text())
+        prev_cfg = prev.get("config") or prev.get("sim_config") or {}
+        for key in ("sim_max_steps", "sim_placement", "sim_blend"):
+            ours = getattr(args, key)
+            theirs = prev_cfg.get(key)
+            if theirs is not None and theirs != ours:
+                print(
+                    f"[compare] WARN: --reuse-sft-from {key}={theirs!r} "
+                    f"differs from current {key}={ours!r}; SFT cache may "
+                    "not be apples-to-apples",
+                    file=sys.stderr,
+                )
+        for sample in prev.get("samples", []):
+            sid = sample.get("source_example_id")
+            if not sid:
+                continue
+            conds = sample.get("conditions", {}) or {}
+            sft_conds = {k: v for k, v in conds.items() if k.startswith("sft_av")}
+            if sft_conds:
+                sft_cache[sid] = sft_conds
+        print(
+            f"[compare] loaded SFT cache for {len(sft_cache)} samples "
+            f"from {args.reuse_sft_from}",
+            flush=True,
+        )
+    elif args.reuse_sft_from and args.video_dir is not None:
+        print(
+            "[compare] --reuse-sft-from ignored in --video-dir mode "
+            "(cached entries have no video_path)",
+            file=sys.stderr,
+        )
 
     worker = None
     if args.video_dir is None:
@@ -497,6 +578,27 @@ def main(argv: list[str] | None = None) -> int:
                 return si or None
             raise ValueError(f"unknown intent arm: {arm!r}")
 
+        # Map intent_arm -> the policy obs language override under the
+        # active eval protocol. ``legacy`` keeps the env's BDDL task
+        # description (no override); ``language_swap`` swaps in the
+        # intent-arm text so matched and mismatched_source actually
+        # differ in the policy's language channel. The simulator still
+        # loads the unchanged target BDDL scene either way.
+        def _policy_language_for_arm(arm: str, intent_text: str) -> str | None:
+            if eval_protocol == "legacy":
+                return None
+            if arm == "matched":
+                return intent_text
+            if arm == "mismatched_source":
+                return intent_text
+            raise ValueError(f"unknown intent arm: {arm!r}")
+
+        # ---- Plan stage: build jobs + metadata for every (cond, intent, causal)
+        # arm in this sample. Skipped/cached arms are written to the record
+        # directly; runnable arms are appended to pending_jobs/pending_meta for
+        # a single batched execute call below.
+        pending_jobs: list = []
+        pending_meta: list[dict] = []
         for cond_name in cond_list:
             av = av_by_cond.get(cond_name)
             if av is None:
@@ -524,6 +626,28 @@ def main(argv: list[str] | None = None) -> int:
                             flush=True,
                         )
                     continue
+
+                # If every causal arm for this (sft_av, intent_arm) tuple is
+                # in the cache, skip AV + sim entirely.
+                if cond_name == "sft_av" and sid in sft_cache:
+                    cached_arms = sft_cache[sid]
+                    record_keys_needed = [
+                        _make_record_key(cond_name, intent_arm, ca)
+                        for ca in causal_arms
+                    ]
+                    if all(rk in cached_arms for rk in record_keys_needed):
+                        for ca, rk in zip(causal_arms, record_keys_needed):
+                            c = dict(cached_arms[rk])
+                            c["cached_from_reuse"] = True
+                            record["conditions"][rk] = c
+                            print(
+                                f"  [{i}] {rk}: cached "
+                                f"pred={c.get('predicate', 0):.0f} "
+                                f"r_sim={c.get('r_sim', 0.0):.2f}",
+                                flush=True,
+                            )
+                        continue
+
                 with torch.no_grad():
                     out = av.generate(
                         h.unsqueeze(0).to(args.device),
@@ -539,17 +663,19 @@ def main(argv: list[str] | None = None) -> int:
                 # Shared LIBERO seed across all conditions and arms for a
                 # given sample so SFT vs GRPO see the same env RNG.
                 seed = args.seed + i * 17
+                policy_lang_override = _policy_language_for_arm(intent_arm, intent_text)
                 for causal_arm in causal_arms:
                     record_key = _make_record_key(cond_name, intent_arm, causal_arm)
-                    steer_vec_for_arm, placement_for_arm = _apply_causal_arm(
-                        steer_real,
-                        sample_index=i,
-                        seed_base=args.seed,
-                        causal_arm=causal_arm,
-                        trained_placement=args.sim_placement,
-                        wrong_placement=args.wrong_placement,
+                    steer_vec_for_arm, placement_for_arm, steer_disabled_for_arm = (
+                        _apply_causal_arm(
+                            steer_real,
+                            sample_index=i,
+                            seed_base=args.seed,
+                            causal_arm=causal_arm,
+                            trained_placement=args.sim_placement,
+                            wrong_placement=args.wrong_placement,
+                        )
                     )
-                    t0 = time.time()
                     jobs = assemble_jobs(
                         rollout_texts=[text],
                         steer_vecs=steer_vec_for_arm,
@@ -560,79 +686,108 @@ def main(argv: list[str] | None = None) -> int:
                         sim_max_steps=args.sim_max_steps,
                         placement=placement_for_arm,
                         blend=args.sim_blend,
+                        policy_language_overrides=[policy_lang_override],
+                        steer_disabled=steer_disabled_for_arm,
                     )
-                    job = jobs[0]
-                    err = None
-                    video_path = None
-                    if video_root is not None:
-                        slug = f"{i:02d}_{sid}__{record_key}__{task}"
-                        out_dir = video_root / slug
-                        try:
-                            summ = _run_rollout_video(
-                                job=job,
-                                rollout_python=libero_py,
-                                policy_host=args.policy_host,
-                                policy_port=args.policy_port,
-                                output_dir=out_dir,
-                                timeout_s=args.sim_timeout_s,
-                            )
-                            pred = float((summ.get("sim_score_breakdown") or {}).get("predicate", 0))
-                            r_sim = float(summ.get("r_sim") or 0)
-                            video_path = summ.get("video_path")
-                            early = bool(summ.get("early_stopped", False))
-                            n_steps = int(summ.get("n_steps", 0))
-                            succ = bool(summ.get("success_any", False))
-                        except Exception as e:
-                            pred, r_sim, early, n_steps, succ = 0.0, 0.0, False, 0, False
-                            err = str(e)
-                        (out_dir / "caption.txt").write_text(text)
-                        # Both labeled aliases and legacy keys; downstream
-                        # scorecards should prefer the labeled forms
-                        # (`success_xyz_predicate`, `success_bddl_native`).
-                        record["conditions"][record_key] = {
-                            "intent_arm": intent_arm,
-                            "causal_arm": causal_arm,
-                            "av_condition": cond_name,
-                            "placement": placement_for_arm,
-                            "text_preview": text[:500],
-                            "r_sim": r_sim,
-                            "predicate": pred,
-                            "success_xyz_predicate": int(pred > 0),
-                            "success_any": succ,
-                            "success_bddl_native": bool(succ),
-                            "early_stopped": early,
-                            "n_steps": n_steps,
-                            "elapsed_s": round(time.time() - t0, 1),
-                            "error": err,
-                            "video_path": video_path,
-                            "rollout_dir": str(out_dir),
-                        }
-                    else:
-                        assert worker is not None
-                        sim_res = worker.compute(jobs)[0]
-                        record["conditions"][record_key] = {
-                            "intent_arm": intent_arm,
-                            "causal_arm": causal_arm,
-                            "av_condition": cond_name,
-                            "placement": placement_for_arm,
-                            "text_preview": text[:500],
-                            "r_sim": sim_res.r_sim,
-                            "predicate": sim_res.predicate,
-                            "success_xyz_predicate": int(sim_res.predicate > 0),
-                            "success_any": sim_res.success_any,
-                            "success_bddl_native": bool(sim_res.success_any),
-                            "early_stopped": sim_res.early_stopped,
-                            "n_steps": sim_res.n_steps,
-                            "elapsed_s": round(time.time() - t0, 1),
-                            "error": sim_res.error,
-                        }
-                    c = record["conditions"][record_key]
-                    print(
-                        f"  [{i}] {record_key}: pred={c['predicate']:.0f} "
-                        f"r_sim={c['r_sim']:.2f} video={c.get('video_path')} "
-                        f"err={c['error']}",
-                        flush=True,
+                    pending_jobs.append(jobs[0])
+                    pending_meta.append({
+                        "record_key": record_key,
+                        "cond_name": cond_name,
+                        "intent_arm": intent_arm,
+                        "causal_arm": causal_arm,
+                        "text": text,
+                        "placement": placement_for_arm,
+                        "policy_language_override": policy_lang_override,
+                        "steer_disabled": bool(steer_disabled_for_arm),
+                    })
+
+        # ---- Execute stage: run all runnable arms for this sample. In normal
+        # mode this is one batched worker.compute() call (sim_batch_size lets
+        # SimRewardWorker reuse the GR00T server's get_action_batch). In video
+        # mode rollouts run sequentially because MP4 capture can't batch.
+        if pending_jobs and video_root is not None:
+            for job, meta in zip(pending_jobs, pending_meta):
+                slug = f"{i:02d}_{sid}__{meta['record_key']}__{task}"
+                out_dir = video_root / slug
+                t_job = time.time()
+                err = None
+                video_path = None
+                try:
+                    summ = _run_rollout_video(
+                        job=job,
+                        rollout_python=libero_py,
+                        policy_host=args.policy_host,
+                        policy_port=args.policy_port,
+                        output_dir=out_dir,
+                        timeout_s=args.sim_timeout_s,
                     )
+                    pred = float((summ.get("sim_score_breakdown") or {}).get("predicate", 0))
+                    r_sim = float(summ.get("r_sim") or 0)
+                    video_path = summ.get("video_path")
+                    early = bool(summ.get("early_stopped", False))
+                    n_steps = int(summ.get("n_steps", 0))
+                    succ = bool(summ.get("success_any", False))
+                except Exception as e:
+                    pred, r_sim, early, n_steps, succ = 0.0, 0.0, False, 0, False
+                    err = str(e)
+                (out_dir / "caption.txt").write_text(meta["text"])
+                record["conditions"][meta["record_key"]] = {
+                    "intent_arm": meta["intent_arm"],
+                    "causal_arm": meta["causal_arm"],
+                    "av_condition": meta["cond_name"],
+                    "placement": meta["placement"],
+                    "policy_language_override": meta.get("policy_language_override"),
+                    "steer_disabled": bool(meta.get("steer_disabled")),
+                    "text_preview": meta["text"][:500],
+                    "r_sim": r_sim,
+                    "predicate": pred,
+                    "success_xyz_predicate": int(pred > 0),
+                    "success_any": succ,
+                    "success_bddl_native": bool(succ),
+                    "early_stopped": early,
+                    "n_steps": n_steps,
+                    "elapsed_s": round(time.time() - t_job, 1),
+                    "error": err,
+                    "video_path": video_path,
+                    "rollout_dir": str(out_dir),
+                }
+                c = record["conditions"][meta["record_key"]]
+                print(
+                    f"  [{i}] {meta['record_key']}: pred={c['predicate']:.0f} "
+                    f"r_sim={c['r_sim']:.2f} video={c.get('video_path')} "
+                    f"err={c['error']}",
+                    flush=True,
+                )
+        elif pending_jobs:
+            assert worker is not None
+            t0 = time.time()
+            sim_results = worker.compute(pending_jobs)
+            elapsed_each = (time.time() - t0) / max(1, len(pending_jobs))
+            for sim_res, meta in zip(sim_results, pending_meta):
+                record["conditions"][meta["record_key"]] = {
+                    "intent_arm": meta["intent_arm"],
+                    "causal_arm": meta["causal_arm"],
+                    "av_condition": meta["cond_name"],
+                    "placement": meta["placement"],
+                    "policy_language_override": meta.get("policy_language_override"),
+                    "steer_disabled": bool(meta.get("steer_disabled")),
+                    "text_preview": meta["text"][:500],
+                    "r_sim": sim_res.r_sim,
+                    "predicate": sim_res.predicate,
+                    "success_xyz_predicate": int(sim_res.predicate > 0),
+                    "success_any": sim_res.success_any,
+                    "success_bddl_native": bool(sim_res.success_any),
+                    "early_stopped": sim_res.early_stopped,
+                    "n_steps": sim_res.n_steps,
+                    "elapsed_s": round(elapsed_each, 1),
+                    "error": sim_res.error,
+                }
+                c = record["conditions"][meta["record_key"]]
+                print(
+                    f"  [{i}] {meta['record_key']}: pred={c['predicate']:.0f} "
+                    f"r_sim={c['r_sim']:.2f} err={c['error']}",
+                    flush=True,
+                )
 
         results.append(record)
 
@@ -652,6 +807,7 @@ def main(argv: list[str] | None = None) -> int:
         "exclude_ids_count": len(exclude_ids),
         "intent_arms": intent_arms,
         "causal_arms": causal_arms,
+        "eval_protocol": eval_protocol,
         "samples": results,
     }
     for cn in cond_list:
@@ -713,6 +869,21 @@ def main(argv: list[str] | None = None) -> int:
                 summary.get(f"{sk}_predicate_rate", 0.0)
                 - summary.get(f"{wk}_predicate_rate", 0.0)
             )
+    # Steer-lift per condition: semantic − no_steer (matched intent in both
+    # arms). Positive means the steer adds reward over the unsteered base
+    # policy, which is the publishable "the AR vector adds value" claim
+    # under eval-v2. Compared to causal_specificity (which uses
+    # matched_null), this baseline is an unsteered policy rather than a
+    # norm-matched random vector, so it isolates "is steering at all
+    # helping?" from "does the AR vector beat noise?".
+    if "no_steer" in causal_arms:
+        for cn in cond_list:
+            sk = _make_record_key(cn, "matched", "semantic")
+            zk = _make_record_key(cn, "matched", "no_steer")
+            summary[f"{cn}_steer_lift_predicate"] = (
+                summary.get(f"{sk}_predicate_rate", 0.0)
+                - summary.get(f"{zk}_predicate_rate", 0.0)
+            )
 
     # Headline beat-SFT deltas: GRPO − SFT predicate rate (the V2 success
     # criterion). Reported separately so scorecards don't have to recompute.
@@ -745,6 +916,41 @@ def main(argv: list[str] | None = None) -> int:
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(summary, indent=2))
     print(f"\nWrote {out_json}")
+
+    # Optional: write a slim SFT-only cache for subsequent GRPO sweeps.
+    if args.write_sft_cache:
+        cache_blob = {
+            "version": 1,
+            "n_samples": len(results),
+            "sim_config": {
+                "sim_max_steps": args.sim_max_steps,
+                "sim_placement": args.sim_placement,
+                "sim_blend": args.sim_blend,
+            },
+            "intent_arms": intent_arms,
+            "causal_arms": causal_arms,
+            "samples": [
+                {
+                    "source_example_id": r["source_example_id"],
+                    "position_type": r.get("position_type"),
+                    "position_index": r.get("position_index"),
+                    "target_task": r.get("target_task"),
+                    "target_env_name": r.get("target_env_name"),
+                    "target_intent": r.get("target_intent"),
+                    "source_intent": r.get("source_intent"),
+                    "source_task": r.get("source_task"),
+                    "conditions": {
+                        k: v for k, v in r.get("conditions", {}).items()
+                        if k.startswith("sft_av")
+                    },
+                }
+                for r in results
+            ],
+        }
+        cache_path = Path(args.write_sft_cache)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(cache_blob, indent=2))
+        print(f"Wrote SFT cache to {cache_path}")
     for cn in cond_list:
         for intent_arm in intent_arms:
             for causal_arm in causal_arms:
@@ -775,6 +981,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"(semantic - wrong_placement): "
                 f"{summary[ps_key]:+.2%}"
             )
+        sl_key = f"{cn}_steer_lift_predicate"
+        if sl_key in summary:
+            print(
+                f"  {cn} steer_lift_predicate "
+                f"(semantic - no_steer): "
+                f"{summary[sl_key]:+.2%}"
+            )
+    print(f"  eval_protocol={eval_protocol}")
     if "delta_predicate_rate_grpo_minus_sft" in summary:
         print(
             f"  delta_predicate_rate (GRPO - SFT, matched/semantic): "

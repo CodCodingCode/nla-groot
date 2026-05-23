@@ -16,6 +16,7 @@ Bands are deliberately conservative for a *publishable* CoRL claim:
   | ------------------------------------------------- | ------- | ---------- | ------ |
   | delta_predicate_rate_grpo_minus_sft               | >= +10pp| 0-10pp     | <0     |
   | semantic_gap_predicate (grpo_av)                  | >= +10pp| 0-10pp     | <0     |
+  | steer_lift_predicate (grpo_av)                    | >= +10pp| 0-10pp     | <0     |
   | causal_specificity_predicate (grpo_av)            | >= +10pp| 0-10pp     | <0     |
   | placement_specificity_predicate (grpo_av)         | >= +5pp | 0-5pp      | <0     |
   | grpo_av_predicate_rate (absolute)                 | >= 25%  | 10-25%     | <10%   |
@@ -26,6 +27,16 @@ The "publishable" verdict (a CoRL-positive result on steering) requires:
   (b) semantic_gap_predicate (grpo_av) PASSES (if mismatched_source arm ran),
        OR the audit-style narrative explicitly notes "no semantic gap", AND
   (c) closed_greedy_cosine stays >= warn (no AV collapse).
+
+Under eval-v2 (``eval_protocol=language_swap``, the new default), the
+``semantic_gap_predicate`` becomes the primary success signal: the
+matched / mismatched_source arms feed the policy distinct intent texts
+on the same target scene, so a non-zero gap can only come from the AV
+caption itself moving the policy. ``steer_lift_predicate`` (semantic -
+no_steer) audits whether steering helps at all over an unsteered
+baseline. Legacy compare JSONs (``eval_protocol=legacy``) are still
+read for backward compat but the gap there is structurally near zero
+and should not be cited as evidence of language steering.
 
 A run can still be a publishable **audit / negative result** if (a)/(b) FAIL
 but the script is rerun with ``--narrative audit`` — that flips the verdict
@@ -74,6 +85,7 @@ class Band:
 BANDS: dict[str, Band] = {
     "delta_predicate_rate_grpo_minus_sft": Band(0.10, 0.00),
     "grpo_semantic_gap_predicate":         Band(0.10, 0.00),
+    "grpo_steer_lift_predicate":           Band(0.10, 0.00),
     "grpo_causal_specificity_predicate":   Band(0.10, 0.00),
     "grpo_placement_specificity_predicate": Band(0.05, 0.00),
     "grpo_av_predicate_rate":              Band(0.25, 0.10),
@@ -96,6 +108,9 @@ def _read_compare(path: Path) -> dict[str, Any]:
         "n_samples": obj.get("n"),
         "intent_arms": intent_arms,
         "causal_arms": causal_arms,
+        "eval_protocol": obj.get("eval_protocol")
+            or cfg.get("eval_protocol")
+            or "legacy",
         "config": cfg,
         # Headline metrics from compare summary (already labeled correctly).
         "sft_av_predicate_rate":  obj.get("sft_av_predicate_rate"),
@@ -128,6 +143,12 @@ def _read_compare(path: Path) -> dict[str, Any]:
         ),
         "grpo_placement_specificity_predicate": obj.get(
             "grpo_av_placement_specificity_predicate"
+        ),
+        "sft_steer_lift_predicate": obj.get(
+            "sft_av_steer_lift_predicate"
+        ),
+        "grpo_steer_lift_predicate": obj.get(
+            "grpo_av_steer_lift_predicate"
         ),
     }
 
@@ -266,6 +287,10 @@ def main(argv: list[str] | None = None) -> int:
             compare.get("grpo_semantic_gap_predicate"),
         "sft_semantic_gap_predicate":
             compare.get("sft_semantic_gap_predicate"),
+        "grpo_steer_lift_predicate":
+            compare.get("grpo_steer_lift_predicate"),
+        "sft_steer_lift_predicate":
+            compare.get("sft_steer_lift_predicate"),
         "grpo_causal_specificity_predicate":
             compare.get("grpo_causal_specificity_predicate"),
         "grpo_placement_specificity_predicate":
@@ -322,7 +347,12 @@ def main(argv: list[str] | None = None) -> int:
             "semantic_gap_predicate":
                 "matched_intent predicate rate - mismatched_source_intent "
                 "predicate rate; positive value means language is causal "
-                "for steering.",
+                "for steering. Under eval_protocol=language_swap this is "
+                "the primary publishable success signal.",
+            "steer_lift_predicate":
+                "matched/semantic predicate rate - matched/no_steer "
+                "predicate rate; positive means the AR-injected steer "
+                "adds reward over the unsteered base policy.",
             "causal_specificity_predicate":
                 "semantic predicate rate - matched_null predicate rate; "
                 "positive means the AR vector beats norm-matched noise.",
@@ -355,6 +385,10 @@ def main(argv: list[str] | None = None) -> int:
          metrics["grpo_semantic_gap_predicate"],
          bands["grpo_semantic_gap_predicate"],
          "matched - mismatched_source"),
+        ("grpo_steer_lift_predicate",
+         metrics["grpo_steer_lift_predicate"],
+         bands["grpo_steer_lift_predicate"],
+         "semantic - no_steer"),
         ("grpo_causal_specificity_predicate",
          metrics["grpo_causal_specificity_predicate"],
          bands["grpo_causal_specificity_predicate"],
@@ -368,7 +402,11 @@ def main(argv: list[str] | None = None) -> int:
          bands["closed_greedy_cosine"],
          "AV recon guardrail (NOT a steer metric)"),
     ]
-    print(f"GRPO steer scorecard (n={compare.get('n_samples')}):")
+    protocol_note = compare.get("eval_protocol") or "legacy"
+    print(
+        f"GRPO steer scorecard (n={compare.get('n_samples')}, "
+        f"eval_protocol={protocol_note}):"
+    )
     _print_table(rows)
     print("-" * 90)
     print(f"  Verdict: {verdict}  ({verdict_note})")

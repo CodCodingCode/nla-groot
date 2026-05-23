@@ -109,6 +109,11 @@ class GRPOConfig:
     save_every: int = 100
     log_every: int = 1
     eval_max_examples: int = 64
+    # Also snapshot the AV (and AR if co-trained) to ``av_steps/step_{N}/``
+    # every ``save_every`` steps. The latest is still written to ``av/`` for
+    # backward compat. Enables sweeping multiple GRPO checkpoints in
+    # ``compare_cf_steer_checkpoints.py`` without re-training.
+    save_step_snapshots: bool = False
 
     # Misc
     gradient_checkpointing: bool = False
@@ -210,6 +215,31 @@ class GRPOConfig:
     # reconstruction GRPO where the AV describes the activation freely.
     use_intent_conditioned_prompt: bool = True
 
+    # Eval-v2 train-side knobs (mirrors the compare-script ``--eval-protocol``
+    # flag). ``language_swap`` overrides the policy obs language slot with
+    # the matched target_intent text during the matched (and any contrastive)
+    # sim rollout, so the train and eval reward signals agree. Default
+    # ``legacy`` keeps every byte of the pre-2026-05 sim path.
+    sim_eval_protocol: str = "legacy"
+    # Contrastive sim reward (Eval-v2 alignment). When > 0 we additionally
+    # roll out the mismatched_source intent on the same target scene per
+    # row and reward ``(pred_matched - pred_mismatched) * w_contrastive``.
+    # Doubles sim cost; gate explicitly via the CLI.
+    sim_contrastive_weight: float = 0.0
+    # Null-control sim reward. When > 0 we additionally roll out the same
+    # AV caption + AR vector at the trained placement but with a norm-
+    # matched Gaussian draw (``matched_null_vec``) replacing the steer
+    # vector, and reward ``(pred_matched - pred_null) * w_null_control``.
+    # Triples sim cost when paired with the contrastive arm.
+    sim_null_control_weight: float = 0.0
+    # Predicate-term weight inside :func:`predicates.score`. The default
+    # ``2.0`` matches ``DEFAULT_SHAPING`` from
+    # ``nla.eval.steerability.predicates``; lowering this denses the
+    # shaping terms relative to the binary predicate so GRPO groups have
+    # more within-group variance. Threaded via ``--sim-w-predicate`` to
+    # the rollout subprocesses so the contrast scores agree.
+    sim_w_predicate: float = 2.0
+
     # ------------------------------------------------------------------
     # SimpleVLA-RL-inspired knobs (all OFF/default for byte-identical
     # baseline runs; the new fields are hidden from the saved
@@ -285,6 +315,8 @@ def _serialize_config(cfg: GRPOConfig) -> dict[str, Any]:
             "sim_max_steps", "sim_placement", "sim_blend",
             "sim_cache_path", "sim_rollout_python", "sim_rollout_script",
             "sim_timeout_s", "sim_seed_base", "use_intent_conditioned_prompt",
+            "sim_eval_protocol", "sim_contrastive_weight",
+            "sim_null_control_weight", "sim_w_predicate",
         ):
             d.pop(k, None)
     else:
@@ -296,6 +328,14 @@ def _serialize_config(cfg: GRPOConfig) -> dict[str, Any]:
             d.pop("sim_require_full_batch_cf", None)
         if not cfg.cf_eligible_ids_path:
             d.pop("cf_eligible_ids_path", None)
+        if cfg.sim_eval_protocol == "legacy":
+            d.pop("sim_eval_protocol", None)
+        if cfg.sim_contrastive_weight == 0.0:
+            d.pop("sim_contrastive_weight", None)
+        if cfg.sim_null_control_weight == 0.0:
+            d.pop("sim_null_control_weight", None)
+        if cfg.sim_w_predicate == 2.0:
+            d.pop("sim_w_predicate", None)
     # SimpleVLA-RL knobs are hidden whenever they sit at their defaults
     # so a baseline run's config.json stays byte-identical to the
     # pre-SimpleVLA layout. Each is dropped independently.
@@ -327,11 +367,18 @@ def _setup_outputs(out_dir: Path) -> dict[str, Path]:
         "metrics": out_dir / "metrics.jsonl",
         "config": out_dir / "config.json",
         "rollouts": out_dir / "rollouts.jsonl",
+        "av_steps": out_dir / "av_steps",
+        "ar_steps": out_dir / "ar_steps",
     }
     paths["av"].mkdir(exist_ok=True)
     paths["ar"].mkdir(exist_ok=True)
     paths["log"].mkdir(exist_ok=True)
     return paths
+
+
+def _step_snapshot_dir(parent: Path, step: int) -> Path:
+    """Path for a per-step AV/AR checkpoint snapshot."""
+    return parent / f"step_{step:06d}"
 
 
 def _lr_schedule(step: int, cfg: GRPOConfig) -> float:
@@ -777,6 +824,15 @@ def grpo_step(
     sim_placement: str = "image_patch",
     sim_blend: float = 1.0,
     sim_cf_ok: list[bool] | None = None,
+    sim_eval_protocol: str = "legacy",
+    source_intent_texts: list[str | None] | None = None,
+    sim_contrastive_weight: float = 0.0,
+    sim_null_control_weight: float = 0.0,
+    # ``None`` keeps DEFAULT_SHAPING.w_predicate=2.0 inside each rollout
+    # subprocess (byte-identical legacy behaviour). Pass a float (e.g.
+    # 1.0) to override the predicate weight inside the sim shaping
+    # score for every sim rollout this step.
+    sim_w_predicate_override: float | None = None,
     # ----- SimpleVLA-RL-inspired knobs (defaults preserve byte-identical loss math)
     dynamic_sampling: bool = False,
     dynamic_sampling_threshold: float = 1e-4,
@@ -953,6 +1009,25 @@ def grpo_step(
         with torch.no_grad():
             steer_vecs = encode_texts_with_ar(ar, rollout_texts, device=device)
 
+        # Build per-row policy-language overrides for the matched arm so
+        # train sees the same channel as ``eval_protocol=language_swap``
+        # in the holdout compare. Default ``"legacy"`` keeps the byte-
+        # identical pre-2026-05 behaviour: the policy receives the env's
+        # BDDL ``task_description`` unchanged.
+        if sim_eval_protocol == "language_swap" and target_intent_texts is not None:
+            intents_rep_for_lang = [t for t in target_intent_texts for _ in range(K)]
+            matched_lang_overrides = [
+                intents_rep_for_lang[i] if intents_rep_for_lang[i] else None
+                for i in range(B * K)
+            ]
+        elif sim_eval_protocol not in ("legacy", "language_swap"):
+            raise ValueError(
+                f"sim_eval_protocol must be 'legacy' or 'language_swap'; "
+                f"got {sim_eval_protocol!r}"
+            )
+        else:
+            matched_lang_overrides = [None] * (B * K)
+
         if active_idx:
             sub_steer = steer_vecs[active_idx]
             sub_texts = [rollout_texts[i] for i in active_idx]
@@ -960,6 +1035,7 @@ def grpo_step(
             sub_envs = [envs_rep[i] for i in active_idx]
             sub_src = [src_rep[i] for i in active_idx]
             sub_seeds = [sim_seeds[i] for i in active_idx]
+            sub_lang = [matched_lang_overrides[i] for i in active_idx]
             jobs = assemble_jobs(
                 rollout_texts=sub_texts,
                 steer_vecs=sub_steer,
@@ -970,6 +1046,8 @@ def grpo_step(
                 sim_max_steps=sim_max_steps,
                 placement=sim_placement,
                 blend=sim_blend,
+                policy_language_overrides=sub_lang,
+                w_predicate=sim_w_predicate_override,
             )
             sub_results = sim_worker.compute(jobs)
         else:
@@ -980,9 +1058,11 @@ def grpo_step(
         # skipped) and contribute 0 to the sim term via the mask below.
         sim_results = [None] * (B * K)
         r_sim_vec = [0.0] * (B * K)
+        pred_matched_vec = [0.0] * (B * K)
         for slot, res in zip(active_idx, sub_results):
             sim_results[slot] = res
             r_sim_vec[slot] = float(res.r_sim)
+            pred_matched_vec[slot] = float(res.predicate)
         r_sim_tensor = torch.tensor(
             r_sim_vec, dtype=rewards.dtype, device=rewards.device,
         )
@@ -990,6 +1070,110 @@ def grpo_step(
             [1.0 if ok else 0.0 for ok in sim_active_rep],
             dtype=rewards.dtype, device=rewards.device,
         )
+
+        # ----- 3c-ii. Optional contrastive sim (eval-v2 alignment) ----------
+        # When ``sim_contrastive_weight > 0``, run a second sim sweep with
+        # ``policy_language_override = source_intent`` (same env, same AV
+        # text, same AR steer_h, only the policy's language channel flipped)
+        # and reward ``(pred_matched - pred_mismatched) * w_contrastive``.
+        # This is the train-time analog of the publishable
+        # ``semantic_gap_predicate`` metric.
+        sim_contrast_results: list | None = None
+        sim_null_results: list | None = None
+        contrast_bonus = torch.zeros_like(r_sim_tensor)
+        if sim_contrastive_weight > 0.0 and source_intent_texts is not None:
+            if len(source_intent_texts) != B:
+                raise ValueError(
+                    f"len(source_intent_texts)={len(source_intent_texts)} != B={B}"
+                )
+            src_intent_rep = [t for t in source_intent_texts for _ in range(K)]
+            # Only run rows that have BOTH a CF pair AND a non-empty
+            # source_intent; otherwise the contrast is undefined.
+            contrast_idx = [
+                i for i in active_idx
+                if src_intent_rep[i] and str(src_intent_rep[i]).strip()
+            ]
+            if contrast_idx:
+                c_steer = steer_vecs[contrast_idx]
+                c_texts = [rollout_texts[i] for i in contrast_idx]
+                c_tasks = [target_tasks_rep[i] for i in contrast_idx]
+                c_envs = [envs_rep[i] for i in contrast_idx]
+                c_src = [src_rep[i] for i in contrast_idx]
+                c_seeds = [sim_seeds[i] for i in contrast_idx]
+                c_lang = [src_intent_rep[i] for i in contrast_idx]
+                c_jobs = assemble_jobs(
+                    rollout_texts=c_texts,
+                    steer_vecs=c_steer,
+                    target_tasks=c_tasks,
+                    target_env_names=c_envs,
+                    source_ids=c_src,
+                    seeds=c_seeds,
+                    sim_max_steps=sim_max_steps,
+                    placement=sim_placement,
+                    blend=sim_blend,
+                    policy_language_overrides=c_lang,
+                    w_predicate=sim_w_predicate_override,
+                )
+                c_sub_results = sim_worker.compute(c_jobs)
+            else:
+                c_sub_results = []
+            sim_contrast_results = [None] * (B * K)
+            for slot, res in zip(contrast_idx, c_sub_results):
+                sim_contrast_results[slot] = res
+                # Contrastive bonus: pred_matched - pred_mismatched. Both
+                # are in {0, 1} so the contribution per row is in [-1, 1].
+                contrast_bonus[slot] = contrast_bonus[slot] + (
+                    sim_contrastive_weight
+                    * (pred_matched_vec[slot] - float(res.predicate))
+                )
+
+        # ----- 3c-iii. Optional null-control sim ----------------------------
+        # Same matched AV text + language but with a norm-matched Gaussian
+        # vector replacing the AR steer_h. Reward
+        # ``(pred_matched - pred_null) * w_null_control`` — the train-time
+        # analog of the publishable ``causal_specificity_predicate``.
+        if sim_null_control_weight > 0.0 and active_idx:
+            from nla.steering.null_controls import matched_null_vec
+            null_steer = torch.stack([
+                matched_null_vec(
+                    steer_vecs[i],
+                    seed=int(sim_seeds[i]) * 31 + 7,
+                )
+                for i in active_idx
+            ], dim=0)
+            n_texts = [rollout_texts[i] for i in active_idx]
+            n_tasks = [target_tasks_rep[i] for i in active_idx]
+            n_envs = [envs_rep[i] for i in active_idx]
+            n_src = [src_rep[i] for i in active_idx]
+            n_seeds = [sim_seeds[i] for i in active_idx]
+            n_lang = [matched_lang_overrides[i] for i in active_idx]
+            n_jobs = assemble_jobs(
+                rollout_texts=n_texts,
+                steer_vecs=null_steer,
+                target_tasks=n_tasks,
+                target_env_names=n_envs,
+                source_ids=n_src,
+                seeds=n_seeds,
+                sim_max_steps=sim_max_steps,
+                placement=sim_placement,
+                blend=sim_blend,
+                policy_language_overrides=n_lang,
+                w_predicate=sim_w_predicate_override,
+            )
+            n_sub_results = sim_worker.compute(n_jobs)
+            sim_null_results = [None] * (B * K)
+            for slot, res in zip(active_idx, n_sub_results):
+                sim_null_results[slot] = res
+                contrast_bonus[slot] = contrast_bonus[slot] + (
+                    sim_null_control_weight
+                    * (pred_matched_vec[slot] - float(res.predicate))
+                )
+
+        # Fold the contrast bonus into r_sim BEFORE z-scoring inside the
+        # blend so it survives the per-step normalization. Bonus is 0
+        # when neither contrastive nor null arm is enabled, preserving
+        # byte-identical reward math for legacy runs.
+        r_sim_tensor = r_sim_tensor + contrast_bonus
 
     # ----- 3d. Blend recon + (optional) judge + (optional) sim ---------------
     # Effective judge weight is 0 when the judge block was silently skipped
@@ -1186,6 +1370,42 @@ def grpo_step(
                 diagnostics["sim_cache_hit_frac"] = float(n_cached) / n_active
                 diagnostics["sim_error_frac"] = float(n_err) / n_active
                 diagnostics["sim_elapsed_s_mean"] = float(elapsed.mean().item())
+            if sim_contrast_results is not None:
+                active_contrast = [r for r in sim_contrast_results if r is not None]
+                if active_contrast:
+                    cp = torch.tensor(
+                        [r.predicate for r in active_contrast], dtype=torch.float32,
+                    )
+                    diagnostics["sim_contrast_predicate_pos_frac"] = float(
+                        (cp > 0).float().mean().item()
+                    )
+                    diagnostics["sim_contrast_n_active"] = float(len(active_contrast))
+                    # Gap is the publishable train-side analog of
+                    # semantic_gap_predicate on the holdout; we average
+                    # the per-row signed contributions.
+                    paired = [
+                        pred_matched_vec[slot] - float(r.predicate)
+                        for slot, r in enumerate(sim_contrast_results) if r is not None
+                    ]
+                    diagnostics["sim_contrast_gap_mean"] = (
+                        float(sum(paired) / len(paired)) if paired else 0.0
+                    )
+            if sim_null_results is not None:
+                active_null = [r for r in sim_null_results if r is not None]
+                if active_null:
+                    np_pred = torch.tensor(
+                        [r.predicate for r in active_null], dtype=torch.float32,
+                    )
+                    diagnostics["sim_null_predicate_pos_frac"] = float(
+                        (np_pred > 0).float().mean().item()
+                    )
+                    paired = [
+                        pred_matched_vec[slot] - float(r.predicate)
+                        for slot, r in enumerate(sim_null_results) if r is not None
+                    ]
+                    diagnostics["sim_null_gap_mean"] = (
+                        float(sum(paired) / len(paired)) if paired else 0.0
+                    )
 
     return {
         "loss": total_loss,
@@ -1423,6 +1643,19 @@ def _validate_sim_config(cfg: GRPOConfig) -> None:
         raise ValueError(f"sim_blend must be in [0, 1]; got {cfg.sim_blend}")
     if cfg.sim_max_steps < 1:
         raise ValueError(f"sim_max_steps must be >= 1; got {cfg.sim_max_steps}")
+    if cfg.sim_eval_protocol not in ("legacy", "language_swap"):
+        raise ValueError(
+            f"sim_eval_protocol must be 'legacy' or 'language_swap'; "
+            f"got {cfg.sim_eval_protocol!r}"
+        )
+    if cfg.sim_contrastive_weight < 0.0:
+        raise ValueError(
+            f"sim_contrastive_weight must be >= 0; got {cfg.sim_contrastive_weight}"
+        )
+    if cfg.sim_null_control_weight < 0.0:
+        raise ValueError(
+            f"sim_null_control_weight must be >= 0; got {cfg.sim_null_control_weight}"
+        )
 
 
 def run_grpo(cfg: GRPOConfig) -> dict:
@@ -1572,6 +1805,7 @@ def run_grpo(cfg: GRPOConfig) -> dict:
             # pair; ``sim_require_full_batch_cf`` (CLI flag) restores the
             # legacy all-or-nothing batch gate.
             target_intent_texts = None
+            source_intent_texts = None
             target_tasks = None
             target_env_names = None
             sim_seeds = None
@@ -1617,6 +1851,10 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                 # the descriptive prompt for those rows.
                 target_intent_texts = [
                     p.target_intent if ok else None
+                    for p, ok in zip(pairs, sim_cf_ok)
+                ]
+                source_intent_texts = [
+                    p.source_intent if ok else None
                     for p, ok in zip(pairs, sim_cf_ok)
                 ]
                 target_tasks = [
@@ -1679,6 +1917,13 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                 sim_placement=cfg.sim_placement,
                 sim_blend=cfg.sim_blend,
                 sim_cf_ok=sim_cf_ok,
+                sim_eval_protocol=cfg.sim_eval_protocol,
+                source_intent_texts=source_intent_texts,
+                sim_contrastive_weight=cfg.sim_contrastive_weight,
+                sim_null_control_weight=cfg.sim_null_control_weight,
+                sim_w_predicate_override=(
+                    cfg.sim_w_predicate if cfg.sim_w_predicate != 2.0 else None
+                ),
                 dynamic_sampling=dynamic_sampling_eff,
                 dynamic_sampling_threshold=cfg.dynamic_sampling_threshold,
                 use_ppo_clip=cfg.use_ppo_clip,
@@ -1743,6 +1988,15 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                 policy_av.save(str(paths["av"]))
                 if cfg.ar_co_train_weight > 0.0:
                     ar.save(str(paths["ar"]))
+                if cfg.save_step_snapshots:
+                    av_snap = _step_snapshot_dir(paths["av_steps"], step)
+                    paths["av_steps"].mkdir(parents=True, exist_ok=True)
+                    policy_av.save(str(av_snap))
+                    logger.info("[step %d] saved AV snapshot to %s", step, av_snap)
+                    if cfg.ar_co_train_weight > 0.0:
+                        ar_snap = _step_snapshot_dir(paths["ar_steps"], step)
+                        paths["ar_steps"].mkdir(parents=True, exist_ok=True)
+                        ar.save(str(ar_snap))
 
             step += 1
 
@@ -1767,6 +2021,15 @@ def run_grpo(cfg: GRPOConfig) -> dict:
     policy_av.save(str(paths["av"]))
     if cfg.ar_co_train_weight > 0.0:
         ar.save(str(paths["ar"]))
+    if cfg.save_step_snapshots:
+        av_snap = _step_snapshot_dir(paths["av_steps"], step)
+        paths["av_steps"].mkdir(parents=True, exist_ok=True)
+        policy_av.save(str(av_snap))
+        logger.info("[final] saved AV snapshot to %s", av_snap)
+        if cfg.ar_co_train_weight > 0.0:
+            ar_snap = _step_snapshot_dir(paths["ar_steps"], step)
+            paths["ar_steps"].mkdir(parents=True, exist_ok=True)
+            ar.save(str(ar_snap))
     if tb is not None:
         tb.close()
     return {"steps": step, "metrics": final_metrics, "out_dir": str(out_dir)}

@@ -235,21 +235,141 @@ headline rules. Reviewers conflate metrics easily here; keep them explicit.
   task is not what you steered for).
 - Any predicate rate without naming it as an **xyz-heuristic on
   `target_task`** rather than LIBERO success.
+- Compare JSONs whose top-level `eval_protocol` is `legacy` — the
+  matched / mismatched_source intent arms share the env's BDDL
+  `task_description`, so `semantic_gap_predicate` there is structurally
+  near zero and is not evidence one way or the other.
 
 **Do report as a headline:**
 
 - `delta_predicate_rate_grpo_minus_sft` on the held-out CF slice from
   `scripts/eval/compare_cf_steer_checkpoints.py`.
 - `semantic_gap_predicate` (matched − mismatched_source intent arm) — proves
-  language is doing semantic work, not just norm injection.
+  language is doing semantic work, not just norm injection. Requires
+  `eval_protocol=language_swap` (the new default) to be meaningful.
+- `steer_lift_predicate` (matched/semantic − matched/no_steer) — proves
+  the steer adds reward over the unsteered base policy. Pairs with
+  `semantic_gap_predicate` for a complete "is steering helping AND is
+  language causal?" claim.
 - `causal_specificity_predicate` (semantic − matched_null) and
   `placement_specificity_predicate` (semantic − wrong_placement) — proves
   the AR vector and its trained placement are causally specific.
 - `closed_greedy/cosine` from GRPO `metrics.jsonl` (recon guardrail; NOT a
   steer metric — never report it alone as evidence of steering).
 
+### Eval protocol (eval-v2: `language_swap`)
+
+The compare and holdout scripts default to `--eval-protocol language_swap`.
+Under that protocol each intent arm overrides the policy obs language
+slot (`obs["language"][...]`) with the arm-specific intent text:
+
+```mermaid
+flowchart LR
+  CFPair[CF pair target_env] --> Sim[LIBERO target scene]
+  Sim --> Policy["GR00T policy (steered)"]
+  Intent["matched: target_intent\nmismatched: source_intent"] --> Override[obs language override]
+  Override --> Policy
+  AVCaption[AV caption] --> StreVec[steer_h via AR] --> Policy
+  Policy --> Predicate[target_task xyz predicate]
+```
+
+The simulator still loads the target BDDL scene unchanged. The only
+per-arm differences flow through (a) the AV caption's `steer_h` and
+(b) the language override. That makes the `semantic_gap_predicate`
+(matched − mismatched) a measurement of "does what the policy is
+told to do actually matter?" The legacy protocol (`eval_protocol=legacy`)
+fed both arms the same BDDL `task_description`, so it could not
+distinguish them.
+
+The `no_steer` causal arm sends `options['steer_disabled']=True` to the
+steer wrapper, which short-circuits to the base policy. Compared
+to the `matched/semantic` arm, `steer_lift_predicate = matched/semantic
+− matched/no_steer` is the publishable "the steer is adding value at
+all" claim.
+
 **One-shot runner:**
 `scripts/eval/run_grpo_steer_holdout.sh` builds the held-out manifest,
 runs compare with full arm matrix, and emits
 `grpo_steer_scorecard.json` via `scripts/eval/build_grpo_steer_scorecard.py`.
 Cite the scorecard JSON in the paper; never raw `sim_predicate_pos_frac`.
+
+### Two-tier eval protocol (use the right one for the question)
+
+The launcher accepts `EVAL_TIER` to switch between a fast go/no-go screen
+and the full publishable matrix. Per-sample job batching (one
+`worker.compute()` call per sample) makes both tiers materially faster
+than the pre-2026-05 one-rollout-per-subprocess loop.
+
+| Tier | `EVAL_TIER` | Samples | Arms | Rollouts | When to use |
+|------|-------------|---------|------|----------|-------------|
+| Screen | `screen` | 32 | `matched` × `semantic,no_steer` | 128 | Go/no-go on a new GRPO checkpoint; quick sweeps; checks `steer_lift_predicate` early. |
+| Publishable | `publishable` (default) | 64 | full matrix incl. `no_steer` | 1024 | Headline scorecard for paper / V2 plan §2 success criteria. |
+
+```bash
+# Fast screen (~30-45 min):
+EVAL_TIER=screen bash scripts/eval/run_grpo_steer_holdout.sh
+
+# Full publishable scorecard (~4 h after Phase 1 batching):
+EVAL_TIER=publishable bash scripts/eval/run_grpo_steer_holdout.sh
+```
+
+**Rule:** only spend the publishable budget if the screen shows a
+non-negative `delta_predicate_rate_grpo_minus_sft` trend (or audit
+intent). A flat / negative screen at 32 samples is unlikely to flip on
+a full 64.
+
+### Multi-checkpoint sweeps: skip duplicate SFT rollouts
+
+Sweeping GRPO steps 50/100/200 against the same SFT baseline re-runs the
+SFT half of every job — wasted compute. Capture SFT once, reuse it:
+
+```bash
+# First run: produce the SFT cache as a side-effect.
+WRITE_SFT_CACHE=data/eval/grpo_steer_holdout/sft_baseline_arms.json \
+  bash scripts/eval/run_grpo_steer_holdout.sh
+# Subsequent runs against new GRPO checkpoints: skip SFT sim.
+REUSE_SFT_FROM=data/eval/grpo_steer_holdout/sft_baseline_arms.json \
+GRPO_AV_DIR=data/grpo/.../av/step_100 \
+OUT_DIR=data/eval/grpo_steer_holdout_step_100 \
+  bash scripts/eval/run_grpo_steer_holdout.sh
+```
+
+Reused SFT entries are tagged with `cached_from_reuse: true` in the
+compare JSON. The cache is config-aware: it warns when
+`sim_max_steps` / `sim_placement` / `sim_blend` differ.
+
+### Acceptance gates (eval-v2 re-run policy)
+
+Switching the headline metric to `semantic_gap_predicate` under
+`language_swap` invalidates the V1-era "matched-rate ≥ 50%" intuition.
+We expect raw matched rates to drop, then climb again as GRPO catches
+up. Treat each holdout re-run as a gate:
+
+1. **Pre-GRPO baseline (mandatory first re-run).** Run the screen tier
+   on the current SFT and the current GRPO checkpoint with
+   `--eval-protocol language_swap`. Archive the resulting
+   `grpo_steer_scorecard.json` as the new baseline. Without this
+   baseline JSON, any future "we beat SFT" claim cannot be checked
+   against the new protocol.
+2. **GRPO re-run gate.** Promote a GRPO checkpoint as the next "best"
+   only when the scorecard reports:
+   - `grpo_semantic_gap_predicate > 0` (matched > mismatched_source), and
+   - `grpo_steer_lift_predicate > 0` (the steer adds reward over
+     `no_steer`), and
+   - `closed_greedy/cosine ≥ 0.64` on the same checkpoint (recon
+     guardrail; see V2 plan §2 success criteria).
+   If any of those three fail, keep the prior checkpoint as the
+   reference and treat the new training arm as an ablation.
+3. **Phase-3 promotion gate.** Before launching a multi-day Phase 3
+   run, the publishable tier (`EVAL_TIER=publishable`) must satisfy
+   gate (2) **and** show
+   `delta_predicate_rate_grpo_minus_sft ≥ +10pp` on matched/semantic.
+4. **Reading scorecards from before the gate change.** Any compare
+   JSON whose top-level `eval_protocol` field is `legacy` (or missing)
+   is informational only — do not compare its `semantic_gap_predicate`
+   to a `language_swap` scorecard; the two are not the same quantity.
+
+The build_grpo_steer_scorecard.py output now propagates
+`eval_protocol` and `steer_lift_predicate` so a scorecard JSON is
+self-describing for these gates without needing the upstream compare
+JSON open in another window.

@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
-# V2 sim-GRPO pilot: pure sim reward, KL anchor on, goal-only CF pool.
+# V2 sim-GRPO pilot (eval-v2 aligned): pure-ish sim reward + contrastive
+# language-swap controls, KL anchor on, goal-only CF pool.
+#
+# Defaults below reward the *gap* between matched and mismatched_source
+# intent arms (the train-side analog of the publishable
+# ``semantic_gap_predicate`` metric) instead of just the matched
+# predicate. This is the V2 "fix the auto-pass eval" recipe: sim_blend
+# dropped to 0.4, judge to 0.25, contrastive sim weights enabled,
+# sim_eval_protocol=language_swap so train sees the same channel as the
+# holdout compare's eval-v2 default.
 #
 # Usage:
 #   WALL_HOURS=16 bash scripts/training/launch_v5_sim_grpo_v2_pilot.sh
@@ -11,6 +20,12 @@
 #   K_ROLLOUTS          default 4 (use 8 if VRAM stable with KL on)
 #   DISABLE_KL          set to 1 for fallback-b (OOM)
 #   STEER_PORT          default 5556
+#   SIM_REWARD_WEIGHT   default 0.4 (was 1.0; recon picks up the slack)
+#   SIM_JUDGE_WEIGHT    default 0.25 (was 0)
+#   SIM_CONTRAST_W      default 0.5 (eval-v2 contrastive sim reward)
+#   SIM_NULL_W          default 0.25 (eval-v2 null-control reward)
+#   SIM_W_PREDICATE     default 1.0 (densify shaping; was 2.0)
+#   SIM_EVAL_PROTOCOL   default language_swap (matches holdout compare)
 #   SFT_DIR, ACT_ROOT, GRPO_OUT
 
 set -euo pipefail
@@ -24,6 +39,12 @@ STEER_PORT="${STEER_PORT:-5556}"
 WALL_HOURS="${WALL_HOURS:-16}"
 MAX_STEPS="${MAX_STEPS:-2000}"
 K_ROLLOUTS="${K_ROLLOUTS:-4}"
+SIM_REWARD_WEIGHT="${SIM_REWARD_WEIGHT:-0.4}"
+SIM_JUDGE_WEIGHT="${SIM_JUDGE_WEIGHT:-0.25}"
+SIM_CONTRAST_W="${SIM_CONTRAST_W:-0.5}"
+SIM_NULL_W="${SIM_NULL_W:-0.25}"
+SIM_W_PREDICATE="${SIM_W_PREDICATE:-1.0}"
+SIM_EVAL_PROTOCOL="${SIM_EVAL_PROTOCOL:-language_swap}"
 WALL_SECS=$(( WALL_HOURS * 3600 ))
 PYTHON="${PYTHON_BIN:-.venv/bin/python}"
 LIBERO_PY="${LIBERO_PY:-third_party/Isaac-GR00T/gr00t/eval/sim/LIBERO/libero_uv/.venv/bin/python}"
@@ -67,8 +88,11 @@ else
 fi
 
 mkdir -p "$GRPO_OUT" logs
-echo "[v2-sim-pilot] V2 main arm: sim=1.0 judge=0 KL=$([[ ${DISABLE_KL:-0} == 1 ]] && echo off || echo on) K=${K_ROLLOUTS} wall=${WALL_HOURS}h -> ${GRPO_OUT}"
-echo "[v2-sim-pilot] note: sim shaping weights still code defaults (w_predicate=2); CLI pending Pillar A"
+echo "[v2-sim-pilot] V2 eval-v2 arm: sim=${SIM_REWARD_WEIGHT} judge=${SIM_JUDGE_WEIGHT}" \
+     "contrast_w=${SIM_CONTRAST_W} null_w=${SIM_NULL_W} w_pred=${SIM_W_PREDICATE}" \
+     "protocol=${SIM_EVAL_PROTOCOL}" \
+     "KL=$([[ ${DISABLE_KL:-0} == 1 ]] && echo off || echo on)" \
+     "K=${K_ROLLOUTS} wall=${WALL_HOURS}h -> ${GRPO_OUT}"
 
 nohup timeout --signal=TERM "${WALL_SECS}" \
   "$PYTHON" scripts/training/run_grpo.py \
@@ -82,9 +106,14 @@ nohup timeout --signal=TERM "${WALL_SECS}" \
     --warmup-steps 50 \
     --eval-every 50 \
     --save-every 100 \
+    --save-step-snapshots \
     --log-every 10 \
-    --sim-reward-weight 1.0 \
-    --judge-reward-weight 0 \
+    --sim-reward-weight "$SIM_REWARD_WEIGHT" \
+    --judge-reward-weight "$SIM_JUDGE_WEIGHT" \
+    --sim-eval-protocol "$SIM_EVAL_PROTOCOL" \
+    --sim-contrastive-weight "$SIM_CONTRAST_W" \
+    --sim-null-control-weight "$SIM_NULL_W" \
+    --sim-w-predicate "$SIM_W_PREDICATE" \
     "${KL_ARGS[@]}" \
     --sim-counterfactual-pairs-path data/grpo/libero_goal_counterfactual_pairs.jsonl \
     --sim-counterfactual-pairs-path-extra data/grpo/libero_spatial_counterfactual_pairs.jsonl \
@@ -109,4 +138,7 @@ echo "[v2-sim-pilot] GRPO pid=$(cat logs/v5_sim_grpo_v2_pilot.pid) wall=${WALL_H
 echo "[v2-sim-pilot] monitor: tail -f ${GRPO_OUT}/grpo.log ${GRPO_OUT}/metrics.jsonl"
 echo "[v2-sim-pilot] held-out steer eval (run after each save_every=100 checkpoint):"
 echo "  GRPO_AV_DIR=${GRPO_OUT}/av STEER_PORT=${STEER_PORT} \\"
+echo "    bash scripts/eval/run_grpo_steer_holdout.sh"
+echo "[v2-sim-pilot] per-step snapshots (for checkpoint sweeps):"
+echo "  GRPO_AV_DIR=${GRPO_OUT}/av_steps/step_000100 STEER_PORT=${STEER_PORT} \\"
 echo "    bash scripts/eval/run_grpo_steer_holdout.sh"
