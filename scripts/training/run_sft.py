@@ -27,6 +27,18 @@ import sys
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument(
+        "--recipe",
+        choices=["v7"],
+        default=None,
+        help="Apply a named training recipe before parsing other CLI flags. "
+             "Recipe defaults are overridden by any explicit CLI argument. "
+             "'v7' is the full retrain plan: policy-effect loss primary, "
+             "spatial AR head, training-time blend=0.5, batch-stratified "
+             "positions, scheduled-sampling ramped to 0.7. See "
+             "docs/sft_plan/v7_runbook.md for the per-setting rationale and "
+             "the list of external paths the recipe still needs from you.",
+    )
     p.add_argument("--activations-root", required=True)
     p.add_argument("--labels-jsonl", required=True)
     p.add_argument("--output-dir", required=True)
@@ -144,6 +156,47 @@ def _build_parser() -> argparse.ArgumentParser:
              "to point --labels-jsonl at the pre-filtered labels_no_anchor.jsonl "
              "instead; use this flag when running on the full combined file. "
              "Example: --exclude-position-types anchor.",
+    )
+    p.add_argument(
+        "--include-position-types",
+        nargs="+",
+        default=None,
+        help="Stage-2 plan: positive include filter. Keep only rows whose "
+             "position_type is in this list. Use 'image_patch' alone for the "
+             "image_patch-only ablation that isolates whether the codec can "
+             "learn vision-grounded structure when not diluted with text/"
+             "anchor rows. Example: --include-position-types image_patch. "
+             "Use --balance-position-mix --position-mix-json instead to "
+             "oversample image_patch while keeping all three roles.",
+    )
+    p.add_argument(
+        "--ar-head-type",
+        choices=["scalar", "spatial"],
+        default="scalar",
+        help="Stage-3 plan: AR output shape. 'scalar' (default) returns one "
+             "(B, H) vector per text, broadcast across image_patch slots at "
+             "inject time. 'spatial' returns (B, N, H) — one vector per "
+             "image_patch position — so the live policy sees spatially-varied "
+             "vision representations like real GR00T input. Pair with "
+             "--ar-spatial-n-positions equal to the K used at extraction "
+             "(K=8 with strided_image_multi, matches GR00T's strided patch "
+             "count).",
+    )
+    p.add_argument(
+        "--ar-spatial-n-positions",
+        type=int,
+        default=0,
+        help="Number of spatial positions the AR spatial head emits. Required "
+             "and must be > 0 when --ar-head-type=spatial. Set to the K used "
+             "at extraction (default 8 with strided_image_multi pooling).",
+    )
+    p.add_argument(
+        "--ar-spatial-head-hidden",
+        type=int,
+        default=0,
+        help="Hidden width of the spatial head's intermediate MLP. 0 (default) "
+             "uses the AR base model's hidden size — adds no extra hyperparam "
+             "knob beyond head_type and n_positions.",
     )
     p.add_argument(
         "--av-prompt-version",
@@ -275,6 +328,28 @@ def _build_parser() -> argparse.ArgumentParser:
              "position types (slower, currently has no eval-time counterpart).",
     )
     p.add_argument(
+        "--action-consistency-blend",
+        type=float,
+        default=1.0,
+        help="Steering hook blend factor used inside the action-consistency "
+             "forward (SteerSpec.blend). 1.0 = hard replace (legacy). 0.5 = "
+             "mix 50/50 with the live activation. The v7 recipe sets 0.5 so "
+             "the training-time steer matches what eval/sim use, making the "
+             "blend=0.5 dose in-distribution (Stage 0 showed both alpha=1.0 "
+             "and alpha=0.5 were OOD with the legacy hard-replace training).",
+    )
+    p.add_argument(
+        "--batch-stratified-positions",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="When set together with --balance-position-mix, enforce "
+             "per-batch position-type quotas (largest-remainder method) "
+             "rather than relying on WeightedRandomSampler's epoch-level "
+             "rebalance. Ensures every batch contains a guaranteed number "
+             "of image_patch rows, which the v7 policy-effect SFT needs to "
+             "produce a steady image_patch gradient.",
+    )
+    p.add_argument(
         "--action-consistency-policy-path",
         default=None,
         help="Path to a frozen GR00T checkpoint used for the consistency forward. "
@@ -327,7 +402,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    # Apply named-recipe defaults *before* parse_args so explicit CLI flags
+    # win over recipe-set defaults. See src/nla/training/recipes.py.
+    from nla.training.recipes import V7_SFT_DEFAULTS, apply_recipe_defaults
+    apply_recipe_defaults(
+        parser,
+        argv if argv is not None else sys.argv[1:],
+        recipes={"v7": V7_SFT_DEFAULTS},
+    )
+    args = parser.parse_args(argv)
     logging.basicConfig(
         level=args.log_level,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -381,6 +465,9 @@ def main(argv: list[str] | None = None) -> int:
         ar_prompt_version=args.ar_prompt_version,
         ar_include_step_index=not args.ar_no_step_index,
         ar_include_instruction=not args.ar_no_instruction,
+        head_type=args.ar_head_type,
+        spatial_n_positions=int(args.ar_spatial_n_positions),
+        spatial_head_hidden=int(args.ar_spatial_head_hidden),
     )
     cfg = SFTConfig(
         activations_root=args.activations_root,
@@ -427,10 +514,15 @@ def main(argv: list[str] | None = None) -> int:
         exclude_position_types=(
             tuple(args.exclude_position_types) if args.exclude_position_types else None
         ),
+        include_position_types=(
+            tuple(args.include_position_types) if args.include_position_types else None
+        ),
         action_consistency_weight=args.action_consistency_weight,
         action_consistency_every_n_steps=args.action_consistency_every_n_steps,
         action_consistency_max_microbatch=args.action_consistency_max_microbatch,
         action_consistency_image_patch_only=args.action_consistency_image_patch_only,
+        action_consistency_blend=args.action_consistency_blend,
+        batch_stratified_positions=args.batch_stratified_positions,
         action_consistency_policy_path=args.action_consistency_policy_path,
         action_consistency_embodiment_tag=args.action_consistency_embodiment_tag,
         action_consistency_dataset_roots=(

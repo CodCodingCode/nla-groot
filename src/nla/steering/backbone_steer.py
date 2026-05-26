@@ -29,7 +29,14 @@ from nla.extraction.sampler import (
 )
 from nla.layer_spec import BACKBONE_EMBEDDING_DIM
 
-SteerPlacement = Literal["last_text", "image_patch", "anchor", "image_patch_all", "fixed"]
+SteerPlacement = Literal[
+    "last_text",
+    "image_patch",
+    "anchor",
+    "image_patch_all",
+    "image_patch_spatial",
+    "fixed",
+]
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,11 @@ def resolve_steer_indices(
     if spec.placement == "image_patch_all":
         return [int(i) for i in iter_image_positions(row_attn, row_img)]
 
+    if spec.placement == "image_patch_spatial":
+        # Same indices as image_patch_all but ordered (the hook will place the
+        # k-th provided steer vector at the k-th index, so order matters).
+        return [int(i) for i in iter_image_positions(row_attn, row_img)]
+
     if spec.placement == "last_text":
         idx = _last_text_index(row_attn, row_img)
         if idx is None:
@@ -101,15 +113,32 @@ class BackboneFeaturesSteerHook:
         *,
         batch_index: int = 0,
     ) -> None:
-        if steer_vec.dim() == 2 and steer_vec.shape[0] == 1:
-            steer_vec = steer_vec.squeeze(0)
-        if steer_vec.dim() != 1:
-            raise ValueError(f"steer_vec must be [H]; got shape {tuple(steer_vec.shape)}")
-        if int(steer_vec.shape[0]) != BACKBONE_EMBEDDING_DIM:
-            raise ValueError(
-                f"steer_vec dim {steer_vec.shape[0]} != BACKBONE_EMBEDDING_DIM={BACKBONE_EMBEDDING_DIM}"
-            )
-        self._steer_cpu = steer_vec.detach().float().cpu().contiguous()
+        # image_patch_spatial expects a (N, H) grid; everything else expects
+        # a flat (H,) vector that gets broadcast/picked per placement.
+        if spec.placement == "image_patch_spatial":
+            if steer_vec.dim() == 3 and steer_vec.shape[0] == 1:
+                steer_vec = steer_vec.squeeze(0)
+            if steer_vec.dim() != 2:
+                raise ValueError(
+                    "image_patch_spatial requires steer_vec shape (N, H); "
+                    f"got {tuple(steer_vec.shape)}"
+                )
+            if int(steer_vec.shape[1]) != BACKBONE_EMBEDDING_DIM:
+                raise ValueError(
+                    f"steer_vec hidden dim {steer_vec.shape[1]} != "
+                    f"BACKBONE_EMBEDDING_DIM={BACKBONE_EMBEDDING_DIM}"
+                )
+            self._steer_cpu = steer_vec.detach().float().cpu().contiguous()
+        else:
+            if steer_vec.dim() == 2 and steer_vec.shape[0] == 1:
+                steer_vec = steer_vec.squeeze(0)
+            if steer_vec.dim() != 1:
+                raise ValueError(f"steer_vec must be [H]; got shape {tuple(steer_vec.shape)}")
+            if int(steer_vec.shape[0]) != BACKBONE_EMBEDDING_DIM:
+                raise ValueError(
+                    f"steer_vec dim {steer_vec.shape[0]} != BACKBONE_EMBEDDING_DIM={BACKBONE_EMBEDDING_DIM}"
+                )
+            self._steer_cpu = steer_vec.detach().float().cpu().contiguous()
         self.spec = spec
         self.batch_index = int(batch_index)
         self._handle: torch.utils.hooks.RemovableHandle | None = None
@@ -130,17 +159,31 @@ class BackboneFeaturesSteerHook:
         steer = self._steer_cpu.to(device=feats.device, dtype=feats.dtype)
         blend = float(self.spec.blend)
         blend = max(0.0, min(1.0, blend))
+        is_spatial = self.spec.placement == "image_patch_spatial"
+        if is_spatial:
+            if steer.dim() != 2:
+                raise RuntimeError(
+                    f"image_patch_spatial expects 2D steer; got {tuple(steer.shape)}"
+                )
+            if steer.shape[0] != len(idxs):
+                raise RuntimeError(
+                    f"image_patch_spatial: AR emitted {steer.shape[0]} vectors "
+                    f"but GR00T has {len(idxs)} image_patch tokens in this "
+                    "forward. Set ARConfig.spatial_n_positions to match the "
+                    "live image_patch count (post-pooling)."
+                )
 
         new_feats = feats.clone()
         bi = self.batch_index
-        for t in idxs:
+        for k, t in enumerate(idxs):
             if blend <= 0.0:
                 continue
             base = feats[bi, t]
+            steer_k = steer[k] if is_spatial else steer
             if blend >= 1.0:
-                new_feats[bi, t] = steer
+                new_feats[bi, t] = steer_k
             else:
-                new_feats[bi, t] = (1.0 - blend) * base + blend * steer
+                new_feats[bi, t] = (1.0 - blend) * base + blend * steer_k
         output["backbone_features"] = new_feats
 
     def clear(self) -> None:

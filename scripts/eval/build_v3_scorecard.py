@@ -112,6 +112,17 @@ BANDS: dict[str, Band] = {
     "sim_wrong_minus_baseline":         Band(
         pass_at=0.00, warn_at=0.05, higher_is_better=False,
     ),
+    # ---- Stage-1 plan: image_patch-stratified headline bands. ----
+    # When per-position data is available these become the required-pass
+    # gates (replacing the pooled ones), since image_patch is the only slot
+    # whose success means "we built a text↔vision interface on a VLA."
+    # Pooled metrics are demoted to INFORMATIONAL in that case.
+    # Thresholds are stricter than pooled because the failure mode the
+    # paper documents is specifically pooled-PASS / image_patch-FAIL.
+    "retrieval_margin_image_patch":          Band(pass_at=0.10, warn_at=0.05),
+    "judge_grounding_specific_pct_image_patch":     Band(pass_at=0.50, warn_at=0.30),
+    "judge_anti_template_specific_pct_image_patch": Band(pass_at=0.40, warn_at=0.20),
+    "sim_correct_minus_wrong_image_patch":   Band(pass_at=0.05, warn_at=0.00),
 }
 
 # The subset of bands that must all PASS to call the whole run a PASS.
@@ -128,6 +139,22 @@ REQUIRED_FOR_PASS_WITH_SIM = (
     "sim_correct_minus_wrong",
 )
 
+# Stage-1 plan: when image_patch-stratified data is available it becomes the
+# headline. These required sets replace the pooled ones above; the pooled
+# metrics are demoted to INFORMATIONAL so the overall verdict reflects
+# whether the codec works on the vision slot, not whether it works on
+# instruction-echo text slots.
+REQUIRED_FOR_PASS_IMAGE_PATCH_NO_SIM = (
+    "retrieval_margin_image_patch",
+    "judge_grounding_specific_pct_image_patch",
+    "judge_anti_template_specific_pct_image_patch",
+)
+REQUIRED_FOR_PASS_IMAGE_PATCH_WITH_SIM = (
+    "retrieval_margin_image_patch",
+    "judge_grounding_specific_pct_image_patch",
+    "sim_correct_minus_wrong_image_patch",
+)
+
 # Metrics that affect the overall verdict (warn-aware) but are not in the
 # required-pass set above. Reference-only signals live here.
 INFORMATIONAL = (
@@ -138,6 +165,16 @@ INFORMATIONAL = (
     "sim_correct_success",
     "sim_correct_minus_baseline_floor",
     "sim_wrong_minus_baseline",
+)
+
+# When the image_patch headline is active, these pooled metrics drop from
+# required to informational so they still appear in the table but don't
+# gate the overall verdict.
+DEMOTED_WHEN_IMAGE_PATCH_HEADLINE = (
+    "retrieval_margin",
+    "judge_grounding_specific_pct",
+    "judge_anti_template_specific_pct",
+    "sim_correct_minus_wrong",
 )
 
 
@@ -451,14 +488,45 @@ class MetricRow:
     required_for_overall: bool
 
 
+def _image_patch_headline_active(values: dict[str, Any]) -> bool:
+    """True iff enough image_patch-stratified metrics are present to use
+    the image_patch headline gate. Requires retrieval margin + at least one
+    judge metric on the vision slot (the two cheapest signals)."""
+    has_ret = isinstance(
+        values.get("retrieval_margin_image_patch"), (int, float)
+    )
+    has_judge = isinstance(
+        values.get("judge_grounding_specific_pct_image_patch"), (int, float)
+    )
+    return has_ret and has_judge
+
+
 def _build_metric_rows(values: dict[str, Any]) -> list[MetricRow]:
     rows: list[MetricRow] = []
     has_sim = bool(values.get("sim_present"))
-    required = (
-        REQUIRED_FOR_PASS_WITH_SIM if has_sim else REQUIRED_FOR_PASS_NO_SIM
+    has_sim_image_patch = isinstance(
+        values.get("sim_correct_minus_wrong_image_patch"), (int, float)
     )
+    image_patch_headline = _image_patch_headline_active(values)
+    if image_patch_headline:
+        required = (
+            REQUIRED_FOR_PASS_IMAGE_PATCH_WITH_SIM
+            if has_sim_image_patch
+            else REQUIRED_FOR_PASS_IMAGE_PATCH_NO_SIM
+        )
+        # When the image_patch headline is active, the pooled metrics still
+        # appear in the table but become informational.
+        info_extra = tuple(DEMOTED_WHEN_IMAGE_PATCH_HEADLINE)
+    else:
+        required = (
+            REQUIRED_FOR_PASS_WITH_SIM if has_sim else REQUIRED_FOR_PASS_NO_SIM
+        )
+        info_extra = ()
     ordered_metrics = [m for m in required if m in BANDS]
     ordered_metrics += [m for m in INFORMATIONAL if m in BANDS and m not in required]
+    for m in info_extra:
+        if m in BANDS and m not in ordered_metrics:
+            ordered_metrics.append(m)
     # Also include sim_correct_minus_wrong if sim NOT present, just to surface
     # the gap, but mark it NA / not-required.
     if not has_sim and "sim_correct_minus_wrong" not in ordered_metrics:
@@ -572,8 +640,30 @@ def main(argv: list[str] | None = None) -> int:
         if block:
             by_position_type[pt] = block
 
+    # Stage-1 plan: lift image_patch-stratified values into the top-level
+    # `values` dict under the *_image_patch metric names so _build_metric_rows
+    # can find them and use the image_patch-required gate.
+    ip_block = by_position_type.get("image_patch") or {}
+    ip_ret = ip_block.get("retrieval_margin")
+    if isinstance(ip_ret, (int, float)):
+        values["retrieval_margin_image_patch"] = float(ip_ret)
+    ip_judge_av_block = judge_av_by_pos.get("image_patch") or {}
+    ip_judge_grounding = ip_judge_av_block.get("judge_grounding_specific_pct")
+    if isinstance(ip_judge_grounding, (int, float)):
+        values["judge_grounding_specific_pct_image_patch"] = float(ip_judge_grounding)
+    ip_judge_anti = ip_judge_av_block.get("judge_anti_template_specific_pct")
+    if isinstance(ip_judge_anti, (int, float)):
+        values["judge_anti_template_specific_pct_image_patch"] = float(ip_judge_anti)
+    # sim_correct_minus_wrong_image_patch is not yet emitted by any upstream
+    # script — closed_loop_sim_ab.py reports pooled only. The new CF dose
+    # sweep (nla_steer_alpha_sweep.py) reports Δ_cw per alpha/condition; once
+    # an image_patch-stratified sim metric lands in sim_ab.json, parse it
+    # here. Until then this remains absent and the image_patch headline
+    # falls back to the no-sim required set.
+
     rows = _build_metric_rows(values)
     overall = _overall_verdict(rows)
+    image_patch_headline = _image_patch_headline_active(values)
 
     scorecard = Scorecard(
         checkpoint=str(ckpt_dir),
@@ -592,6 +682,21 @@ def main(argv: list[str] | None = None) -> int:
             "sim_present": values.get("sim_present", False),
             "sim_n_episodes_per_arm": values.get("sim_n_episodes", 0),
             "sim_per_suite": values.get("sim_per_suite", {}),
+            "image_patch_headline": image_patch_headline,
+            "headline_metrics": (
+                list(REQUIRED_FOR_PASS_IMAGE_PATCH_WITH_SIM)
+                if image_patch_headline and isinstance(
+                    values.get("sim_correct_minus_wrong_image_patch"),
+                    (int, float),
+                )
+                else list(REQUIRED_FOR_PASS_IMAGE_PATCH_NO_SIM)
+                if image_patch_headline
+                else list(
+                    REQUIRED_FOR_PASS_WITH_SIM
+                    if values.get("sim_present")
+                    else REQUIRED_FOR_PASS_NO_SIM
+                )
+            ),
         },
         by_position_type=by_position_type,
     )
@@ -602,7 +707,14 @@ def main(argv: list[str] | None = None) -> int:
     # Console summary
     print()
     print("=" * 78)
-    print(f"V3 LIBERO SCORECARD                       overall = {overall}")
+    headline_tag = (
+        "image_patch HEADLINE"
+        if image_patch_headline
+        else "pooled (legacy) headline"
+    )
+    print(
+        f"V3 LIBERO SCORECARD      {headline_tag:<28s}  overall = {overall}"
+    )
     print("=" * 78)
     print(f"  {'metric':<40s}  {'value':>9s}  {'pass>=':>9s}  {'warn>=':>9s}  verdict  req")
     print(f"  {'-'*40}  {'-'*9}  {'-'*9}  {'-'*9}  -------  ---")
@@ -661,12 +773,35 @@ def main(argv: list[str] | None = None) -> int:
         print()
     print(f"  -> {out_p}")
     print()
-    if overall == "PASS":
-        print("  V3 is REAL: retrieval margin + grounding + (sim/anti-template) all PASS.")
-    elif overall == "WARN":
-        print("  V3 is borderline: some required gate is WARN/NA.")
+    if image_patch_headline:
+        if overall == "PASS":
+            print(
+                "  V3 is REAL on image_patch: vision-slot retrieval + grounding "
+                "(+ sim) all PASS."
+            )
+        elif overall == "WARN":
+            print(
+                "  V3 is borderline on image_patch: some image_patch headline "
+                "gate is WARN/NA."
+            )
+        else:
+            print(
+                "  V3 is FAIL on image_patch: at least one image_patch headline "
+                "gate is below the warn band. Pooled metrics may still look OK "
+                "— do not be misled."
+            )
     else:
-        print("  V3 is FAIL: at least one required gate is below the warn band.")
+        if overall == "PASS":
+            print("  V3 is REAL: retrieval margin + grounding + (sim/anti-template) all PASS.")
+        elif overall == "WARN":
+            print("  V3 is borderline: some required gate is WARN/NA.")
+        else:
+            print("  V3 is FAIL: at least one required gate is below the warn band.")
+        print(
+            "  [note] image_patch headline is not active: run the judge with "
+            "--per-position-image-patch >= 48 and ensure closed_loop_retrieval "
+            "emits by_position.image_patch to switch the gate to the vision slot."
+        )
 
     if args.exit_on_fail and overall == "FAIL":
         return 2

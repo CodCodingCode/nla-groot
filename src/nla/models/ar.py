@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import torch
 from torch import nn
@@ -79,6 +80,25 @@ class ARConfig:
     ar_include_step_index: bool = True
     ar_include_instruction: bool = True
 
+    # Stage-3 plan: spatial AR output. ``scalar`` (default, V3/V4/V5 byte-
+    # identical) returns a single ``(B, H)`` vector per text input that gets
+    # broadcast across image_patch slots at inject time. ``spatial`` returns
+    # a ``(B, N, H)`` grid; one vector per image_patch position. Pair with
+    # placement="image_patch_spatial" at steer time so the k-th predicted
+    # vector lands in the k-th image_patch slot, restoring the spatial
+    # variation that real GR00T vision tokens carry.
+    head_type: Literal["scalar", "spatial"] = "scalar"
+    # Number of spatial positions emitted by the spatial head. Must match
+    # the count of image_patch tokens in the GR00T forward (post-pooling).
+    # Ignored when head_type=="scalar". 0 (default) is a sentinel — set it
+    # explicitly when head_type=="spatial" or AR will raise at init.
+    spatial_n_positions: int = 0
+    # Hidden width of the small MLP that produces the per-position vectors.
+    # Only consulted when head_type=="spatial". Defaults to the AR base
+    # model's hidden size so the head adds no extra hyperparameters when
+    # left at 0.
+    spatial_head_hidden: int = 0
+
 
 class ActivationReconstructor(nn.Module):
     """Truncated causal LM + LoRA + affine head."""
@@ -109,9 +129,23 @@ class ActivationReconstructor(nn.Module):
         if apply_lora:
             self.base = _wrap_lora_ar(self.base, cfg)
 
-        self.head = nn.Linear(hidden_size, cfg.activation_dim, bias=True)
-        nn.init.xavier_uniform_(self.head.weight)
-        nn.init.zeros_(self.head.bias)
+        if cfg.head_type == "spatial":
+            if cfg.spatial_n_positions <= 0:
+                raise ValueError(
+                    "ARConfig.head_type='spatial' requires spatial_n_positions > 0; "
+                    f"got {cfg.spatial_n_positions}. Set it to the number of "
+                    "image_patch tokens GR00T emits at layer 16 (post-pooling)."
+                )
+            self.head = SpatialReconstructionHead(
+                hidden_size=hidden_size,
+                activation_dim=cfg.activation_dim,
+                n_positions=int(cfg.spatial_n_positions),
+                hidden=int(cfg.spatial_head_hidden) or hidden_size,
+            )
+        else:
+            self.head = nn.Linear(hidden_size, cfg.activation_dim, bias=True)
+            nn.init.xavier_uniform_(self.head.weight)
+            nn.init.zeros_(self.head.bias)
 
     # ------------------------------------------------------------------ utils
 
@@ -216,7 +250,10 @@ class ActivationReconstructor(nn.Module):
         step_indices: list[int | None] | None = None,
         instructions: list[str | None] | None = None,
     ) -> torch.Tensor:
-        """Return α-scaled predictions ``(B, activation_dim)``.
+        """Return α-scaled predictions.
+
+        - head_type='scalar': ``(B, activation_dim)`` (legacy)
+        - head_type='spatial': ``(B, N, activation_dim)`` (Stage-3)
 
         Use ``predict(...)`` if you want unscaled outputs (the default for
         consumers of the activation).
@@ -233,7 +270,15 @@ class ActivationReconstructor(nn.Module):
         attention_mask = toks["attention_mask"].to(device)
         hidden = self._run_transformer(input_ids, attention_mask)
         last = self._pickoff(hidden, attention_mask)
-        return self.head(last.to(self.head.weight.dtype))
+        head_dtype = self._head_param_dtype()
+        return self.head(last.to(head_dtype))
+
+    def _head_param_dtype(self) -> torch.dtype:
+        """Pick the dtype the head's first parameter uses, working for both
+        the legacy nn.Linear and the spatial decoder."""
+        for p in self.head.parameters():
+            return p.dtype
+        return torch.float32
 
     def predict(
         self,
@@ -305,6 +350,15 @@ class ActivationReconstructor(nn.Module):
             step_indices=step_indices,
             instructions=instructions,
         )
+        if pred_scaled.dim() != target_activations.dim():
+            raise ValueError(
+                f"AR head_type={self.cfg.head_type!r} produces "
+                f"{pred_scaled.dim()}D predictions (shape {tuple(pred_scaled.shape)}) "
+                f"but target_activations is {target_activations.dim()}D "
+                f"(shape {tuple(target_activations.shape)}). For "
+                "head_type='spatial' the dataset must supply per-position "
+                "targets of shape (B, N, H); for 'scalar' a (B, H) tensor."
+            )
         target_scaled = (target_activations / self.cfg.alpha).to(pred_scaled.dtype)
         if self.cfg.clip_target_scaled is not None:
             clip = float(self.cfg.clip_target_scaled)
@@ -313,7 +367,18 @@ class ActivationReconstructor(nn.Module):
         if not return_nce:
             return mse, pred_scaled
 
-        B = pred_scaled.shape[0]
+        # For the contrastive term we collapse spatial predictions to a single
+        # per-row vector via mean-pool over N. This keeps the existing InfoNCE
+        # path intact: AR's per-row identity should still differ across rows
+        # regardless of head shape.
+        if pred_scaled.dim() == 3:
+            pred_for_nce = pred_scaled.mean(dim=1)
+            target_for_nce = target_scaled.mean(dim=1)
+        else:
+            pred_for_nce = pred_scaled
+            target_for_nce = target_scaled
+
+        B = pred_for_nce.shape[0]
         if B > 1:
             # Cosine similarity with temperature.  Cosine lives in [-1, 1]
             # regardless of the tiny per-dim magnitudes of α-scaled
@@ -325,13 +390,13 @@ class ActivationReconstructor(nn.Module):
             # Cosine + temperature 0.1 puts sims in [-10, 10], giving a real
             # contrastive signal even at batch size 4.
             sims = nn.functional.cosine_similarity(
-                pred_scaled.unsqueeze(1),                 # (B, 1, H)
-                target_scaled.unsqueeze(0),               # (1, B, H)
+                pred_for_nce.unsqueeze(1),                # (B, 1, H)
+                target_for_nce.unsqueeze(0),              # (1, B, H)
                 dim=-1,
             )                                             # (B, B), in [-1, 1]
             if negative_explanations is not None:
                 sims_neg = self._hard_negative_sims(
-                    pred_scaled=pred_scaled,
+                    pred_scaled=pred_for_nce,
                     negative_explanations=negative_explanations,
                     position_types=position_types,
                     step_indices=step_indices,
@@ -340,7 +405,7 @@ class ActivationReconstructor(nn.Module):
                 sims = torch.cat([sims, sims_neg], dim=1)  # (B, B+K_neg)
             temp = max(1e-6, float(self.cfg.nce_temperature))
             sims = sims / temp
-            labels = torch.arange(B, device=pred_scaled.device)
+            labels = torch.arange(B, device=pred_for_nce.device)
             nce = nn.functional.cross_entropy(sims.float(), labels)
         else:
             nce = torch.zeros((), device=pred_scaled.device, dtype=mse.dtype)
@@ -398,9 +463,14 @@ class ActivationReconstructor(nn.Module):
             position_types=neg_position_types,
             step_indices=neg_step_indices,
             instructions=neg_instructions,
-        )  # (B*K_neg, H)
+        )  # (B*K_neg, H) for scalar head, (B*K_neg, N, H) for spatial.
+        if pred_neg_flat.dim() == 3:
+            # Mean-pool spatial predictions; the contrastive term scores
+            # row identity, not per-position structure.
+            pred_neg_flat = pred_neg_flat.mean(dim=1)
         pred_neg = pred_neg_flat.view(B, K_neg, pred_neg_flat.shape[-1])
-        # cos(pred[i], pred_neg[i, k]) for each (i, k).
+        # cos(pred[i], pred_neg[i, k]) for each (i, k). pred_scaled is the
+        # mean-pooled (B, H) view passed in from forward_sft.
         return nn.functional.cosine_similarity(
             pred_scaled.unsqueeze(1),                 # (B, 1, H)
             pred_neg,                                 # (B, K_neg, H)
@@ -475,6 +545,63 @@ def _resolve_backbone(model):
     if sub is not None:
         return sub
     return model
+
+
+class SpatialReconstructionHead(nn.Module):
+    """Stage-3 AR head: maps the LM's picked-off hidden vector ``(B, H_lm)``
+    to a spatial grid of N per-position activation vectors ``(B, N, H_act)``.
+
+    Architecture is intentionally minimal: a learned per-position query
+    embedding crossed with the LM hidden state via a position-conditioned
+    MLP. Pure feed-forward — no attention — keeping the head's parameter
+    count small (~N * H_lm) and the wall-clock overhead negligible vs. the
+    LM forward.
+
+    Initialization mirrors the scalar head: Xavier on the projection
+    weights, zeros on the bias. Per-position embeddings start with small
+    Gaussian noise so the head doesn't collapse to identical outputs across
+    positions at step 0.
+    """
+
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        activation_dim: int,
+        n_positions: int,
+        hidden: int,
+    ) -> None:
+        super().__init__()
+        self.n_positions = int(n_positions)
+        self.activation_dim = int(activation_dim)
+        # Per-position learned offset on the LM hidden state. Initialized
+        # small so the head's initial predictions are uniform across N
+        # (matches the legacy broadcast-one-vector behavior at step 0).
+        self.position_embeddings = nn.Parameter(
+            torch.randn(self.n_positions, hidden_size) * 0.02
+        )
+        self.fuse = nn.Linear(hidden_size, hidden)
+        self.act = nn.GELU()
+        self.project = nn.Linear(hidden, activation_dim, bias=True)
+        nn.init.xavier_uniform_(self.fuse.weight)
+        nn.init.zeros_(self.fuse.bias)
+        nn.init.xavier_uniform_(self.project.weight)
+        nn.init.zeros_(self.project.bias)
+
+    def forward(self, last_hidden: torch.Tensor) -> torch.Tensor:
+        """``last_hidden`` is ``(B, H_lm)`` (the AR pick-off vector).
+        Returns ``(B, N, activation_dim)``."""
+        if last_hidden.dim() != 2:
+            raise ValueError(
+                f"SpatialReconstructionHead expects (B, H_lm); got "
+                f"{tuple(last_hidden.shape)}"
+            )
+        B = last_hidden.shape[0]
+        # Broadcast position embeddings: (B, N, H_lm) = h.unsqueeze(1) + pos
+        pos = self.position_embeddings.to(last_hidden.dtype)
+        per_pos = last_hidden.unsqueeze(1) + pos.unsqueeze(0)   # (B, N, H_lm)
+        fused = self.act(self.fuse(per_pos))                    # (B, N, hidden)
+        return self.project(fused)                              # (B, N, act_dim)
 
 
 def _wrap_lora_ar(model, cfg: ARConfig):

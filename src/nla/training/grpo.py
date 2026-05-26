@@ -240,6 +240,17 @@ class GRPOConfig:
     # the rollout subprocesses so the contrast scores agree.
     sim_w_predicate: float = 2.0
 
+    # v7: CF pair curriculum. When True, the CounterfactualPairSampler
+    # restricts its per-id candidate pool to the easiest fraction of
+    # difficulty-sorted rows at each step. Fraction ramps from
+    # ``curriculum_min_eligible_frac`` (default 0.2) at step 0 to 1.0 at
+    # the end of training. Requires CF pair JSONL rows to carry a
+    # ``difficulty: float`` field (lower = easier); without it the flag
+    # logs a warning and falls back to uniform sampling. See
+    # ``docs/sft_plan/v7_runbook.md`` for the difficulty-scoring recipe.
+    curriculum_easy_to_hard: bool = False
+    curriculum_min_eligible_frac: float = 0.2
+
     # ------------------------------------------------------------------
     # SimpleVLA-RL-inspired knobs (all OFF/default for byte-identical
     # baseline runs; the new fields are hidden from the saved
@@ -1757,6 +1768,8 @@ def run_grpo(cfg: GRPOConfig) -> dict:
             cfg.sim_counterfactual_pairs_path,
             seed=cfg.seed,
             additional_paths=cfg.sim_counterfactual_pairs_paths_extra or None,
+            curriculum_easy_to_hard=cfg.curriculum_easy_to_hard,
+            curriculum_min_eligible_frac=cfg.curriculum_min_eligible_frac,
         )
         sim_worker = SimRewardWorker(
             policy_host=cfg.sim_policy_host,
@@ -1817,6 +1830,10 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                         "sim_reward_weight > 0 needs batch['example_id']; "
                         "got an empty/None list -- check dataset wiring."
                     )
+                # v7 curriculum: update progress fraction before sampling so
+                # the eligible-candidate window grows linearly across the run.
+                if cfg.curriculum_easy_to_hard:
+                    cf_sampler.set_step_frac(step / max(1, cfg.total_steps))
                 pairs = cf_sampler.sample_for(source_ids)
                 sim_cf_ok = [
                     bool(p.target_task and p.target_env_name) for p in pairs

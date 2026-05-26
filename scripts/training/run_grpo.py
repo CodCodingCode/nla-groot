@@ -59,6 +59,17 @@ import sys
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument(
+        "--recipe",
+        choices=["v7"],
+        default=None,
+        help="Apply a named GRPO recipe before parsing other CLI flags. "
+             "Recipe defaults are overridden by any explicit CLI argument. "
+             "'v7' is the full retrain plan: sim_reward_weight=0.8, "
+             "mandatory contrastive+null arms, B=4 K=8, beta=0.05 KL leash, "
+             "language_swap protocol, CF curriculum. See "
+             "docs/sft_plan/v7_runbook.md for per-setting rationale.",
+    )
     p.add_argument("--sft-dir", required=True,
                    help="Output dir from run_sft.py (must contain av/ and ar/).")
     p.add_argument("--activations-root", required=True)
@@ -295,6 +306,24 @@ def _build_parser() -> argparse.ArgumentParser:
                         "identical. Lower this (e.g. 1.0) to densify the "
                         "sim reward and give GRPO groups more within-"
                         "group variance.")
+    p.add_argument(
+        "--curriculum-easy-to-hard",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="v7: ramp CF pair difficulty over the run. At step 0 only "
+             "the easiest --curriculum-min-eligible-frac of difficulty-"
+             "sorted candidates per source_example_id are eligible to be "
+             "sampled; the fraction grows linearly to 1.0 by the end of "
+             "training. Requires CF pair JSONL rows to carry a "
+             "'difficulty: float' field (0=easy, 1=hard); without it the "
+             "flag is a no-op with a warning at startup.",
+    )
+    p.add_argument(
+        "--curriculum-min-eligible-frac", type=float, default=0.2,
+        help="Curriculum floor: minimum fraction of difficulty-sorted "
+             "candidates eligible at step 0. Default 0.2 means the easiest "
+             "20%% of pairs are always sampleable from the start.",
+    )
 
     # ---- SimpleVLA-RL-inspired knobs (off / auto by default) -----------
     p.add_argument(
@@ -352,7 +381,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    # Apply named-recipe defaults *before* parse_args so explicit CLI flags
+    # win over recipe-set defaults. See src/nla/training/recipes.py.
+    from nla.training.recipes import V7_GRPO_DEFAULTS, apply_recipe_defaults
+    apply_recipe_defaults(
+        parser,
+        argv if argv is not None else sys.argv[1:],
+        recipes={"v7": V7_GRPO_DEFAULTS},
+    )
+    args = parser.parse_args(argv)
     logging.basicConfig(
         level=args.log_level,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -459,6 +497,8 @@ def main(argv: list[str] | None = None) -> int:
         sim_contrastive_weight=args.sim_contrastive_weight,
         sim_null_control_weight=args.sim_null_control_weight,
         sim_w_predicate=args.sim_w_predicate,
+        curriculum_easy_to_hard=args.curriculum_easy_to_hard,
+        curriculum_min_eligible_frac=args.curriculum_min_eligible_frac,
         dynamic_sampling=args.dynamic_sampling,
         dynamic_sampling_threshold=args.dynamic_sampling_threshold,
         use_ppo_clip=args.use_ppo_clip,

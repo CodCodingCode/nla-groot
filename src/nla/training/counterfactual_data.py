@@ -99,6 +99,10 @@ class CounterfactualPair:
     is_counterfactual: bool
     source_intent: str
     source_task: str
+    # Optional precomputed difficulty in [0, 1]; lower = easier. Used by
+    # ``CounterfactualPairSampler`` when curriculum mode is on. Defaults to
+    # 0.5 (medium) when the source JSONL row carries no ``difficulty`` key.
+    difficulty: float = 0.5
 
 
 class CounterfactualPairSampler:
@@ -126,6 +130,8 @@ class CounterfactualPairSampler:
         additional_paths: Iterable[str | Path] | None = None,
         validate_bodies_in_bddl: bool = True,
         bddl_dir: str | Path | None = None,
+        curriculum_easy_to_hard: bool = False,
+        curriculum_min_eligible_frac: float = 0.2,
     ) -> None:
         self.pairs_path = Path(pairs_path)
         self.additional_paths: list[Path] = [Path(p) for p in (additional_paths or [])]
@@ -141,7 +147,24 @@ class CounterfactualPairSampler:
         # for the same row) is not double-weighted by ``random.choice``.
         self._seen_per_bucket: dict[str, set[tuple]] = defaultdict(set)
         self._call_counter = 0
+        # Curriculum: when ``curriculum_easy_to_hard`` is True the per-id
+        # candidate pool is restricted to the bottom ``frac`` of difficulty-
+        # sorted rows, with ``frac`` ramped from ``curriculum_min_eligible_frac``
+        # at step 0 to 1.0 at the end of training. ``set_step_frac`` is the
+        # caller's hook to update ``frac`` between training steps.
+        self.curriculum_easy_to_hard = bool(curriculum_easy_to_hard)
+        self.curriculum_min_eligible_frac = float(curriculum_min_eligible_frac)
+        self._step_frac: float = 0.0
+        self._n_difficulty_present: int = 0
+        self._n_difficulty_missing: int = 0
         self._load()
+        if self.curriculum_easy_to_hard and self._n_difficulty_present == 0:
+            logger.warning(
+                "curriculum_easy_to_hard=True but no CF pair rows carried a "
+                "'difficulty' field. Curriculum is a no-op until pairs are "
+                "annotated (see scripts/training/score_cf_pair_difficulty.py "
+                "in the v7 runbook). Sampling reverts to uniform."
+            )
 
     def _load(self) -> None:
         all_paths = [self.pairs_path, *self.additional_paths]
@@ -205,6 +228,13 @@ class CounterfactualPairSampler:
                             "skip CF row sid=%s: %s", sid, body_issues
                         )
                         continue
+                raw_difficulty = obj.get("difficulty")
+                if raw_difficulty is None:
+                    difficulty = 0.5
+                    self._n_difficulty_missing += 1
+                else:
+                    difficulty = max(0.0, min(1.0, float(raw_difficulty)))
+                    self._n_difficulty_present += 1
                 pair = CounterfactualPair(
                     source_example_id=str(sid),
                     target_intent=str(tgt_intent),
@@ -213,6 +243,7 @@ class CounterfactualPairSampler:
                     is_counterfactual=bool(obj.get("is_counterfactual", False)),
                     source_intent=str(obj.get("source_intent", "")),
                     source_task=str(obj.get("source_task", "")),
+                    difficulty=difficulty,
                 )
                 # Index under BOTH the source-side id and the label-side id
                 # so a dataset that yields either flavor (see
@@ -255,6 +286,35 @@ class CounterfactualPairSampler:
     def has(self, source_example_id: str) -> bool:
         return source_example_id in self._by_id
 
+    def set_step_frac(self, frac: float) -> None:
+        """Update the curriculum progress in [0, 1]. 0 = start, 1 = end."""
+        self._step_frac = max(0.0, min(1.0, float(frac)))
+
+    def _eligible_candidates(
+        self, candidates: list[CounterfactualPair]
+    ) -> list[CounterfactualPair]:
+        """Return the difficulty-restricted candidate slice for the current step.
+
+        When curriculum is off (or no difficulty data is present), returns
+        the full list. Otherwise sorts by ``difficulty`` ascending and keeps
+        the easiest ``floor`` rows where::
+
+            frac = curriculum_min_eligible_frac
+                 + (1.0 - curriculum_min_eligible_frac) * step_frac
+            floor = max(1, ceil(len(candidates) * frac))
+        """
+        if not (self.curriculum_easy_to_hard and self._n_difficulty_present > 0):
+            return candidates
+        if len(candidates) <= 1:
+            return candidates
+        import math
+        frac = self.curriculum_min_eligible_frac + (
+            1.0 - self.curriculum_min_eligible_frac
+        ) * self._step_frac
+        floor = max(1, int(math.ceil(len(candidates) * frac)))
+        ordered = sorted(candidates, key=lambda p: p.difficulty)
+        return ordered[:floor]
+
     def sample_for(
         self,
         source_example_ids: Sequence[str],
@@ -276,7 +336,8 @@ class CounterfactualPairSampler:
                     source_task="",
                 ))
                 continue
-            out.append(rng.choice(candidates))
+            pool = self._eligible_candidates(candidates)
+            out.append(rng.choice(pool))
         return out
 
     def intents(self, source_example_ids: Sequence[str]) -> list[str]:

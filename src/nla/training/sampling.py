@@ -108,3 +108,110 @@ def sample_token_position(
     if rng is not None:
         sampler._rng = rng
     return sampler.sample(attention_mask, image_mask, force_type=force_type)
+
+
+class StratifiedPositionBatchSampler:
+    """BatchSampler that enforces per-batch position-type quotas.
+
+    ``WeightedRandomSampler`` rebalances at the epoch level — frequencies
+    converge over many batches but a single batch can still be e.g. 95%
+    last_text by chance. For policy-effect SFT this matters: the image_patch
+    rows are the only ones that actually exercise the steering hook at the
+    spatial slot the policy reads, and we need them to appear every batch
+    so the action-consistency gradient gets a steady image_patch signal.
+
+    This sampler partitions row indices by ``position_type`` and yields
+    batches that draw a fixed quota from each bucket. Quotas are computed
+    from the target ``position_mix``; any leftover slot from rounding goes
+    to the bucket with the largest residual (largest-remainder method).
+
+    Sampling within a bucket is with replacement (matches
+    WeightedRandomSampler) so a minority class can fill its quota even when
+    its bucket is small. Length is ``num_batches`` × ``batch_size``.
+
+    Args:
+        position_types: per-row ``position_type`` strings (len == n rows).
+        batch_size: rows per batch.
+        position_mix: target mix mapping ``position_type -> float``. Need
+            not sum to 1; normalized internally. Rows whose type is not in
+            ``position_mix`` are excluded.
+        num_batches: total number of batches to yield per epoch. Defaults
+            to ``ceil(n_eligible / batch_size)`` for parity with shuffle.
+        seed: RNG seed for reproducibility.
+    """
+
+    def __init__(
+        self,
+        position_types: list[str],
+        *,
+        batch_size: int,
+        position_mix: dict[str, float],
+        num_batches: int | None = None,
+        seed: int = 0,
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be > 0; got {batch_size}.")
+        if not position_mix:
+            raise ValueError("position_mix must be non-empty.")
+
+        # Bucket row indices by position_type.
+        self._buckets: dict[str, list[int]] = {}
+        for i, pt in enumerate(position_types):
+            if pt in position_mix:
+                self._buckets.setdefault(pt, []).append(i)
+
+        if not self._buckets:
+            raise RuntimeError(
+                "No rows match any position_type in position_mix. "
+                f"position_mix={sorted(position_mix)}; "
+                f"seen types={sorted(set(position_types))}."
+            )
+
+        # Normalize mix over present buckets only (so dropping a class
+        # gracefully reweights the rest, matching the V5 50/50 auto-fold).
+        present_mix = {k: float(position_mix[k]) for k in self._buckets}
+        total = sum(present_mix.values())
+        if total <= 0:
+            raise ValueError("position_mix weights must sum to > 0.")
+        self._mix_norm = {k: v / total for k, v in present_mix.items()}
+
+        # Largest-remainder quotas summing exactly to batch_size.
+        raw = {k: v * batch_size for k, v in self._mix_norm.items()}
+        floor = {k: int(v) for k, v in raw.items()}
+        used = sum(floor.values())
+        remainder = batch_size - used
+        # Hand out the leftover slots to the largest fractional residuals.
+        residuals = sorted(
+            ((raw[k] - floor[k], k) for k in raw),
+            key=lambda t: (-t[0], t[1]),  # ties -> alphabetic for determinism
+        )
+        for i in range(remainder):
+            _, k = residuals[i % len(residuals)]
+            floor[k] += 1
+        self._quotas = floor  # type -> count per batch
+
+        n_eligible = sum(len(v) for v in self._buckets.values())
+        if num_batches is None:
+            num_batches = max(1, (n_eligible + batch_size - 1) // batch_size)
+        self._num_batches = int(num_batches)
+        self._batch_size = int(batch_size)
+
+        self._rng = random.Random(int(seed))
+
+    @property
+    def quotas(self) -> dict[str, int]:
+        """Per-batch row counts, keyed by position_type."""
+        return dict(self._quotas)
+
+    def __iter__(self):
+        for _ in range(self._num_batches):
+            batch: list[int] = []
+            for ptype, q in self._quotas.items():
+                pool = self._buckets[ptype]
+                # With-replacement so a minority class fills its quota.
+                batch.extend(self._rng.choices(pool, k=q))
+            self._rng.shuffle(batch)
+            yield batch
+
+    def __len__(self) -> int:
+        return self._num_batches

@@ -87,6 +87,12 @@ class ServerConfig:
     image_patch_seed: int = 0
     """RNG seed for selecting a single image token when --placement=image_patch."""
 
+    alpha_scale: float = 1.0
+    """Multiplicative dose scale on the bootstrap steer vector. 1.0 keeps the
+    AR-config alpha (P75 ||h||) as-is; values <1 attenuate, >1 amplify. Used
+    by the Stage-0 dose sweep to test whether Δ_cw=0 is dose-miscalibration
+    or a true codec failure."""
+
     steer_off: bool = False
     """Build the wrapper but start with steering disabled (A/B passthrough)."""
 
@@ -166,6 +172,9 @@ def main(config: ServerConfig) -> None:
               f"{config.device})", flush=True)
         ar = load_ar_from_sft(Path(config.ar_dir), device="cpu", freeze=True)
         steer_vec = ar_text_to_backbone_vec(ar, steer_text)
+        if config.alpha_scale != 1.0:
+            steer_vec = steer_vec * float(config.alpha_scale)
+            print(f"  Alpha scale:    {config.alpha_scale}", flush=True)
         del ar
         gc.collect()
         spec = SteerSpec(

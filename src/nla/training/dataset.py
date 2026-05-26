@@ -291,6 +291,7 @@ class LabeledPositionDataset(Dataset):
         ] = "pinned",
         image_patch_pooling_strided_k: int = 4,
         exclude_position_types: tuple[str, ...] | None = None,
+        include_position_types: tuple[str, ...] | None = None,
     ):
         # ``image_patch_pooling`` controls how the dataset materializes the
         # activation for rows whose ``position_type == "image_patch"``. The
@@ -324,6 +325,14 @@ class LabeledPositionDataset(Dataset):
         self.exclude_position_types: frozenset[str] = (
             frozenset(exclude_position_types) if exclude_position_types else frozenset()
         )
+        # Stage-2 plan: positive include filter for image_patch-only runs
+        # (cleanest ablation for "is the codec capable on the vision slot if
+        # we don't dilute training with last_text/anchor?"). Mutually
+        # exclusive with exclude_position_types in semantics — when both are
+        # set, include is applied first then exclude prunes further.
+        self.include_position_types: frozenset[str] = (
+            frozenset(include_position_types) if include_position_types else frozenset()
+        )
         self.reader = ActivationShardReader(activations_root)
         self._index_by_id = {rec.example_id: i for i, rec in enumerate(self.reader.records)}
 
@@ -331,9 +340,13 @@ class LabeledPositionDataset(Dataset):
         valid = []
         n_missing = 0
         n_excluded = 0
+        n_not_included = 0
         for entry in all_labels:
             if entry.source_example_id not in self._index_by_id:
                 n_missing += 1
+                continue
+            if self.include_position_types and entry.position_type not in self.include_position_types:
+                n_not_included += 1
                 continue
             if entry.position_type in self.exclude_position_types:
                 n_excluded += 1
@@ -341,6 +354,11 @@ class LabeledPositionDataset(Dataset):
             valid.append(entry)
         if n_missing:
             logger.warning("Discarded %d labels with no matching activation.", n_missing)
+        if n_not_included:
+            logger.info(
+                "Dropped %d labels via include_position_types=%s",
+                n_not_included, sorted(self.include_position_types),
+            )
         if n_excluded:
             logger.info(
                 "Dropped %d labels via exclude_position_types=%s",

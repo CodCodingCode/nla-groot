@@ -385,3 +385,89 @@ def test_ar_lora_wrapping_works():
     loss.backward()
     grads = [p.grad for n, p in ar.named_parameters() if "lora_" in n and p.requires_grad]
     assert any(g is not None and g.abs().sum() > 0 for g in grads)
+
+
+def test_ar_spatial_head_forward_predict_and_overfit():
+    """Stage-3 plan: AR with head_type='spatial' returns (B, N, D), predicts
+    likewise, and overfits a 3D target through forward_sft."""
+    base, tok = _make_tiny_base()
+    cfg = ARConfig(
+        activation_dim=32, alpha=1.0, truncate_to_n_layers=2,
+        lora_rank=4, lora_alpha=8, dtype="float32",
+        head_type="spatial", spatial_n_positions=4,
+    )
+    ar = ActivationReconstructor(cfg, tokenizer=tok, base_model=base, apply_lora=False)
+    explanations = ["red bowl on the counter", "blue cube near gripper"]
+    pred = ar(explanations)
+    assert pred.shape == (2, 4, 32)
+    pred_unscaled = ar.predict(explanations, unscale=True)
+    assert pred_unscaled.shape == (2, 4, 32)
+
+    target_3d = torch.randn(2, 4, 32)
+    optim = torch.optim.Adam(ar.parameters(), lr=1e-2)
+    losses: list[float] = []
+    for _ in range(15):
+        optim.zero_grad()
+        loss, _ = ar.forward_sft(explanations, target_3d)
+        loss.backward()
+        optim.step()
+        losses.append(loss.item())
+    assert losses[-1] < losses[0]
+    assert losses[-1] < 0.8 * losses[0]
+
+
+def test_ar_spatial_head_nce_mean_pools_over_positions():
+    """InfoNCE on spatial output mean-pools over the N axis so per-row
+    identity is still well-defined; nce remains finite at B>1."""
+    base, tok = _make_tiny_base()
+    cfg = ARConfig(
+        activation_dim=16, alpha=1.0, truncate_to_n_layers=2,
+        lora_rank=4, lora_alpha=8, dtype="float32",
+        head_type="spatial", spatial_n_positions=3,
+    )
+    ar = ActivationReconstructor(cfg, tokenizer=tok, base_model=base, apply_lora=False)
+    target_3d = torch.randn(2, 3, 16)
+    mse, nce, _ = ar.forward_sft(
+        ["one explanation", "another explanation"],
+        target_3d,
+        return_nce=True,
+    )
+    assert torch.isfinite(mse) and torch.isfinite(nce)
+
+
+def test_ar_spatial_head_rejects_2d_target_with_clear_error():
+    """Mismatched target shape against spatial head must raise with a message
+    pointing at the dataset wiring (per Stage-3 plan)."""
+    base, tok = _make_tiny_base()
+    cfg = ARConfig(
+        activation_dim=16, alpha=1.0, truncate_to_n_layers=2,
+        lora_rank=4, lora_alpha=8, dtype="float32",
+        head_type="spatial", spatial_n_positions=3,
+    )
+    ar = ActivationReconstructor(cfg, tokenizer=tok, base_model=base, apply_lora=False)
+    target_2d = torch.randn(2, 16)
+    try:
+        ar.forward_sft(["x", "y"], target_2d)
+    except ValueError as exc:
+        assert "spatial" in str(exc)
+        assert "B, N, H" in str(exc) or "(B, N, H)" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for 2D target on spatial head")
+
+
+def test_ar_config_spatial_requires_positive_n():
+    """ARConfig.head_type='spatial' must hard-error when spatial_n_positions
+    is 0 (sentinel) — silently broadcasting via a default would mask config
+    errors. Triggered at AR construction, not at forward."""
+    base, tok = _make_tiny_base()
+    cfg = ARConfig(
+        activation_dim=16, alpha=1.0, truncate_to_n_layers=2,
+        lora_rank=4, lora_alpha=8, dtype="float32",
+        head_type="spatial", spatial_n_positions=0,
+    )
+    try:
+        ActivationReconstructor(cfg, tokenizer=tok, base_model=base, apply_lora=False)
+    except ValueError as exc:
+        assert "spatial_n_positions" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for spatial_n_positions=0")

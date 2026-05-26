@@ -78,6 +78,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         "wrote into --frames-cache; rows that resolve to zero "
                         "on-disk frames are dropped from grading.")
     p.add_argument("--per-position", type=int, default=12)
+    p.add_argument("--per-position-image-patch", type=int, default=None,
+                   help="Override --per-position for image_patch tokens only. "
+                        "Set this to >= 48 when image_patch is the headline "
+                        "slice (Stage 1 plan) — otherwise per-type n is too "
+                        "small to be more than noise on the vision slot.")
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--max-new-tokens", type=int, default=220)
     p.add_argument("--held-out-fraction", type=float, default=0.05)
@@ -217,7 +222,10 @@ async def _amain(args) -> int:
 
     for ptype, indices in by_pos.items():
         perm = torch.randperm(len(indices), generator=rng).tolist()
-        chosen = [indices[k] for k in perm[: args.per_position]]
+        n_for_ptype = args.per_position
+        if ptype == "image_patch" and args.per_position_image_patch is not None:
+            n_for_ptype = int(args.per_position_image_patch)
+        chosen = [indices[k] for k in perm[: n_for_ptype]]
         # Filter to ones we have images for
         viable = []
         for i in chosen:

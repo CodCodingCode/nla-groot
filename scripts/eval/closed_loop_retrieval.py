@@ -74,6 +74,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Output JSON path for the retrieval-margin summary.")
     p.add_argument("--out-jsonl", default=None,
                    help="Optional per-sample JSONL (gold, generated, matched_cos, top1_idx, ...).")
+    p.add_argument("--spatial-diagnostics", action="store_true",
+                   help="Stage-3 plan: when the AR head emits (B, N, H) "
+                        "(head_type='spatial'), also write per-spatial-position "
+                        "retrieval margin to the summary JSON under "
+                        "'by_spatial_position'. No-op when AR is scalar. Use "
+                        "this to verify the spatial decoder differentiates "
+                        "across the grid; uniform margins per position would "
+                        "indicate spatial collapse.")
     return p
 
 
@@ -185,14 +193,33 @@ def main(argv: list[str] | None = None) -> int:
 
     # AR-encode every generated caption (in batches) to produce ĥ_i.
     ar_out_scaled: list[torch.Tensor] = []
+    ar_out_spatial: list[torch.Tensor] = []   # Stage-3: (B, M, D) when spatial head
+    ar_is_spatial = False
     for start in range(0, N, BS):
         chunk = all_generated[start : start + BS]
         with torch.no_grad():
             pred_scaled = ar(chunk, device=args.device).float()
+        if pred_scaled.dim() == 3:
+            # Stage-3 spatial head: (B, M, D). Mean-pool over M for the
+            # legacy 2D pipeline so all downstream metrics keep working,
+            # but also retain the raw 3D tensor for per-spatial-position
+            # diagnostics.
+            ar_is_spatial = True
+            ar_out_spatial.append(pred_scaled.detach().to("cpu"))
+            pred_scaled = pred_scaled.mean(dim=1)
         ar_out_scaled.append(pred_scaled.detach().to("cpu"))
     H_hat_scaled = torch.cat(ar_out_scaled, dim=0)            # (N, D), scaled
     H_hat_raw = H_hat_scaled * alpha                          # back to unscaled space
     assert H_hat_raw.shape == (N, D)
+    H_hat_spatial_raw: torch.Tensor | None = None
+    if ar_is_spatial:
+        H_hat_spatial_scaled = torch.cat(ar_out_spatial, dim=0)   # (N, M, D)
+        H_hat_spatial_raw = H_hat_spatial_scaled * alpha
+        print(
+            f"  AR head is spatial; retained per-position tensor of shape "
+            f"{tuple(H_hat_spatial_raw.shape)}",
+            flush=True,
+        )
 
     # Pairwise cosine. Cosine is scale-invariant so it doesn't matter whether
     # both sides are scaled or unscaled, but be consistent.
@@ -245,10 +272,54 @@ def main(argv: list[str] | None = None) -> int:
             "retrieval_at_5": float(((sub_rank <= min(5, m)).sum() / m).item()),
         }
 
+    by_spatial_position: dict[str, dict] | None = None
+    if args.spatial_diagnostics and H_hat_spatial_raw is not None:
+        # For each spatial slot k, compute pairwise retrieval just over the
+        # k-th predicted vector across rows. A healthy spatial decoder
+        # produces position-specific margins that vary (left-of-frame vs.
+        # right-of-frame ĥ disagree across rows); a collapsed decoder
+        # produces uniform margins ≈ the mean-pooled value.
+        n_spatial = int(H_hat_spatial_raw.shape[1])
+        by_spatial_position = {}
+        for k in range(n_spatial):
+            slot_hat = H_hat_spatial_raw[:, k, :]                       # (N, D)
+            slot_hat_n = torch.nn.functional.normalize(slot_hat, dim=1)
+            slot_sims = H_n @ slot_hat_n.T                              # (N, N)
+            slot_diag = slot_sims.diag()
+            slot_off = (
+                (slot_sims.sum() - slot_diag.sum()) / max(1, N * (N - 1))
+            ).item()
+            slot_rank = (slot_sims > slot_diag.unsqueeze(1)).sum(dim=1) + 1
+            by_spatial_position[str(k)] = {
+                "matched_cos_mean": float(slot_diag.mean().item()),
+                "cross_cos_mean": float(slot_off),
+                "margin": float(slot_diag.mean().item() - slot_off),
+                "retrieval_at_1": float(((slot_rank <= 1).sum() / N).item()),
+            }
+        # Spatial collapse summary: std across positions of the per-slot
+        # matched_cos_mean. A value near zero means the spatial head
+        # outputs identical content per slot (collapse); higher std means
+        # the head actually carries position-specific structure.
+        slot_means = torch.tensor(
+            [s["matched_cos_mean"] for s in by_spatial_position.values()]
+        )
+        slot_margins = torch.tensor(
+            [s["margin"] for s in by_spatial_position.values()]
+        )
+        by_spatial_position["_collapse_diagnostic"] = {
+            "n_positions": n_spatial,
+            "matched_cos_mean_std_across_positions": float(slot_means.std().item()),
+            "margin_std_across_positions": float(slot_margins.std().item()),
+            "matched_cos_mean_min": float(slot_means.min().item()),
+            "matched_cos_mean_max": float(slot_means.max().item()),
+        }
+
     summary = {
         "n": N,
         **overall,
         "by_position": by_position,
+        **({"by_spatial_position": by_spatial_position}
+           if by_spatial_position is not None else {}),
         "config": {
             "ckpt_dir": str(ckpt_dir),
             "activations_root": args.activations_root,
@@ -285,6 +356,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  [{ptype:14s}] n={s['n']:3d} matched={s['matched_cos_mean']:+.3f} "
               f"cross={s['cross_cos_mean']:+.3f} margin={s['margin']:+.3f} "
               f"r@1={s['retrieval_at_1']:.2f}")
+    if by_spatial_position is not None:
+        diag = by_spatial_position.get("_collapse_diagnostic") or {}
+        print(
+            f"  spatial: n_pos={diag.get('n_positions')} "
+            f"matched_std={diag.get('matched_cos_mean_std_across_positions', 0):.4f} "
+            f"margin_std={diag.get('margin_std_across_positions', 0):.4f} "
+            f"(near-zero = spatial collapse)"
+        )
     print(f"  -> {out_path}")
 
     if args.out_jsonl:

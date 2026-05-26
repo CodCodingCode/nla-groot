@@ -46,12 +46,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--grpo-av-dir", required=True, help="GRPO-trained av/ directory.")
     p.add_argument("--pairs-path", required=True, help="CF pairs JSONL.")
     p.add_argument("--activations-root", required=True)
-    p.add_argument("--n-samples", type=int, default=8)
+    p.add_argument("--n-samples", type=int, default=32,
+                   help="v7 default: 32 (was 8). n=8 had ±12.5pp single-flip "
+                        "variance which made e.g. 'matched=mismatched=62.5%%' "
+                        "indistinguishable from chance. n>=32 is the floor "
+                        "for any steer-lift / semantic-gap decision.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--position-type", default="image_patch")
     p.add_argument("--sim-max-steps", type=int, default=100)
     p.add_argument("--sim-placement", default="image_patch")
     p.add_argument("--sim-blend", type=float, default=1.0)
+    p.add_argument("--alpha-scale", type=float, default=1.0,
+                   help="Multiplicative dose scale applied to AR(text) before "
+                        "the steer is shipped to sim. 1.0 is the trained alpha "
+                        "(P75 ||h||). The Stage-0 dose sweep wraps this script "
+                        "with several values to distinguish dose-miscalibration "
+                        "from a true codec failure on image_patch.")
     p.add_argument("--policy-host", default="localhost")
     p.add_argument("--policy-port", type=int, default=5556)
     p.add_argument("--sim-rollout-python", default=None)
@@ -143,6 +153,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--forbid-sim-cache", action="store_true",
                    help="Assert that the sim reward worker is constructed with "
                         "cache_path=None (no train cache reuse during eval).")
+    p.add_argument("--require-distinct-intents", action="store_true",
+                   help="Drop rows whose source_intent == target_intent (or "
+                        "source_task == target_task) before sampling. Without "
+                        "this, intent_arms=matched and mismatched_source "
+                        "collapse to the same AV input on non-counterfactual "
+                        "rows — making Δ_cw = 0 by construction. The "
+                        "libero_goal_counterfactual_pairs.jsonl file is 50% "
+                        "non-CF rows; use this flag (or a pre-filtered "
+                        "*_cfonly.jsonl) for any matched-vs-mismatched eval.")
     return p
 
 
@@ -226,9 +245,11 @@ def _load_pairs(
     *,
     exclude_ids: set[str] | None = None,
     deterministic_order: bool = False,
+    require_distinct_intents: bool = False,
 ) -> list[dict]:
     rows: list[dict] = []
     n_dropped_exclude = 0
+    n_dropped_same_intent = 0
     with path.open() as f:
         for line in f:
             line = line.strip()
@@ -241,6 +262,17 @@ def _load_pairs(
             if exclude_ids and sid in exclude_ids:
                 n_dropped_exclude += 1
                 continue
+            if require_distinct_intents:
+                src_i = (obj.get("source_intent") or "").strip()
+                tgt_i = (obj.get("target_intent") or "").strip()
+                src_t = obj.get("source_task")
+                tgt_t = obj.get("target_task")
+                if src_i and tgt_i and src_i == tgt_i:
+                    n_dropped_same_intent += 1
+                    continue
+                if src_t and tgt_t and src_t == tgt_t:
+                    n_dropped_same_intent += 1
+                    continue
             rows.append(obj)
     if not rows:
         raise RuntimeError(f"No valid CF rows in {path}")
@@ -248,6 +280,12 @@ def _load_pairs(
         print(
             f"[load_pairs] dropped {n_dropped_exclude} rows whose "
             "source_example_id appeared in --exclude-ids-path"
+        )
+    if n_dropped_same_intent:
+        print(
+            f"[load_pairs] dropped {n_dropped_same_intent} rows whose "
+            "source_intent==target_intent or source_task==target_task "
+            "(--require-distinct-intents)"
         )
     if not deterministic_order:
         rng.shuffle(rows)
@@ -347,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
             rng,
             exclude_ids=exclude_ids,
             deterministic_order=args.deterministic_order,
+            require_distinct_intents=args.require_distinct_intents,
         )
 
     if args.require_held_out and exclude_ids:
@@ -660,6 +699,8 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 text = out["text"][0]
                 steer_real = encode_texts_with_ar(ar, [text], device=args.device)
+                if args.alpha_scale != 1.0:
+                    steer_real = steer_real * float(args.alpha_scale)
                 # Shared LIBERO seed across all conditions and arms for a
                 # given sample so SFT vs GRPO see the same env RNG.
                 seed = args.seed + i * 17

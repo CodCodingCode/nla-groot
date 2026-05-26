@@ -127,6 +127,35 @@ PYTHONPATH=src python scripts/training/run_grpo.py \
 
 Requires a running steer server (`launch_steer_server.sh`) and LIBERO rollout venv. See **`docs/GRPO_AGENT_REFERENCE.md`**.
 
+### image_patch refocus pipeline (post-paper diagnostics)
+
+Three new entrypoints turn a paper-style "pooled PASS / image_patch FAIL" run into a sequence of actionable next experiments:
+
+```bash
+# Stage 0 — dose sweep (no retrain): is Δ_cw=0 a dose-miscalibration or a real codec failure?
+PYTHONPATH=src python scripts/eval/nla_steer_alpha_sweep.py \
+  --sft-dir <sft> --grpo-av-dir <grpo>/av --pairs-path <cf>.jsonl \
+  --activations-root <act> --alpha-scales 0.0,0.25,0.5,0.75,1.0,1.5,2.0 \
+  --intent-arms matched,mismatched_source --causal-arms semantic,no_steer \
+  --sim-placement image_patch_all --policy-port 5555 \
+  --out-dir runs/alpha_sweep/<date>
+
+# Stage 1 — image_patch-headline scorecard (gates overall on the vision slot)
+PYTHONPATH=src python scripts/eval/build_v3_scorecard.py --ckpt-dir <sft>
+PYTHONPATH=src python scripts/eval/llm_judge_av_captions.py ... --per-position-image-patch 48
+
+# Stage 2 — image_patch-focused SFT retrain
+PYTHONPATH=src python scripts/training/run_sft.py ... --include-position-types image_patch
+# (or oversample while keeping all three roles)
+# ... --balance-position-mix --position-mix-json '{"image_patch": 0.75, "last_text": 0.125, "anchor": 0.125}'
+
+# Stage 3 — spatial AR head (one vector per image_patch slot)
+PYTHONPATH=src python scripts/training/run_sft.py ... --ar-head-type spatial --ar-spatial-n-positions 8
+PYTHONPATH=src python scripts/eval/closed_loop_retrieval.py ... --spatial-diagnostics
+```
+
+The sweep prints its own Stage-0 verdict (DOSE-MISCALIBRATION / CODEC FAILURE / INCONCLUSIVE). Stage-2/3 runbooks: **`docs/sft_plan/v6_image_patch_only_runbook.md`**; Stage-4 temporal window: **`docs/sft_plan/10_temporal_window_stage4.md`**.
+
 ### Website (local)
 
 ```bash

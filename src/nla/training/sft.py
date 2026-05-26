@@ -99,6 +99,16 @@ class SFTConfig:
     # the empirical histogram diverges materially from POSITION_MIX.
     balance_position_mix: bool = False
 
+    # If True (and balance_position_mix=True), enforce per-batch position-type
+    # quotas via ``StratifiedPositionBatchSampler`` instead of the epoch-level
+    # ``WeightedRandomSampler``. Quotas come from ``position_mix`` (or
+    # ``POSITION_MIX`` if None) and are computed via largest-remainder so they
+    # sum to ``batch_size`` exactly. Use this when action-consistency or the
+    # image_patch judge metric demands a *guaranteed* image_patch row count
+    # per batch rather than a probabilistic one. See
+    # ``docs/sft_plan/v7_runbook.md``.
+    batch_stratified_positions: bool = False
+
     # Optional override of ``layer_spec.POSITION_MIX`` for the rebalancing
     # sampler. Only consulted when ``balance_position_mix`` is True. ``None``
     # keeps the legacy 40/40/20 default. Used for ablations that drop a
@@ -206,6 +216,12 @@ class SFTConfig:
     # ``labels_jsonl`` at the pre-filtered ``labels_no_anchor.jsonl``.
     exclude_position_types: tuple[str, ...] | None = None
 
+    # Stage-2 plan: positive include filter. When set, the dataset keeps
+    # only rows whose position_type is in this tuple. ``("image_patch",)``
+    # gives the cleanest "is the codec capable on the vision slot when not
+    # diluted?" ablation. None (default) keeps the legacy all-types behaviour.
+    include_position_types: tuple[str, ...] | None = None
+
     # ---- Action-head consistency (Phase B scaffolding, see
     # ``src/nla/training/action_head_consistency.py`` and
     # ``docs/sft_plan/09_action_head_lora_phase1.md``).
@@ -224,6 +240,11 @@ class SFTConfig:
     # (image_patch_all) so the training-time loss is faithful to the
     # eval-time intervention.
     action_consistency_image_patch_only: bool = True
+    # Blend factor for the steering hook during the action-consistency
+    # forward (``SteerSpec.blend``). 1.0 = hard replace (legacy). 0.5 makes
+    # the training-time steer configuration in-distribution at eval time
+    # when sim-GRPO / closed-loop also use blend=0.5. v7 recipe sets 0.5.
+    action_consistency_blend: float = 1.0
     # Path to a frozen GR00T checkpoint that gets used for the policy
     # forward.  Required when ``action_consistency_weight > 0``.
     action_consistency_policy_path: str | None = None
@@ -340,6 +361,7 @@ def _make_dataloaders(cfg: SFTConfig):
         image_patch_pooling=cfg.image_patch_pooling,
         image_patch_pooling_strided_k=cfg.image_patch_pooling_strided_k,
         exclude_position_types=cfg.exclude_position_types,
+        include_position_types=cfg.include_position_types,
     )
     val_ds = LabeledPositionDataset(
         cfg.activations_root, cfg.labels_jsonl,
@@ -354,6 +376,7 @@ def _make_dataloaders(cfg: SFTConfig):
         image_patch_pooling=cfg.image_patch_pooling,
         image_patch_pooling_strided_k=cfg.image_patch_pooling_strided_k,
         exclude_position_types=cfg.exclude_position_types,
+        include_position_types=cfg.include_position_types,
     )
     logger.info("Train labels: %d  Val labels: %d", len(train_ds), len(val_ds))
 
@@ -376,14 +399,38 @@ def _make_dataloaders(cfg: SFTConfig):
                     "50/50 last_text/image_patch (override the default "
                     "POSITION_MIX 40/40/20)."
                 )
-        sampler = _position_mix_sampler(
-            train_ds.labels, seed=cfg.seed, position_mix=effective_mix,
-        )
-        train_loader = DataLoader(
-            train_ds, batch_size=cfg.batch_size, sampler=sampler,
-            num_workers=0, collate_fn=collate_labeled_positions,
-            drop_last=cfg.drop_last,
-        )
+        if cfg.batch_stratified_positions:
+            # v7: enforce quotas per batch (largest-remainder), not just at
+            # the epoch level. Avoids batches that are 95% one type by chance.
+            from nla.training.sampling import StratifiedPositionBatchSampler
+            stratified_mix = effective_mix or dict(POSITION_MIX)
+            n_train = len(train_ds.labels)
+            batch_sampler = StratifiedPositionBatchSampler(
+                position_types=[e.position_type for e in train_ds.labels],
+                batch_size=cfg.batch_size,
+                position_mix=stratified_mix,
+                num_batches=max(1, n_train // cfg.batch_size),
+                seed=cfg.seed,
+            )
+            logger.info(
+                "batch_stratified_positions=True: per-batch quotas=%s "
+                "(target mix=%s)",
+                batch_sampler.quotas,
+                {k: round(v, 3) for k, v in stratified_mix.items()},
+            )
+            train_loader = DataLoader(
+                train_ds, batch_sampler=batch_sampler,
+                num_workers=0, collate_fn=collate_labeled_positions,
+            )
+        else:
+            sampler = _position_mix_sampler(
+                train_ds.labels, seed=cfg.seed, position_mix=effective_mix,
+            )
+            train_loader = DataLoader(
+                train_ds, batch_size=cfg.batch_size, sampler=sampler,
+                num_workers=0, collate_fn=collate_labeled_positions,
+                drop_last=cfg.drop_last,
+            )
     else:
         train_loader = DataLoader(
             train_ds, batch_size=cfg.batch_size, shuffle=True,
@@ -674,6 +721,7 @@ def _build_action_consistency_kernel(cfg: SFTConfig, ar, out_dir: Path):
             every_n_steps=int(cfg.action_consistency_every_n_steps),
             max_microbatch_per_step=int(cfg.action_consistency_max_microbatch),
             image_patch_rows_only=bool(cfg.action_consistency_image_patch_only),
+            blend=float(cfg.action_consistency_blend),
         ),
         manifest=manifest,
         policy_loader=_policy_loader,
