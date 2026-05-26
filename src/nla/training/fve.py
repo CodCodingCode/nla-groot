@@ -176,6 +176,22 @@ class StratifiedFve:
             raise ValueError(
                 f"strata length {len(strata_list)} != batch size {target.shape[0]}"
             )
+        # v7 spatial AR: target/pred can be ``(B, K, H)``. Flatten the K
+        # axis into the batch dim and repeat each stratum K times so the
+        # underlying ``_StreamingFve`` accumulates the per-position residuals
+        # as independent observations. This preserves the "fraction of
+        # variance explained" semantics: each (sample, position) is a draw
+        # from the empirical distribution of image-patch activations.
+        if target.dim() == 3 and pred.dim() == 3:
+            B, K = target.shape[0], target.shape[1]
+            target = target.reshape(B * K, target.shape[-1])
+            pred = pred.reshape(B * K, pred.shape[-1])
+            strata_list = [s for s in strata_list for _ in range(K)]
+        elif target.dim() != 2 or pred.dim() != 2:
+            raise ValueError(
+                f"StratifiedFve expects (B, H) or (B, K, H); got target "
+                f"{tuple(target.shape)} pred {tuple(pred.shape)}"
+            )
         self._all.update(target, pred)
         # Bucket rows by stratum and update per-bucket accumulators in one pass.
         buckets: dict[str, list[int]] = {}
