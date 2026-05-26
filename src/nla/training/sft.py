@@ -362,6 +362,7 @@ def _make_dataloaders(cfg: SFTConfig):
         image_patch_pooling_strided_k=cfg.image_patch_pooling_strided_k,
         exclude_position_types=cfg.exclude_position_types,
         include_position_types=cfg.include_position_types,
+        ar_target_spatial=(cfg.ar_cfg.head_type == "spatial"),
     )
     val_ds = LabeledPositionDataset(
         cfg.activations_root, cfg.labels_jsonl,
@@ -377,6 +378,7 @@ def _make_dataloaders(cfg: SFTConfig):
         image_patch_pooling_strided_k=cfg.image_patch_pooling_strided_k,
         exclude_position_types=cfg.exclude_position_types,
         include_position_types=cfg.include_position_types,
+        ar_target_spatial=(cfg.ar_cfg.head_type == "spatial"),
     )
     logger.info("Train labels: %d  Val labels: %d", len(train_ds), len(val_ds))
 

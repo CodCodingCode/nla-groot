@@ -632,7 +632,16 @@ class ActionConsistencyKernel:
                     [instructions[idx]] if instructions is not None else None
                 ),
             )
+            # ar_pred_scaled is (1, H) for scalar head, (1, K, H) for spatial.
+            # The differentiable backbone-steer hook only takes a 1-D vector,
+            # so when the spatial head emits per-position predictions we
+            # mean-pool them into a single representative vector for the
+            # policy-effect injection. The per-position MSE on the AR loss
+            # still trains the spatial structure; this hook only needs
+            # "what scalar would the policy see at the injected slot."
             steer_vec = (ar_pred_scaled.squeeze(0) * float(self.ar.cfg.alpha))
+            if steer_vec.dim() == 2:
+                steer_vec = steer_vec.mean(dim=0)
             baseline, hit = self.get_baseline(entry)
             diag.baseline_cache_hits += int(hit)
             diag.baseline_cache_misses += int(not hit)

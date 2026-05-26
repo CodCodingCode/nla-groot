@@ -292,6 +292,7 @@ class LabeledPositionDataset(Dataset):
         image_patch_pooling_strided_k: int = 4,
         exclude_position_types: tuple[str, ...] | None = None,
         include_position_types: tuple[str, ...] | None = None,
+        ar_target_spatial: bool = False,
     ):
         # ``image_patch_pooling`` controls how the dataset materializes the
         # activation for rows whose ``position_type == "image_patch"``. The
@@ -308,6 +309,13 @@ class LabeledPositionDataset(Dataset):
         # ``anchor``) are untouched regardless.
         self.image_patch_pooling = str(image_patch_pooling)
         self.image_patch_pooling_strided_k = int(image_patch_pooling_strided_k)
+        # v7 plan: when the AR head is spatial (head_type='spatial'), the
+        # dataset must emit per-position targets so the per-position MSE has
+        # a meaningful signal. With strided_image_multi pooling on image_patch
+        # rows we emit the full [K, H] grid. Non-image_patch rows still emit
+        # a single [H] vector; the collator tiles them to [K, H] so all rows
+        # share a shape.
+        self.ar_target_spatial = bool(ar_target_spatial)
         if self.image_patch_pooling not in (
             "pinned", "mean_pool_image", "strided_image",
             "strided_image_multi", "center_image",
@@ -683,7 +691,12 @@ class LabeledPositionDataset(Dataset):
                 # so the existing AR forward and offline hard-neg mining (mined
                 # on per-row single ``h``) stay valid.
                 vec = pooled                                  # [K, H]
-                vec_ar = pooled.mean(dim=0).contiguous()      # [H]
+                if self.ar_target_spatial:
+                    # v7 spatial AR head: emit the full [K, H] grid as the
+                    # AR target so per-position MSE has signal.
+                    vec_ar = pooled.contiguous()              # [K, H]
+                else:
+                    vec_ar = pooled.mean(dim=0).contiguous()  # [H]
             else:
                 # Single-vector pooling returned ``[H]`` directly.
                 vec = pooled
@@ -731,15 +744,45 @@ def collate_labeled_positions(batch):
     # ``activations`` is kept as an alias for ``activations_ar`` so legacy
     # callers (e.g. closed-loop eval helpers, action-consistency kernel) that
     # only need a single ``[H]`` per row keep working without a code change.
-    ar_vecs = []
-    for b in batch:
-        v_ar = b.activation_ar if b.activation_ar is not None else b.activation
-        if v_ar.dim() != 1:
+    # v7 spatial-AR path: when any row's ``activation_ar`` is 2-D ``[K, H]``,
+    # tile non-spatial rows (single ``[H]``) to ``[K, H]`` by repeating along
+    # the spatial axis. This means "the spatial AR head should predict the
+    # same vector at every position for non-image-patch rows" — appropriate
+    # since last_text / anchor have no spatial structure.
+    raw_ar_vecs = [
+        (b.activation_ar if b.activation_ar is not None else b.activation)
+        for b in batch
+    ]
+    ar_dims = {v.dim() for v in raw_ar_vecs}
+    if ar_dims <= {1}:
+        ar_vecs = list(raw_ar_vecs)
+        activations_ar = torch.stack(ar_vecs, dim=0)               # (B, H)
+    else:
+        # Mixed batch: at least one row has [K, H]. Tile single-vector rows
+        # to [K_ar, H] where K_ar is the spatial-target K (constant across
+        # spatial rows).
+        spatial_ks = {v.shape[0] for v in raw_ar_vecs if v.dim() == 2}
+        if len(spatial_ks) > 1:
             raise ValueError(
-                f"activation_ar must be 1-D ``[H]``; got shape {tuple(v_ar.shape)}"
+                f"activation_ar spatial-K must be uniform across rows; "
+                f"got {sorted(spatial_ks)}"
             )
-        ar_vecs.append(v_ar)
-    activations_ar = torch.stack(ar_vecs, dim=0)
+        k_ar = next(iter(spatial_ks))
+        tiled: list[torch.Tensor] = []
+        for v in raw_ar_vecs:
+            if v.dim() == 1:
+                tiled.append(v.unsqueeze(0).expand(k_ar, -1).contiguous())
+            elif v.dim() == 2:
+                if v.shape[0] != k_ar:
+                    raise ValueError(
+                        f"activation_ar row K={v.shape[0]} != batch K={k_ar}"
+                    )
+                tiled.append(v)
+            else:
+                raise ValueError(
+                    f"activation_ar must be 1-D or 2-D; got shape {tuple(v.shape)}"
+                )
+        activations_ar = torch.stack(tiled, dim=0)                  # (B, K, H)
 
     av_shapes = {tuple(b.activation.shape) for b in batch}
     k_per_row = [b.activation.shape[0] if b.activation.dim() == 2 else 1 for b in batch]
@@ -774,8 +817,17 @@ def collate_labeled_positions(batch):
                 f"activations_av collate produced ragged shapes from {av_shapes}"
             )
 
+    # ``activations`` is the single-vector backward-compat view used by
+    # action-consistency, closed-loop eval, etc. When ``activations_ar`` is
+    # 3-D (spatial AR target), mean-pool over the K axis so legacy callers
+    # keep working without changes.
+    if activations_ar.dim() == 3:
+        activations_single = activations_ar.mean(dim=1)             # (B, H)
+    else:
+        activations_single = activations_ar                          # (B, H)
+
     out = {
-        "activations": activations_ar,
+        "activations": activations_single,
         "activations_ar": activations_ar,
         "activations_av": activations_av,
         "activation_slot_mask": slot_mask,
