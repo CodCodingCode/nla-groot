@@ -134,6 +134,161 @@ This is **shorter, sharper, more honest, and stronger** than the original draft.
 
 3. **The CF pair file was 50% non-CF rows** — the eval-set leakage compromised the original Δ_cw measurement. Fix: `--require-distinct-intents` or pre-filtered `*_cfonly.jsonl`.
 
+## Why the codec is inert: the loss-mismatch diagnosis
+
+Stage 0 says the codec output is gated at the policy side. The mechanism that
+gates it is not magic — it is the direct consequence of which losses shaped
+AR's output distribution. Of the four objectives that produced the current
+checkpoint, **three never touch the policy**:
+
+| Stage | Loss | What it asks |
+|------|------|--------------|
+| SFT — AV | CE on teacher caption ([`sft.py`](../src/nla/training/sft.py)) | "Match the label text" |
+| SFT — AR | MSE+NCE in α-scaled space ([`ar.py`](../src/nla/models/ar.py)) | "Reconstruct h" |
+| GRPO base reward | `-‖AR(rollout_text) − h/α‖²` ([`grpo.py`](../src/nla/training/grpo.py)) | "Reconstruct h" again |
+| GRPO sim reward | `succ(matched) − succ(mismatched)` | Policy effect — only this one |
+
+The first three define the steerer's optimum. They are all variants of "make
+ĥ close to h in α-scaled space," and they share a degeneracy: the GR00T
+action head reads only a low-dimensional subspace of the 2048-dim activation;
+the rest is in the head's null space. A reconstruction loss treats every
+dimension as equally important, so the codec invests capacity uniformly. The
+trained ĥ has near-optimal MSE-fidelity to h but happens to land mostly in
+directions the action head ignores — which is exactly what "inert at trained
+α" looks like at the behavioral level.
+
+The sim-reward path in GRPO is the only one that, in principle, could correct
+this. But the V1 / V2 pilots ([`docs/grpo/V2_GRPO_PLAN.md`](../docs/grpo/V2_GRPO_PLAN.md))
+used bare success as the reward — `r = succ(rollout)` — which is
+task-difficulty-dominated and gives credit to the codec for rollouts the
+policy would have solved without any injection. V1 GRPO matched_semantic:
+50.0% (−12.5pp vs SFT); V2 GRPO: 37.5% (−25pp). Neither found a steering
+signal because neither asked the question whose answer is steering.
+
+## Why this is hard to steer at all: GR00T N1.7's flow-matching + RTC pipeline
+
+The behavioral framing above ("the action head reads a subspace; the codec
+fills the null space") needs one more layer to be complete. GR00T N1.7's
+inference is not a simple forward pass — it is a **flow-matching diffusion
+loop with action chunking and inpainting-style real-time chunking (RTC)**.
+We located the inference path at
+[`third_party/Isaac-GR00T/gr00t/model/gr00t_n1d7/gr00t_n1d7.py`](../third_party/Isaac-GR00T/gr00t/model/gr00t_n1d7/gr00t_n1d7.py):
+
+1. Each `get_action` call samples a full action *trajectory* of shape
+   `(action_horizon, action_dim)` (default 16 timesteps × 14 dims) as
+   Gaussian noise, then denoises it via Euler integration of a learned
+   velocity field across `num_inference_timesteps` (default 8) iterations.
+   Adjacent timesteps in the chunk are produced jointly by the same ODE
+   — no autoregressive jitter is possible.
+2. When `action_input` carries a previous chunk's predictions, RTC kicks
+   in: the `rtc_overlap_steps` prefix of the noise vector is **replaced
+   with the previous chunk's tail**, and the velocity field is frozen on
+   `rtc_frozen_steps` and exponentially ramped on the intermediate slice.
+   The new chunk is denoised as inpainting conditioned on the previous
+   commitments. Chunk boundaries don't show as discontinuities.
+3. The vision-language conditioning enters the action head only through
+   `vl_embeds = backbone_features` — the same tensor our hook rewrites.
+
+This explains both why GR00T's actions are smooth in LIBERO (flow matching
+produces continuous trajectories; RTC stitches chunks) and **why a backbone
+injection has to clear a high bar to influence them**. By the time a steer
+vector affects anything, it has been integrated against the action head's
+encoder, passed through 8 denoising iterations, and partly overridden by
+the inpainted prefix from the previous chunk's RTC overlap. The signal that
+survives is whatever component of the steer vector aligns with the action
+head's read directions *and* is large enough to overcome the inpainted
+prefix's velocity-zero region.
+
+A reconstruction-trained codec produces ĥ vectors whose energy is spread
+across all 2048 dimensions, including the null space and the RTC-frozen
+region. Only the component that lands in the *read directions × free
+denoising region* matters. Stage 0 says that component is at chance level
+for the trained codec — not because flow matching is fighting us, but
+because nothing in the loss told the codec which directions matter.
+
+## The v7 retrain plan: make policy-effect the primary loss
+
+The remediation, mapping each setting to the failure it fixes, lives in
+[`docs/sft_plan/v7_runbook.md`](../docs/sft_plan/v7_runbook.md). The
+core moves:
+
+**SFT side:**
+
+| Setting | v3/v5 | v7 | Failure it fixes |
+|---|---|---|---|
+| `action_consistency_weight` | 0.0 | **1.0** | Loss has no policy-effect term. Root cause. |
+| `action_consistency_every_n_steps` | 8 | **1** | Policy-grounded gradient on every batch, not every eighth |
+| `action_consistency_image_patch_only` | True | **False** | Other position types never see policy signal |
+| `action_consistency_blend` | 1.0 | **0.5** | Training-time blend matches eval-time blend; both doses now in-distribution |
+| `ar_weight` | 1.0 | **0.1** | Demote round-trip MSE to regularizer; policy-effect leads |
+| `ar_head_type` | scalar | **spatial** | One-caption-many-patches mismatch → spatial decomposition via learned per-position queries (DETR-style) |
+| `batch_stratified_positions` | n/a | **True** | Per-batch position quotas (largest-remainder), not just per-epoch — image_patch gradient every step |
+| `ar_av_mix_max` | 0.3 | **0.7** | Close the AR train/eval distribution gap |
+
+**GRPO side:**
+
+| Setting | v3 | v7 | Failure it fixes |
+|---|---|---|---|
+| `sim_reward_weight` | 0.0 | **0.8** | Don't spend GRPO on a loss SFT already optimizes (reconstruction) |
+| `sim_contrastive_weight` | 0.0 | **1.0** mandatory | Reward = `succ(matched) − succ(mismatched)` isolates steering from task difficulty |
+| `sim_null_control_weight` | 0.0 | **0.5** mandatory | Reward = `succ(matched) − succ(matched_null)` rules out magnitude-alone wins |
+| `beta` (KL coefficient) | 0.02 | **0.05** | T1-fast had β=0 → 30 noisy steps walked out of the SFT basin. KL is the leash. |
+| Group size (B × K) | 2 × 2 | **4 × 8** | Bernoulli noise σ on advantage from ≈0.25 to ≈0.09 |
+| `curriculum_easy_to_hard` | n/a | **True** | Easy CF pairs first establish gradient direction; hard pairs give r ≈ 0 advantage early |
+
+The recipe ships as `--recipe v7` on both training scripts; explicit CLI
+flags override individual settings. New code:
+[`src/nla/training/recipes.py`](../src/nla/training/recipes.py),
+[`StratifiedPositionBatchSampler` in `sampling.py`](../src/nla/training/sampling.py),
+plus difficulty support on [`CounterfactualPairSampler`](../src/nla/training/counterfactual_data.py).
+
+## Engineering caveats: sim speed and curriculum scoring
+
+Curriculum requires per-pair difficulty annotation. Two scoring modes are
+realistic — only one is affordable:
+
+| Mode | Method | Cost per pair | Cost for 1000 pairs |
+|---|---|---|---|
+| **Lexical** | embedding distance(target_intent, source_intent) + object-overlap heuristic | ~seconds, CPU | minutes total |
+| **Rollout** | 6 LIBERO rollouts per pair @ 50 sim steps × ~30s ≈ 3 min | minutes, GPU | ~50 GPU-hours at 18 parallel workers |
+
+Each LIBERO step at 50 ticks requires the full GR00T forward (vision
+encoder + flow-matching denoising loop) plus OSMesa rendering, which is
+the actual bottleneck. The rollout-mode scorer is therefore **not the
+first thing to build** — lexical is enough to seed curriculum, and the
+v7 recipe gracefully degrades to uniform sampling when no difficulty
+field is present. Defer rollout-mode scoring to a re-score pass on the
+borderline pairs after the first v7 GRPO run confirms curriculum helps.
+
+The same sim-speed reality applies to eval. The `--n-samples` default in
+[`scripts/eval/compare_cf_steer_checkpoints.py`](../scripts/eval/compare_cf_steer_checkpoints.py)
+was raised from 8 to 32 because n=8 has ±12.5pp single-sample-flip
+variance — exactly the noise that made the "AR semantic = 50% vs
+matched_null = 62.5%" finding need a "may be" hedge. n=32 has σ ≈ ±6pp
+on a Bernoulli mean and lets the ±5pp success bars in the v7 acceptance
+criteria be checked honestly.
+
+## Falsification path: v7 outcomes and what they would mean
+
+Three publishable outcomes, ranked by what we expect:
+
+1. **v7 SFT closes-loop probe shows next-action KL ≥ 0.05 on held-out CF
+   pairs, but GRPO does not produce `steer_lift ≥ +5pp`.** Then the
+   codec successfully changes policy behavior but not in
+   semantically-correct directions. The follow-up is sim-side
+   improvements (longer rollouts, more curriculum density) — not
+   architecture.
+2. **v7 SFT does not close the next-action KL gap.** Then the
+   2048-dim scalar bottleneck is the limit. Move to multi-token AR
+   output or multi-layer injection ([`docs/sft_plan/05_arch_injection.md`](../docs/sft_plan/05_arch_injection.md)).
+   This would extend H1 — the policy doesn't just suppress at
+   trained magnitude; it suppresses at trained *direction* too.
+3. **v7 hits all three success criteria (`steer_lift ≥ +5pp`,
+   `semantic_gap ≥ +5pp`, `causal_specificity ≥ +5pp` on n=32 held-out
+   pairs).** Then the loss-mismatch diagnosis is confirmed and the paper's
+   contribution is: "interpretability for VLA action policies needs
+   policy-grounded steerer training, not reconstruction training."
+
 ## Files
 
 - v4 sweep: `runs/alpha_sweep/20260525_2326_stage0_v4_focused/{alpha_0.500.json, alpha_1.000.json, summary.md, STAGE_0_FINDINGS.md}`
@@ -141,3 +296,8 @@ This is **shorter, sharper, more honest, and stronger** than the original draft.
 - Filtered CF-only pairs: `data/grpo/libero_goal_counterfactual_pairs_cfonly.jsonl`
 - New CLI flag: `compare_cf_steer_checkpoints.py --require-distinct-intents`
 - Stage-0 wrapper: `scripts/eval/nla_steer_alpha_sweep.py`
+- v7 retrain recipe: [`src/nla/training/recipes.py`](../src/nla/training/recipes.py) (`V7_SFT_DEFAULTS`, `V7_GRPO_DEFAULTS`)
+- v7 runbook: [`docs/sft_plan/v7_runbook.md`](../docs/sft_plan/v7_runbook.md)
+- GR00T flow-matching + RTC reference: [`third_party/Isaac-GR00T/gr00t/model/gr00t_n1d7/gr00t_n1d7.py:332-421`](../third_party/Isaac-GR00T/gr00t/model/gr00t_n1d7/gr00t_n1d7.py)
+- Batch-stratified position sampler: [`src/nla/training/sampling.py`](../src/nla/training/sampling.py) (`StratifiedPositionBatchSampler`)
+- CF pair difficulty support: [`src/nla/training/counterfactual_data.py`](../src/nla/training/counterfactual_data.py) (`CounterfactualPair.difficulty`, `set_step_frac`)
