@@ -35,6 +35,7 @@ SteerPlacement = Literal[
     "anchor",
     "image_patch_all",
     "image_patch_spatial",
+    "image_patch_strided",
     "fixed",
 ]
 
@@ -50,6 +51,10 @@ class SteerSpec:
     """When ``placement == "fixed"``, must be set."""
     image_patch_seed: int = 0
     """RNG seed for picking a random image token when ``placement=="image_patch"``."""
+    strided_k: int = 0
+    """Number of strided image-patch positions to use when placement=='image_patch_strided'.
+    Must equal the K dim of the (K, H) steer vector. Mirrors how strided_image_multi
+    sub-sampled the AV's input (k evenly-spaced indices via torch.linspace)."""
 
 
 def resolve_steer_indices(
@@ -80,6 +85,28 @@ def resolve_steer_indices(
         # Same indices as image_patch_all but ordered (the hook will place the
         # k-th provided steer vector at the k-th index, so order matters).
         return [int(i) for i in iter_image_positions(row_attn, row_img)]
+
+    if spec.placement == "image_patch_strided":
+        # Pick `strided_k` evenly-spaced image-patch indices (same scheme as
+        # strided_image_multi on the AV input side). The hook places the k-th
+        # provided steer vector at the k-th strided index; the other patch
+        # positions are left untouched.
+        if spec.strided_k <= 0:
+            raise ValueError(
+                "image_patch_strided placement requires strided_k > 0; "
+                f"got {spec.strided_k}."
+            )
+        all_idx = [int(i) for i in iter_image_positions(row_attn, row_img)]
+        n = len(all_idx)
+        if n == 0:
+            raise ValueError("No image_patch tokens for image_patch_strided.")
+        k = int(spec.strided_k)
+        if k > n:
+            raise ValueError(
+                f"strided_k={k} exceeds available image_patch tokens (n={n})."
+            )
+        picks = torch.linspace(0, n - 1, steps=k).round().to(torch.int64).tolist()
+        return [all_idx[int(p)] for p in picks]
 
     if spec.placement == "last_text":
         idx = _last_text_index(row_attn, row_img)
@@ -113,14 +140,15 @@ class BackboneFeaturesSteerHook:
         *,
         batch_index: int = 0,
     ) -> None:
-        # image_patch_spatial expects a (N, H) grid; everything else expects
-        # a flat (H,) vector that gets broadcast/picked per placement.
-        if spec.placement == "image_patch_spatial":
+        # image_patch_spatial and image_patch_strided expect a (K, H) grid;
+        # everything else expects a flat (H,) vector that gets broadcast/picked.
+        per_position_placements = ("image_patch_spatial", "image_patch_strided")
+        if spec.placement in per_position_placements:
             if steer_vec.dim() == 3 and steer_vec.shape[0] == 1:
                 steer_vec = steer_vec.squeeze(0)
             if steer_vec.dim() != 2:
                 raise ValueError(
-                    "image_patch_spatial requires steer_vec shape (N, H); "
+                    f"{spec.placement} requires steer_vec shape (K, H); "
                     f"got {tuple(steer_vec.shape)}"
                 )
             if int(steer_vec.shape[1]) != BACKBONE_EMBEDDING_DIM:
@@ -159,18 +187,19 @@ class BackboneFeaturesSteerHook:
         steer = self._steer_cpu.to(device=feats.device, dtype=feats.dtype)
         blend = float(self.spec.blend)
         blend = max(0.0, min(1.0, blend))
-        is_spatial = self.spec.placement == "image_patch_spatial"
+        is_spatial = self.spec.placement in ("image_patch_spatial", "image_patch_strided")
         if is_spatial:
             if steer.dim() != 2:
                 raise RuntimeError(
-                    f"image_patch_spatial expects 2D steer; got {tuple(steer.shape)}"
+                    f"{self.spec.placement} expects 2D steer; got {tuple(steer.shape)}"
                 )
             if steer.shape[0] != len(idxs):
                 raise RuntimeError(
-                    f"image_patch_spatial: AR emitted {steer.shape[0]} vectors "
-                    f"but GR00T has {len(idxs)} image_patch tokens in this "
-                    "forward. Set ARConfig.spatial_n_positions to match the "
-                    "live image_patch count (post-pooling)."
+                    f"{self.spec.placement}: AR emitted {steer.shape[0]} vectors "
+                    f"but resolved {len(idxs)} target token slots in this "
+                    "forward. For image_patch_spatial, set ARConfig.spatial_n_positions "
+                    "to match the live image_patch count. For image_patch_strided, "
+                    "set SteerSpec.strided_k to match AR's K dim."
                 )
 
         new_feats = feats.clone()

@@ -66,13 +66,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--placement", default="image_patch",
-                   choices=["image_patch", "image_patch_all", "last_text", "anchor"])
+                   choices=["image_patch", "image_patch_all", "image_patch_spatial",
+                            "image_patch_strided", "last_text", "anchor"])
     p.add_argument("--blend", type=float, default=1.0)
     p.add_argument("--video-backend", default="torchcodec",
                    choices=["decord", "torchvision_av", "torchcodec"])
     p.add_argument("--rms-threshold", type=float, default=0.05,
                    help="Pass threshold on the median rms(action delta). "
                         "Median < this ⇒ steer is inert; don't launch GRPO.")
+    p.add_argument("--random-control", action="store_true",
+                   help="Replace AR's output with a random gaussian vector of "
+                        "the same shape and L2 norm. Tests whether the codec's "
+                        "content matters, vs. any vector of similar magnitude.")
     p.add_argument("--out-json", required=True)
     return p
 
@@ -204,16 +209,34 @@ def main(argv: list[str] | None = None) -> int:
             )
             text = av_out["text"][0]
             steer_vec = ar_text_to_backbone_vec(ar, text).to(args.device)
-            if steer_vec.dim() == 2:
-                # Spatial AR head: mean-pool to a single vector for the
-                # placement modes that take (H,). image_patch_spatial would
-                # take (N, H); we use plain image_patch here for the probe.
+            per_position_placements = ("image_patch_spatial", "image_patch_strided")
+            if steer_vec.dim() == 2 and args.placement not in per_position_placements:
+                # Spatial AR head emits (K, H); single-position placements
+                # take (H,), so collapse via mean-pool. Per-position
+                # placements keep the (K, H) shape.
                 steer_vec = steer_vec.mean(dim=0)
+            if args.random_control:
+                # Replace AR's actual output with a random gaussian vector
+                # rescaled to AR's L2 norm. Tests whether image_patch_all PASS
+                # depends on AR's content or just on broadcasting any vector.
+                orig_norm = steer_vec.norm()
+                rand = torch.randn_like(steer_vec)
+                if steer_vec.dim() == 2:
+                    # Match per-row norms so the random control's magnitude
+                    # profile across K matches AR's.
+                    rand = rand / rand.norm(dim=1, keepdim=True) * steer_vec.norm(dim=1, keepdim=True)
+                else:
+                    rand = rand / rand.norm() * orig_norm
+                steer_vec = rand
+            strided_k = int(steer_vec.shape[0]) if (
+                args.placement == "image_patch_strided" and steer_vec.dim() == 2
+            ) else 0
 
         # 3) steered action
         spec = SteerSpec(
             placement=args.placement, blend=float(args.blend),
             image_patch_seed=int(args.seed) + i,
+            strided_k=strided_k,
         )
         with torch.inference_mode():
             with attach_backbone_steer(backbone, steer_vec, spec):

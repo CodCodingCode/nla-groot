@@ -1,0 +1,245 @@
+# v7 SFT Overview
+
+Synthesis of the v7 SFT training program — what the data is, what axes the model is supposed to represent, how we evaluate it, how we landed on the current training setup, and what changed to make iteration faster.
+
+This doc is a roadmap into the more detailed sources. Where a number or claim originates from another doc or file, I link to it. Where I'm inferring rather than quoting, I say so.
+
+---
+
+## TL;DR
+
+- **Goal**: rebuild the activation codec (AV → AR) so it produces vectors the downstream policy actually responds to. Stage 0 (paper/STAGE_0_NEW_FINDINGS.md) found that prior SFT was producing behaviorally inert codes — high reconstruction FVE, zero effect on policy actions.
+- **Three primary changes in v7** (vs. v6):
+  1. Action-head consistency loss enabled at weight=1.0, cadence=every step, on all position types — so policy effect is part of the gradient.
+  2. AR head changed from `scalar` to `spatial` with `n_positions=8` — so we emit one vector per pooled image-patch position instead of broadcasting one vector to all 64 patches.
+  3. AR MSE weight demoted to 0.1 — reconstruction is a regularizer, not the primary objective.
+- **Eval**: closed-loop FVE stratified by position is the headline metric. Gates: `cl/fve/temp=0.0 > 0.30` overall and `> 0.20` on `image_patch`. Final pass requires three counterfactual steering predicates each clearing +5pp.
+- **Faster iteration**: new action-effect probe (scripts/eval/action_effect_probe.py) gates GRPO launch in ~10 min instead of burning 10–15 GPU-hours on a codec that's still inert.
+
+---
+
+## 1. Data
+
+| | |
+|---|---|
+| Labels | data/labels/libero_4suite_v5_combined/labels.jsonl — 100,610 rows |
+| Activations | data/activations/libero_4suite_v4_combined/ — 49 shards |
+| Train / Val | 95,430 / 5,180 rows, episode-stratified (23 of 454 episodes held out) |
+| Suites | goal (25,010), object (27,152), spatial (25,862), 10 (22,586) — roughly balanced |
+| Hard negatives | `topk_cosine`, 4 per anchor, cached at `data/activations/libero_4suite_v4_combined/hard_negatives_v5.jsonl` |
+| α (codec scale) | 203.977 (`p75_norm` from activation stats; overrides the config default 197.44) |
+
+### Position-type composition
+
+The combined label set effectively has two position types:
+
+- `image_patch`: 50,305 rows (50%)
+- `last_text`: 50,305 rows (50%)
+
+`POSITION_MIX` in src/nla/layer_spec.py lists a third type (`anchor`) at weight 0.20, but in practice **`anchor` and `last_text` resolve to the same token**: in src/nla/extraction/sampler.py, `_anchor_index` returns the final non-pad token and `_last_text_index` returns the final non-pad *non-image* token. The two diverge only when a prompt ends on an image token, which the chat templates used here don't do — so `anchor` rows are absorbed into `last_text` in the merged v5 label set. The v7 run logs `"No anchor rows in train split; balance_position_mix using 50/50 last_text/image_patch (override the default POSITION_MIX 40/40/20)."` Per-batch quotas are enforced via `batch_stratified_positions=true` (largest-remainder allocation of 2 image_patch + 2 last_text per batch of 4).
+
+### Spatial-AR target shape
+
+The AR target now has shape `(B, K, H)` with K=8 (one vector per pooled image-patch position). This was wired through dataset, collate, and the consistency kernel in commits d2a1724 and 7c93096; the `StratifiedFve` accumulator was extended in 7c93096 to handle 3D targets. Before v7, the target was `(B, H)` — a single vector forced to describe all 64 patches identically.
+
+See docs/sft_plan/01_data_audit.md for the deeper audit and docs/sft_plan/v7_runbook.md for the operational config.
+
+---
+
+## 2. The Three Axes
+
+"Three main axes" isn't a term that appears verbatim in the v7 docs. Below are the three plausible meanings depending on what level you mean. Most of v7's design touches all three.
+
+### 2a. Position types — *the most likely meaning*
+
+`POSITION_MIX` in src/nla/layer_spec.py nominally lists three position types, but the codec really only sees two:
+
+| Position | What it is | Why it matters |
+|---|---|---|
+| `last_text` | Last non-image, non-pad text token (this category absorbs `anchor` — see §1) | High-level intent encoding — what the language model "decided" |
+| `image_patch` | A randomly sampled image-patch token | Visual-grounding evidence the policy actually consumes |
+
+v6 used a single uniform position mix, which leaked image-patch capacity into less-important text positions. v7 fixes this with `batch_stratified_positions=true` so each batch contains a fixed 50/50 last_text/image_patch quota.
+
+**Per-axis eval**: stratified FVE / MSE / cosine logged as `fve/position=image_patch` and `fve/position=last_text` at every val step.
+
+### 2b. Spatial K=8 axis (new in v7)
+
+Within the `image_patch` position, the AR head now emits 8 distinct vectors — one for each pooled spatial position in the GR00T vision tower. This is the "spatial AR target" wired in commits d2a1724 and 7c93096.
+
+**Why**: Stage 0 root-caused that one-caption-many-patches was a structural mismatch — the AR was forced to describe 64 patches with one vector, so it learned the *average* visual signal and ignored spatial variation. The K=8 spatial head lets the codec encode different content per patch region.
+
+**Per-axis eval**: handled by `StratifiedFve` accepting `(B, K, H)` tensors; aggregate metrics are now averages over the K axis. There isn't a per-K-position log line yet — that would be a useful addition if we want to diagnose whether the model is actually differentiating across K or collapsing.
+
+### 2c. Three success predicates (CF steering)
+
+These are the three orthogonal behavioral tests in docs/sft_plan/v7_runbook.md lines 182–194:
+
+| Predicate | What it measures | Gate |
+|---|---|---|
+| `steer_lift` = matched − no_steer | Does adding the codec do anything at all? | ≥ +5pp |
+| `semantic_gap` = matched − mismatched | Does the right codec beat the wrong codec? | ≥ +5pp |
+| `causal_specificity` = matched − matched_null | Is the *content* (not just magnitude) what wins? | ≥ +5pp |
+
+All three must pass on n ≥ 32 held-out CF pairs with the `language_swap` protocol, `image_patch` placement. These are the ultimate "is the codec good" gates.
+
+### Which one did you mean?
+
+Best guess from conversation context: **2a (position types)**. But for a model to clear the v7 bar it has to be good along all three — the position-type axis (right capacity allocation), the K=8 spatial axis (real per-patch variation), and the three CF predicates (behavioral effect).
+
+---
+
+## 3. Eval Standards
+
+### Headline metric
+
+**Closed-loop FVE stratified by position**, defined in docs/sft_plan/03_eval_harness.md lines 20–26. Closed loop means we run `h → AV → ŷ → AR → ĥ` end-to-end — the AV's output is fed into the AR rather than using teacher-forced ground-truth captions. This is the only setting that mirrors how the codec is used at inference.
+
+FVE definition (src/nla/training/fve.py):
+```
+FVE = 1 − Σ(y − ŷ)² / Σ(y − ȳ_d)²
+```
+where `ȳ_d` is the per-dimension batch mean. FVE = 1 is perfect, FVE = 0 is "as good as predicting the mean," FVE < 0 is worse than the mean baseline.
+
+### Gates for v7
+
+From docs/sft_plan/03_eval_harness.md:
+
+| Gate | Threshold |
+|---|---|
+| `cl/fve/temp=0.0` overall | > 0.30 |
+| `cl/fve/temp=0.0/position=image_patch` | > 0.20 |
+| `mem_gap_temp = cl/fve/temp=0.0 − cl/fve/temp=1.0` | < 0.15 (memorization proxy) |
+| `train_subsample_fve − val_fve` | < 0.10 (generalization gap) |
+
+### Behavioral gates (from v7 runbook)
+
+The three CF predicates above (steer_lift, semantic_gap, causal_specificity), each at +5pp on n ≥ 32.
+
+### Pre-GRPO gate
+
+Action-effect probe: **`median_rms(action_delta) ≥ 0.05`** across n=32 CF pairs (see §5 below).
+
+### What we log every 100 steps
+
+The current `[step N]` lines log `val {fve, mse, cosine}`, per-position breakdowns, CE, and `closed_greedy/*` (closed-loop with greedy decoding). Closed-loop temperature sweeps (`closed_t0.7`, etc.) are configured but not currently being logged at training time — they run as a final eval.
+
+### Where we are right now
+
+At step 1300 / 4000 (current run):
+- `val fve = -318`, `closed_greedy/fve = -308`
+- `val fve/position=image_patch = -300`, `closed_greedy/fve/position=image_patch = -299`
+
+Both are deeply below the +0.30 / +0.20 gates. They've been climbing steadily (-1123 → -318 over the first 1300 steps), but extrapolating linearly they won't clear zero by step 4000 unless the trajectory accelerates. The action-effect probe is the more practical near-term gate.
+
+---
+
+## 4. How We Found the Best Training Setup
+
+The v7 config is the output of a Stage 0 → Stage 4 program documented in docs/sft_plan/STAGE_0_TO_4_EXECUTION_REPORT.md. Highlights:
+
+### Stage 0: behavioral verdict on v6
+
+paper/STAGE_0_NEW_FINDINGS.md line 62:
+
+> "At the trained dose (α = 1.0), AR backbone injection is perfectly inert: matched-intent, mismatched-intent, and no-steer baselines all reach identical task success (62.5%, n=8 cross-task pairs, paired identical samples)."
+
+This was despite v6 having reasonable reconstruction FVE. **Conclusion**: reconstruction-quality metrics had been lying to us — the codec was filling capacity along directions the policy projects away. The v7 retrain redirects gradient pressure toward policy-effect.
+
+### Stage 0 root cause (loss-mismatch)
+
+From paper/STAGE_0_NEW_FINDINGS.md lines 139–158: three of the four loss components (SFT AR MSE, GRPO base reward, AV CE) all optimize reconstruction in α-scaled embedding space. None of them tell the codec "your output should move the policy." So capacity went uniformly into reconstruction directions and the policy ignored them.
+
+### Stage 1: image-patch scorecard
+
+paper/STAGE_0_NEW_FINDINGS.md flagged `retrieval_margin_image_patch = 0.002` (target 0.10). The codec was failing hardest on the position type that actually carries visual evidence.
+
+### Hyperparameter / architecture studies feeding v7
+
+| Study | Doc | Key finding |
+|---|---|---|
+| Hyperparams sweep | 02_hyperparams.md | LR, batch, warmup baselines |
+| Layer × alpha | 04_layer_alpha.md | Optimal injection layer + dose |
+| Arch injection | 05_arch_injection.md | Where to attach the steer in the backbone |
+| Anchor ablation | anchor_ablation.md | Cost/benefit of anchor positions |
+| SFT recipe (dataset-agnostic) | 07_sft_recipe_dataset_agnostic.md | Stable recipe across data versions |
+| Action-head LoRA phase 1 | 09_action_head_lora_phase1.md | Direction for policy-coupled training |
+
+### v7 deltas vs. v6 (synthesis from v7_runbook.md lines 55–101)
+
+**SFT side:**
+- `action_consistency_weight`: 0.0 → 1.0
+- `action_consistency_every_n_steps`: 8 → 1
+- `action_consistency_image_patch_only`: true → false
+- `ar_head_type`: `scalar` → `spatial`, `spatial_n_positions`: 8
+- `ar_weight`: 1.0 → 0.1
+- `batch_stratified_positions`: false → true
+
+**GRPO side (for the v7 → GRPO leg):**
+- `sim_reward_weight` 0.0 → 0.8, `sim_contrastive_weight` 0.0 → 1.0
+- `sim_null_control_weight` 0.0 → 0.5
+- `beta` 0.02 → 0.05 (KL leash; a fast variant with β=0 drifted out of SFT basin in 30 steps)
+- Group `(B × K)`: 2×2 → 4×8 (Bernoulli σ on advantage 0.25 → 0.09)
+- `curriculum_easy_to_hard`: false → true
+
+---
+
+## 5. How We Made Iteration Faster
+
+### The problem: blind GRPO launches
+
+Before v7, the workflow was `SFT → GRPO (10–15 GPU-hours)`. Stage 0 demonstrated that SFT can converge with high reconstruction FVE but still produce behaviorally inert vectors. Without a pre-flight check, we'd burn GRPO compute on a codec the policy ignores.
+
+### The probe
+
+scripts/eval/action_effect_probe.py, added in commit 653cb3c. For each of n held-out CF pairs:
+
+```python
+baseline = policy(h, no_steer)
+steered  = policy(h, attach_backbone_steer(AR(AV(h)) * alpha, placement))
+delta    = action_stats(steered, baseline)
+```
+
+The gate is **median RMS of the action delta**:
+
+| `median_rms(Δaction)` | Decision |
+|---|---|
+| ≥ 0.05 | Codec is causally connected → run GRPO |
+| < 0.05 | Codec still inert → diagnose SFT loss balance |
+
+### Runtime profile
+
+- n = 32 CF pairs, single H100
+- No steer server, no LIBERO env, inline policy forwards only
+- **~10 minutes end-to-end**
+
+This makes the SFT → probe → GRPO pipeline shell-conditional. A failing probe surfaces the problem in ~10 min instead of 10–15 hours.
+
+### What "faster iteration" replaces
+
+- **Old**: SFT (overnight) → GRPO (overnight) → LIBERO eval (hours) → discover codec is inert → ??? → restart
+- **New**: SFT (overnight) → probe (10 min) → decide → GRPO only if codec passes
+
+The probe doesn't replace the closed-loop FVE gates or the three CF predicates — those still run as the final acceptance criteria. The probe is a cheap early-failure detector specifically for the "is the codec causally live" question.
+
+---
+
+## Open questions / what to watch
+
+- **Cosine plateau at ~0.49**: with `(B, K=8, H)` targets, aggregate cosine across K is hard to interpret cleanly. We don't currently log per-K diversity — adding `var(pred_k) across k` as a metric would tell us whether the model is actually differentiating across K or collapsing all 8 outputs to the same vector.
+- **FVE trajectory**: extrapolating from -1123 (step 100) → -318 (step 1300), the run won't clear FVE=0 by step 4000 at the current rate. Either (a) the rate accelerates as the head finds the right basin, or (b) we need a longer schedule / different LR. The action-effect probe is the practical near-term gate.
+- **Anchor positions are absent from training**: the codec is being asked to handle a position type (`anchor`) that's never in the training mix. This is currently masked by setting POSITION_MIX to 50/50 last_text/image_patch at runtime, but if downstream protocols use anchor placement, performance there is untested.
+
+---
+
+## References
+
+- docs/sft_plan/v7_runbook.md — operational runbook (the source of truth for v7 config and CF predicate gates)
+- paper/STAGE_0_NEW_FINDINGS.md — Stage 0 findings + v7 plan synthesis
+- docs/sft_plan/STAGE_0_TO_4_EXECUTION_REPORT.md — execution log of the staged program
+- docs/sft_plan/03_eval_harness.md — closed-loop FVE gates and stratification
+- docs/sft_plan/01_data_audit.md — data composition and splits
+- src/nla/training/sft.py — SFT loop and `_evaluate`
+- src/nla/training/fve.py — FVE / StratifiedFve implementation
+- src/nla/training/action_head_consistency.py — action-head consistency loss
+- scripts/eval/action_effect_probe.py — the pre-GRPO gate
