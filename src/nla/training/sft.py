@@ -971,6 +971,23 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                     row["action_consistency_cache_hits"] = int(consistency_diag.baseline_cache_hits)
                     row["action_consistency_cache_misses"] = int(consistency_diag.baseline_cache_misses)
                 _write_jsonl_row(paths["metrics"], row)
+                # Surface train metrics in the log too so the launch log
+                # isn't silent between evals. Previously these only landed
+                # in metrics.jsonl; the user had to know to look there.
+                ac_str = (
+                    f"  ac_loss={row['action_consistency_loss']:.3f}"
+                    f"  ac_delta={row['action_consistency_delta_norm']:.3f}"
+                    if consistency_diag is not None and consistency_diag.n_rows > 0
+                    else ""
+                )
+                # step rate based on elapsed_s
+                rate = row["elapsed_s"] / max(1, step) if step > 0 else float("nan")
+                logger.info(
+                    "[step %d] train  loss=%.4f  ce=%.4f  ar_mse=%.4f  ar_nce=%.4f"
+                    "%s  lr=%.2e  elapsed=%.0fs  rate=%.1fs/step",
+                    step, row["loss"], row["ce"], row["ar_mse"], row["ar_nce"],
+                    ac_str, row["lr"], row["elapsed_s"], rate,
+                )
                 if tb is not None:
                     tb.add_scalar("train/ce", row["ce"], step)
                     tb.add_scalar("train/ar_mse", row["ar_mse"], step)
