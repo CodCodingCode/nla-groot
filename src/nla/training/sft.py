@@ -152,6 +152,16 @@ class SFTConfig:
     # without erroring.
     drop_last: bool = False
 
+    # DataLoader parallelism. 0 = main-thread loading (legacy default; safe
+    # but data-loading-bottlenecked on H100 — measured 37% GPU util at 0).
+    # 4-8 typically lifts util to 80%+. Workers fork the dataset (incl. hard-
+    # neg cache + label index) so memory grows linearly with worker count.
+    num_workers: int = 0
+    # pin_memory + persistent_workers reduce per-batch overhead when
+    # num_workers > 0. Ignored when num_workers == 0.
+    pin_memory: bool = True
+    persistent_workers: bool = True
+
     # Optional caps so smoke runs finish quickly even if total_steps is high.
     max_train_items: int | None = None
     max_val_items: int | None = None
@@ -422,7 +432,9 @@ def _make_dataloaders(cfg: SFTConfig):
             )
             train_loader = DataLoader(
                 train_ds, batch_sampler=batch_sampler,
-                num_workers=0, collate_fn=collate_labeled_positions,
+                num_workers=cfg.num_workers, collate_fn=collate_labeled_positions,
+                pin_memory=cfg.pin_memory if cfg.num_workers > 0 else False,
+                persistent_workers=cfg.persistent_workers if cfg.num_workers > 0 else False,
             )
         else:
             sampler = _position_mix_sampler(
@@ -430,19 +442,25 @@ def _make_dataloaders(cfg: SFTConfig):
             )
             train_loader = DataLoader(
                 train_ds, batch_size=cfg.batch_size, sampler=sampler,
-                num_workers=0, collate_fn=collate_labeled_positions,
+                num_workers=cfg.num_workers, collate_fn=collate_labeled_positions,
                 drop_last=cfg.drop_last,
+                pin_memory=cfg.pin_memory if cfg.num_workers > 0 else False,
+                persistent_workers=cfg.persistent_workers if cfg.num_workers > 0 else False,
             )
     else:
         train_loader = DataLoader(
             train_ds, batch_size=cfg.batch_size, shuffle=True,
-            num_workers=0, collate_fn=collate_labeled_positions,
+            num_workers=cfg.num_workers, collate_fn=collate_labeled_positions,
             drop_last=cfg.drop_last,
+            pin_memory=cfg.pin_memory if cfg.num_workers > 0 else False,
+            persistent_workers=cfg.persistent_workers if cfg.num_workers > 0 else False,
         )
     val_loader = DataLoader(
         val_ds, batch_size=cfg.batch_size, shuffle=False,
-        num_workers=0, collate_fn=collate_labeled_positions,
+        num_workers=cfg.num_workers, collate_fn=collate_labeled_positions,
         drop_last=False,
+        pin_memory=cfg.pin_memory if cfg.num_workers > 0 else False,
+        persistent_workers=cfg.persistent_workers if cfg.num_workers > 0 else False,
     )
     return train_loader, val_loader, train_ds, val_ds
 

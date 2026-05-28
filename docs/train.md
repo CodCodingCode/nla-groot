@@ -26,7 +26,7 @@ PYTHONPATH=src .venv/bin/python scripts/training/run_sft.py \
   --action-consistency-dataset-roots '{"": "third_party/Isaac-GR00T/examples/LIBERO/libero_goal_no_noops_1.0.0_lerobot"}'
 ```
 
-Note: `--num-workers` is **not yet implemented** as a CLI flag — currently hardcoded to 0 in `src/nla/training/sft.py:425/433/439/444`. See "DataLoader workers" below for the patch.
+`--num-workers` is a real CLI flag now (also `--no-pin-memory` / `--no-persistent-workers` to opt out of those defaults).
 
 ---
 
@@ -97,15 +97,15 @@ Throughput curve on this host (26 CPUs, 221 GB RAM, 102 activation shards):
 
 The plateau above ~8 workers is because each worker forks the main process state (hard-neg cache, label index, position embeddings) — past 8, memory pressure rises but throughput doesn't.
 
-### Patch to add the flag
+### CLI usage
 
-`src/nla/training/sft.py` needs:
-1. A `num_workers: int = 0` field on `SFTConfig`
-2. Replace `num_workers=0` with `cfg.num_workers` in the 4 DataLoader call sites
-3. Add `pin_memory=True, persistent_workers=True` to each
-4. `scripts/training/run_sft.py` needs a `--num-workers` argument that defaults to 0 and plumbs into `SFTConfig`
+```bash
+--num-workers 8                  # 4-8 is the sweet spot
+--no-pin-memory                  # opt out of pin_memory (default is on with workers > 0)
+--no-persistent-workers          # opt out of persistent_workers (default is on with workers > 0)
+```
 
-About 10 lines total. Not yet committed; the v8 pilot ran with `num_workers=0`.
+Defaults preserve old behavior: `num_workers=0` if you don't pass the flag, so nothing breaks for runs that don't opt in.
 
 ---
 
@@ -203,7 +203,7 @@ If std ≈ 0.02 and off-diag cosine ≈ 0, the spatial head never differentiated
 **Untested as of 2026-05-28:**
 - K=128 with v6 labels (the v8 pilot — testing now)
 - Adding last_text activation as an additional AV input slot (proposed v9; ~3-4h implementation effort)
-- DataLoader workers > 0 (proposed; ~10-line code change)
+- DataLoader workers > 0 — flag added; first run with `--num-workers 8` still pending
 
 ---
 

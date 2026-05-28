@@ -64,6 +64,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dtype", default="bfloat16")
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--grad-accum-steps", type=int, default=1)
+    p.add_argument("--num-workers", type=int, default=0,
+                   help="DataLoader worker processes. 0 = main-thread loading "
+                        "(legacy default). 4-8 typically lifts GPU util from "
+                        "~37%% to 80%%+ when action_consistency is enabled. "
+                        "Each worker forks the dataset (incl. hard-neg cache "
+                        "+ label index), so memory grows linearly with this.")
+    p.add_argument("--no-pin-memory", dest="pin_memory", action="store_false",
+                   help="Disable pin_memory in DataLoaders. Default is on when "
+                        "num_workers > 0. Ignored when num_workers == 0.")
+    p.set_defaults(pin_memory=True)
+    p.add_argument("--no-persistent-workers", dest="persistent_workers",
+                   action="store_false",
+                   help="Disable persistent_workers in DataLoaders. Default "
+                        "is on when num_workers > 0. Ignored when num_workers == 0.")
+    p.set_defaults(persistent_workers=True)
     p.add_argument("--learning-rate", type=float, default=1e-4)
     p.add_argument("--warmup-steps", type=int, default=50)
     p.add_argument("--total-steps", type=int, default=1000)
@@ -478,6 +493,9 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         device=args.device,
         batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers,
         grad_accum_steps=args.grad_accum_steps,
         learning_rate=args.learning_rate,
         warmup_steps=args.warmup_steps,
