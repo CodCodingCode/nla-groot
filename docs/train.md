@@ -6,8 +6,13 @@ How to launch a new SFT run that's fast, debuggable, and likely to produce a che
 
 ## TL;DR — the command
 
+For maximum throughput on a single H100, launch detached (so the Claude harness can't kill it after a few hours):
+
 ```bash
-PYTHONPATH=src .venv/bin/python scripts/training/run_sft.py \
+cd /lambda/nfs/Natha/nla-groot
+export PYTHONPATH=src
+
+setsid nohup .venv/bin/python -u scripts/training/run_sft.py \
   --recipe v7 \
   --activations-root data/activations/libero_4suite_v4_combined \
   --labels-jsonl     data/labels/libero_4suite_v6_with_task/labels.jsonl \
@@ -18,13 +23,41 @@ PYTHONPATH=src .venv/bin/python scripts/training/run_sft.py \
   --image-patch-pooling-strided-k 128 \
   --av-num-image-slots 128 \
   --num-workers 8 \
+  --action-consistency-every-n-steps 2 \
   --total-steps 4000 \
   --eval-every 100 \
   --save-every 500 \
   --action-consistency-policy-path checkpoints/GR00T-N1.7-LIBERO/libero_goal \
   --action-consistency-embodiment-tag LIBERO_PANDA \
-  --action-consistency-dataset-roots '{"": "third_party/Isaac-GR00T/examples/LIBERO/libero_goal_no_noops_1.0.0_lerobot"}'
+  --action-consistency-dataset-roots '{"goal": "third_party/Isaac-GR00T/examples/LIBERO/libero_goal_no_noops_1.0.0_lerobot", "object": "third_party/Isaac-GR00T/examples/LIBERO/libero_object_no_noops_1.0.0_lerobot", "spatial": "third_party/Isaac-GR00T/examples/LIBERO/libero_spatial_no_noops_1.0.0_lerobot", "10": "third_party/Isaac-GR00T/examples/LIBERO/libero_10_no_noops_1.0.0_lerobot"}' \
+  > data/sft/<run_name>_launch.log 2>&1 < /dev/null &
+
+# Save the actual python PID (not the bash $! which may be the setsid wrapper)
+sleep 5
+pgrep -f "scripts/training/run_sft.py.*<run_name>" | head -1 > data/sft/<run_name>.pid
+echo "Training PID: $(cat data/sft/<run_name>.pid)"
 ```
+
+### Throughput knobs (the 1.5× speedup)
+
+| flag | effect |
+|---|---|
+| `--num-workers 8` | DataLoader uses 8 worker processes. v7 ran at 37% GPU util with `num_workers=0`; this lifts it to ~80%+. Speedup: ~1.2-1.3×. |
+| `--action-consistency-every-n-steps 2` | The frozen-policy forward (action-consistency loss) is ~1.2 s of the ~3.5 s/step budget. Running it every 2 steps instead of every step cuts step time ~1.3×. Halves the policy-effect gradient signal per step, but you get more steps per hour overall. |
+
+Combined: step time goes ~3.5 s → ~2.3 s (~1.5×). Don't pass these for a baseline-comparison run, but for any new training they're free wins.
+
+### Detachment knobs (so Claude can't kill it)
+
+| flag | effect |
+|---|---|
+| `setsid` | Puts the process in a new session with no controlling terminal. |
+| `nohup` | Ignores SIGHUP. |
+| `< /dev/null` | No stdin tied to a terminal. |
+| `&` | Background. |
+| `disown` (optional) | Removes from the shell's job table. |
+
+Combined, the process has PPID=1, no TTY, and survives shell/conversation exit. Claude's background-task subsystem can't reach it.
 
 `--num-workers` is a real CLI flag now (also `--no-pin-memory` / `--no-persistent-workers` to opt out of those defaults).
 
@@ -160,18 +193,23 @@ If std ≈ 0.02 and off-diag cosine ≈ 0, the spatial head never differentiated
 ## Recipes by use case
 
 ### Quick architecture pilot (~30 min)
-- 400 steps, action_consistency OFF, eval_every=50
+- 400 steps, `--action-consistency-weight 0.0` (off), `--eval-every 50`
 - Tests whether labels + architecture produce intent-conditional captions
 - Doesn't test policy effect — that requires action_consistency
 
-### Full production run (~2.5-7.5 hours)
-- 4000 steps, action_consistency ON (recipe v7 default), eval_every=100
+### Full production run (~2.5-7.5 hours, slow but most signal per step)
+- 4000 steps, action_consistency ON (recipe v7 default, every step), eval_every=100
 - Eligible for GRPO if probes pass
+- ~6.7 s/step with K=8 (v7) or ~3.5 s/step with K=128 (v8 observed)
 
-### Speed-optimized full run (~2-3 hours)
-- 4000 steps, action_consistency=1.0 every 2-4 steps (instead of every step)
-- Reduces the slow frozen-policy forward but gives less policy-effect signal per step
-- Hasn't been validated yet — use cautiously
+### Speed-optimized full run (~1.5-2 hours, ~1.5× faster)
+- 4000 steps, `--action-consistency-every-n-steps 2`, `--num-workers 8`, eval_every=200
+- Step time ~2.3 s. Half as many policy-effect gradient samples per step but ~1.5× more steps in the same wall clock — usually net positive.
+- Eligible for GRPO if probes pass.
+
+### Short pilot for fast iteration (~1.5 hours, full pipeline test)
+- 1800 steps, `--action-consistency-every-n-steps 2`, `--num-workers 8`, eval_every=200, save_every=300
+- Enough to clear the v8-style architecture validation in a single afternoon.
 
 ---
 
@@ -180,10 +218,14 @@ If std ≈ 0.02 and off-diag cosine ≈ 0, the spatial head never differentiated
 | symptom | cause | fix |
 |---|---|---|
 | `ValueError: hard_negative_source='topk_cosine' requires hard_negative_index_path...` | Recipe default v7 expects the index path; CLI didn't pass it | Add `--ar-nce-hard-negative-index-path data/activations/libero_4suite_v4_combined/hard_negatives_v5.jsonl` |
+| `RuntimeError: Replay manifest is empty after building... with suites=[None]` | `--action-consistency-dataset-roots '{"": "..."}'` (empty key) doesn't fall through to all suites in practice | Pass an explicit per-suite mapping covering goal/object/spatial/10 (see TL;DR command above) |
+| `RuntimeError: Replay manifest is empty... with suites=[...]` on a *second* run reusing the same output dir | The cached empty manifest from a prior failed attempt is being loaded | `rm -f data/sft/<run>/aux/replay_manifest.jsonl` and relaunch |
 | Run crashes at `_StreamingFve expects [B, H] tensors; got (4, 8, 2048)` | Dataset returns (B, K, H) target but FVE accumulator wired for (B, H) | Should be fixed in commit 7c93096; if recurring check that AR head_type matches dataset's `ar_target_spatial` |
 | AV build takes 15-20 minutes | Embedding resize for 128 new slot tokens. The mean-cov MVN init is slow | Acceptable for new runs; for re-runs, restore from a fresh-tokens checkpoint |
 | Probe `image_patch_spatial` errors with "AR emitted N vectors but GR00T has 128" | Spatial K doesn't match live patch count | Set `--ar-spatial-n-positions 128` (was 8 in old recipe default) |
 | Captions are scene-only, no action verb | Using v5 labels without `task:` bullet | Use `data/labels/libero_4suite_v6_with_task/labels.jsonl` |
+| Background-task system kills the run after a few hours with no error trace | Claude background-task subsystem cleanup; tasks tied to conversation/session lifetime | Launch with `setsid nohup ... < /dev/null &` and `disown`. PPID=1, no TTY, own session. See "Detachment knobs" above. |
+| `ModuleNotFoundError: No module named 'nla'` when launching with setsid+nohup | `PYTHONPATH=src` was set inline on the bash command, not exported. setsid forks a child without inheriting inline env | `export PYTHONPATH=src` before the setsid command |
 
 ---
 
@@ -204,6 +246,10 @@ If std ≈ 0.02 and off-diag cosine ≈ 0, the spatial head never differentiated
 - K=128 with v6 labels (the v8 pilot — testing now)
 - Adding last_text activation as an additional AV input slot (proposed v9; ~3-4h implementation effort)
 - DataLoader workers > 0 — flag added; first run with `--num-workers 8` still pending
+- `--action-consistency-every-n-steps 2` — recommended ~1.3× speedup, untested behaviorally (does halving the policy-effect gradient hurt the codec?)
+
+**Misdiagnosed earlier (no fix needed):**
+- "GR00T policy is running fp32" — the fp32 warnings appear during `from_pretrained` but `Gr00tPolicy.__init__:102` calls `model.to(dtype=torch.bfloat16)` after. Actual inference is already bf16; no speedup available here.
 
 ---
 
