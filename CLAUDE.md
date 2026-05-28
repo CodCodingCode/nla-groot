@@ -2,6 +2,52 @@
 
 Repo-wide guidance loaded into every conversation. Keep it short; expand the per-area docs (`docs/sft_plan/`, `docs/grpo/`, etc.) for depth.
 
+## Long-running jobs MUST be detached
+
+**Any command expected to run > 30 minutes must be detached from the Claude session and from the user's shell.** Claude's background-task wrapper has a finite lifetime (observed kills after ~3-4 hours of wall clock); the user's SSH session can drop. A run tied to either is gone the moment the parent dies, and you discover this after burning hours of compute. See `docs/train.md` "Detachment knobs" for the failure mode and the exact mechanics.
+
+The right pattern depends on who's launching:
+
+### When the user is launching (preferred)
+
+Run inside `tmux`:
+
+```bash
+tmux new -s train
+cd /lambda/nfs/Natha/nla-groot
+export PYTHONPATH=src
+.venv/bin/python -u scripts/training/run_sft.py ...
+# Ctrl-b d to detach. Re-attach with: tmux attach -t train
+```
+
+`tmux` is preferred because it preserves the live stdout for `tmux attach -t train` later. Survives SSH disconnect, terminal close, and laptop sleep — anything that doesn't kill the *remote host* itself.
+
+### When Claude is launching (only choice in non-interactive bash)
+
+```bash
+cd /lambda/nfs/Natha/nla-groot
+export PYTHONPATH=src    # CRITICAL: must be exported, not inline — setsid drops inline env
+setsid nohup .venv/bin/python -u scripts/training/run_sft.py \
+  ...flags... \
+  > data/sft/<run_name>_launch.log 2>&1 < /dev/null &
+disown -h $! 2>/dev/null || true
+sleep 5
+pgrep -f "scripts/training/run_sft.py.*<run_name>" | head -1 > data/sft/<run_name>.pid
+```
+
+After launch, **verify** the process is properly detached before claiming success:
+
+```bash
+PID=$(cat data/sft/<run_name>.pid)
+ps -p $PID -o pid,ppid,tty,sid,stat
+# Good: PPID=1, TT=?, STAT contains 's' (session leader)
+# Bad: PPID is a bash shell PID — that bash will exit and take the run with it
+```
+
+### Default-deny rule
+
+If you (Claude) are about to launch a python training run, eval run, or anything else expected to take > 30 min and the command does **not** start with `setsid nohup ...`, stop. Use the detached pattern. The 5 minutes it takes to wire up properly is worth more than the hours you'll spend re-running after an external kill.
+
 ## Fast inspection iteration
 
 For "look at what the checkpoint does" iteration — viewing rollouts, comparing matched vs mismatched intent on the same scene, eyeballing init states — use the warm-REPL + long-lived steer-server stack. It does **not** speed up training; it speeds up the post-training inspection loop (drops "look at 5 init states" from ~50s to ~0.5s, "one rollout" from ~50s cold to ~20s warm).
