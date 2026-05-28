@@ -545,6 +545,15 @@ def _closed_loop_eval(
     n_seen = 0
     do_sample = temperature > 0.0
     temp_arg = float(temperature) if do_sample else 1.0
+    # How often to log running progress inside the eval loop. closed-loop eval
+    # at K=128 with 5180 val rows used to take 2h with zero visibility — this
+    # logs every 10 batches so we can see eval making progress (or being stuck).
+    progress_every = 10
+    total_batches = (
+        min(len(val_loader), max_batches) if max_batches is not None
+        else len(val_loader)
+    )
+    eval_start = time.time()
     for i, batch in enumerate(val_loader):
         if max_batches is not None and i >= max_batches:
             break
@@ -570,6 +579,18 @@ def _closed_loop_eval(
         pred_unscaled = pred_scaled.detach().float() * ar.cfg.alpha
         fve_acc.update(acts_ar.float(), pred_unscaled, batch["position_type"])
         n_seen += acts_ar.shape[0]
+        if (i + 1) % progress_every == 0 or (i + 1) == total_batches:
+            elapsed = time.time() - eval_start
+            running = fve_acc.compute()
+            logger.info(
+                "[closed_loop_eval] batch %d/%d  n_rows=%d  elapsed=%.1fs  "
+                "running fve=%.3f  mse=%.3f  cosine=%.3f  temp=%.2f",
+                i + 1, total_batches, n_seen, elapsed,
+                running.get("fve", float("nan")),
+                running.get("mse", float("nan")),
+                running.get("cosine", float("nan")),
+                temperature,
+            )
     out = fve_acc.compute()
     out["_n_rows"] = float(n_seen)
     return out
@@ -593,7 +614,11 @@ def _evaluate(
     ce_sum = 0.0
     ce_n = 0
     fve_acc = StratifiedFve(group_name="position")
-    for batch in val_loader:
+    n_batches_total = len(val_loader)
+    tf_start = time.time()
+    progress_every = 25
+    logger.info("[eval] teacher-forced pass start: %d batches", n_batches_total)
+    for i, batch in enumerate(val_loader):
         acts_av = batch["activations_av"].to(device)
         acts_ar = batch["activations_ar"].to(device)
         step_indices, instructions = _av_context_from_batch(batch)
@@ -615,8 +640,22 @@ def _evaluate(
         )
         pred_unscaled = pred_scaled.detach().float() * alpha
         fve_acc.update(acts_ar.float(), pred_unscaled, batch["position_type"])
+        if (i + 1) % progress_every == 0 or (i + 1) == n_batches_total:
+            elapsed = time.time() - tf_start
+            running = fve_acc.compute()
+            logger.info(
+                "[eval/teacher_forced] batch %d/%d  elapsed=%.1fs  "
+                "running ce=%.3f  fve=%.3f  cosine=%.3f",
+                i + 1, n_batches_total, elapsed,
+                ce_sum / max(1, ce_n),
+                running.get("fve", float("nan")),
+                running.get("cosine", float("nan")),
+            )
     metrics = fve_acc.compute()
     metrics["ce"] = ce_sum / max(1, ce_n)
+    logger.info(
+        "[eval] teacher-forced done in %.1fs (rows=%d)", time.time() - tf_start, ce_n
+    )
 
     for temperature in closed_loop_temperatures:
         tag = "greedy" if temperature <= 0.0 else f"t{temperature:g}"
@@ -967,8 +1006,22 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                     final_metrics = metrics
 
             if step > 0 and step % cfg.save_every == 0:
+                save_start = time.time()
                 av.save(str(paths["av"]))
                 ar.save(str(paths["ar"]))
+                # Verify on disk and surface the path + size so a kill after
+                # this point is recoverable. Previously saves were silent.
+                av_size_mb = sum(
+                    f.stat().st_size for f in paths["av"].rglob("*") if f.is_file()
+                ) / 1e6
+                ar_size_mb = sum(
+                    f.stat().st_size for f in paths["ar"].rglob("*") if f.is_file()
+                ) / 1e6
+                logger.info(
+                    "[checkpoint] step=%d  saved in %.1fs  av=%.1fMB at %s  ar=%.1fMB at %s",
+                    step, time.time() - save_start,
+                    av_size_mb, paths["av"], ar_size_mb, paths["ar"],
+                )
 
             step += 1
 

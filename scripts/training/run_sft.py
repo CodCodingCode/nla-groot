@@ -432,6 +432,25 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
 
+    # Install signal handlers so external kills are no longer silent. Without
+    # this, SIGTERM/SIGINT just stop the process with no log line — making it
+    # impossible to tell from logs whether the run crashed or was killed.
+    import signal
+    def _on_signal(signum, _frame):
+        signame = signal.Signals(signum).name
+        logging.error(
+            "[signal] received %s (signum=%d); exiting. Last successful "
+            "checkpoint is whatever lives on disk in --output-dir.",
+            signame, signum,
+        )
+        # Re-raise as SystemExit so finally blocks (TB writer close, etc) run.
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+    # SIGHUP can happen if a parent shell exits and nohup isn't in play.
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _on_signal)
+
     from nla.models import ARConfig, AVConfig
     from nla.training.sft import SFTConfig, run_sft
 
