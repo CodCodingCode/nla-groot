@@ -55,6 +55,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--position-type", default="image_patch")
     p.add_argument("--sim-max-steps", type=int, default=100)
     p.add_argument("--sim-placement", default="image_patch")
+    p.add_argument("--strided-k", type=int, default=0,
+                   help="K for image_patch_strided placement; must equal the "
+                        "K dim of the AR's (K, H) per-row output. Set to 128 "
+                        "to use v8's full spatial head. Default 0 = not "
+                        "strided.")
     p.add_argument("--sim-blend", type=float, default=1.0)
     p.add_argument("--alpha-scale", type=float, default=1.0,
                    help="Multiplicative dose scale applied to AR(text) before "
@@ -699,6 +704,19 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 text = out["text"][0]
                 steer_real = encode_texts_with_ar(ar, [text], device=args.device)
+                if steer_real.dim() == 3:
+                    # Spatial K-head AR returns [B, K, H]. For per-position
+                    # placements (image_patch_spatial / image_patch_strided)
+                    # the wrapper accepts the (K, H) per row directly. For
+                    # single-token placements (last_text / image_patch /
+                    # image_patch_all) we must collapse to [B, H] so the
+                    # wrapper's [B, H] path accepts it.
+                    if args.sim_placement in (
+                        "image_patch_spatial", "image_patch_strided"
+                    ):
+                        pass  # keep [B, K, H]
+                    else:
+                        steer_real = steer_real.mean(dim=1)
                 if args.alpha_scale != 1.0:
                     steer_real = steer_real * float(args.alpha_scale)
                 # Shared LIBERO seed across all conditions and arms for a
@@ -729,6 +747,11 @@ def main(argv: list[str] | None = None) -> int:
                         blend=args.sim_blend,
                         policy_language_overrides=[policy_lang_override],
                         steer_disabled=steer_disabled_for_arm,
+                        strided_k=(
+                            args.strided_k
+                            if placement_for_arm == "image_patch_strided"
+                            else 0
+                        ),
                     )
                     pending_jobs.append(jobs[0])
                     pending_meta.append({

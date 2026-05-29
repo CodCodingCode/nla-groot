@@ -79,12 +79,15 @@ def run_batched_rollouts(
         logger = ObjectStateLogger(env, tracked_bodies=bodies)
         logger.capture_initial()
         steer_h = np.asarray(job["steer_h"], dtype=np.float32)
+        spec_dict: dict[str, Any] = {
+            "placement": job.get("placement", "image_patch"),
+            "blend": float(job.get("blend", 1.0)),
+        }
+        if job.get("strided_k"):
+            spec_dict["strided_k"] = int(job["strided_k"])
         options: dict[str, Any] = {
             "steer_h": steer_h,
-            "steer_spec": {
-                "placement": job.get("placement", "image_patch"),
-                "blend": float(job.get("blend", 1.0)),
-            },
+            "steer_spec": spec_dict,
         }
         if job.get("steer_disabled"):
             options["steer_disabled"] = True

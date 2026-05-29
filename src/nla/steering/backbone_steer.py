@@ -220,23 +220,44 @@ class BackboneFeaturesSteerHook:
 
 
 class BatchedBackboneFeaturesSteerHook:
-    """Apply a distinct steer vector to each batch row in one backbone forward."""
+    """Apply a distinct steer vector to each batch row in one backbone forward.
+
+    Per-row steer shape depends on placement:
+      - single-token placements (last_text, image_patch, image_patch_all, ...): [H]
+      - per-position placements (image_patch_spatial, image_patch_strided): [K, H]
+    """
 
     def __init__(
         self,
         steer_vecs: Sequence[torch.Tensor],
         spec: SteerSpec,
     ) -> None:
+        per_position_placements = ("image_patch_spatial", "image_patch_strided")
+        is_spatial = spec.placement in per_position_placements
         vecs: list[torch.Tensor] = []
         for v in steer_vecs:
-            if v.dim() == 2 and v.shape[0] == 1:
-                v = v.squeeze(0)
-            if v.dim() != 1:
-                raise ValueError(f"each steer_vec must be [H]; got {tuple(v.shape)}")
-            if int(v.shape[0]) != BACKBONE_EMBEDDING_DIM:
-                raise ValueError(
-                    f"steer dim {v.shape[0]} != BACKBONE_EMBEDDING_DIM={BACKBONE_EMBEDDING_DIM}"
-                )
+            if is_spatial:
+                if v.dim() == 3 and v.shape[0] == 1:
+                    v = v.squeeze(0)
+                if v.dim() != 2:
+                    raise ValueError(
+                        f"each steer_vec must be [K, H] for {spec.placement}; "
+                        f"got {tuple(v.shape)}"
+                    )
+                if int(v.shape[1]) != BACKBONE_EMBEDDING_DIM:
+                    raise ValueError(
+                        f"steer hidden dim {v.shape[1]} != "
+                        f"BACKBONE_EMBEDDING_DIM={BACKBONE_EMBEDDING_DIM}"
+                    )
+            else:
+                if v.dim() == 2 and v.shape[0] == 1:
+                    v = v.squeeze(0)
+                if v.dim() != 1:
+                    raise ValueError(f"each steer_vec must be [H]; got {tuple(v.shape)}")
+                if int(v.shape[0]) != BACKBONE_EMBEDDING_DIM:
+                    raise ValueError(
+                        f"steer dim {v.shape[0]} != BACKBONE_EMBEDDING_DIM={BACKBONE_EMBEDDING_DIM}"
+                    )
             vecs.append(v.detach().float().cpu().contiguous())
         if not vecs:
             raise ValueError("steer_vecs must be non-empty")
@@ -255,18 +276,29 @@ class BatchedBackboneFeaturesSteerHook:
                 f"steer_vecs length {len(self._steer_cpu)} != batch size {b}"
             )
         blend = max(0.0, min(1.0, float(self.spec.blend)))
+        is_spatial = self.spec.placement in ("image_patch_spatial", "image_patch_strided")
         new_feats = feats.clone()
         for bi in range(b):
             idxs = resolve_steer_indices(attn, img_m, self.spec, batch_index=bi)
             steer = self._steer_cpu[bi].to(device=feats.device, dtype=feats.dtype)
-            for t in idxs:
+            if is_spatial:
+                if steer.dim() != 2 or steer.shape[0] != len(idxs):
+                    raise RuntimeError(
+                        f"{self.spec.placement}: row {bi} has steer shape "
+                        f"{tuple(steer.shape)} but resolved {len(idxs)} token "
+                        "slots. For image_patch_spatial, set ARConfig.spatial_n_positions "
+                        "to match the live image_patch count. For image_patch_strided, "
+                        "set SteerSpec.strided_k to match AR's K dim."
+                    )
+            for k, t in enumerate(idxs):
                 if blend <= 0.0:
                     continue
                 base = feats[bi, t]
+                steer_k = steer[k] if is_spatial else steer
                 if blend >= 1.0:
-                    new_feats[bi, t] = steer
+                    new_feats[bi, t] = steer_k
                 else:
-                    new_feats[bi, t] = (1.0 - blend) * base + blend * steer
+                    new_feats[bi, t] = (1.0 - blend) * base + blend * steer_k
         output["backbone_features"] = new_feats
 
 

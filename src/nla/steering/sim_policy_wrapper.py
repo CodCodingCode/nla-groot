@@ -203,14 +203,23 @@ class NlaSteerGr00tPolicy(PolicyWrapper):
                 return [t.contiguous()]
             if t.dim() == 2:
                 return [t[i].contiguous() for i in range(t.shape[0])]
-            raise ValueError(f"steer_h_batch tensor must be [B,H]; got {tuple(t.shape)}")
+            if t.dim() == 3:
+                # [B, K, H] for spatial / strided placements: one (K, H) per row.
+                return [t[i].contiguous() for i in range(t.shape[0])]
+            raise ValueError(
+                f"steer_h_batch tensor must be [B,H] or [B,K,H]; got {tuple(t.shape)}"
+            )
         if isinstance(raw, np.ndarray):
             arr = np.asarray(raw, dtype=np.float32)
             if arr.ndim == 1:
                 return [torch.from_numpy(arr)]
             if arr.ndim == 2:
                 return [torch.from_numpy(arr[i]) for i in range(arr.shape[0])]
-            raise ValueError(f"steer_h_batch ndarray must be [B,H]; got {arr.shape}")
+            if arr.ndim == 3:
+                return [torch.from_numpy(arr[i]) for i in range(arr.shape[0])]
+            raise ValueError(
+                f"steer_h_batch ndarray must be [B,H] or [B,K,H]; got {arr.shape}"
+            )
         if isinstance(raw, (list, tuple)):
             return [self._coerce_steer_vec(v) for v in raw]
         raise TypeError(f"steer_h_batch must be tensor/ndarray/list; got {type(raw)!r}")
@@ -261,4 +270,5 @@ class NlaSteerGr00tPolicy(PolicyWrapper):
             blend=float(_get(raw, "blend", self._spec.blend)),
             fixed_token_index=_get(raw, "fixed_token_index", self._spec.fixed_token_index),
             image_patch_seed=int(_get(raw, "image_patch_seed", self._spec.image_patch_seed)),
+            strided_k=int(_get(raw, "strided_k", self._spec.strided_k)),
         )

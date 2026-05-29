@@ -167,6 +167,10 @@ class SimRewardJob:
     # subprocess's :func:`predicates.score` call. ``None`` preserves the
     # legacy code default so pre-2026-05 cache files keep matching keys.
     w_predicate: float | None = None
+    # K for image_patch_strided placement (must equal the K dim of a
+    # (K, H) steer_h). 0 (default) is "not strided"; required when
+    # placement == "image_patch_strided".
+    strided_k: int = 0
 
 
 @dataclass(frozen=True)
@@ -283,6 +287,8 @@ def _run_batched_rollout_subprocess(
             item["steer_disabled"] = True
         if job.w_predicate is not None:
             item["w_predicate"] = float(job.w_predicate)
+        if job.strided_k:
+            item["strided_k"] = int(job.strided_k)
         payload.append(item)
     jobs_path = workdir / "jobs.json"
     jobs_path.write_text(json.dumps(payload))
@@ -654,6 +660,7 @@ def assemble_jobs(
     policy_language_overrides: Sequence[str | None] | None = None,
     steer_disabled: bool | Sequence[bool] = False,
     w_predicate: float | None = None,
+    strided_k: int = 0,
 ) -> list[SimRewardJob]:
     """Zip the per-row inputs into a list of :class:`SimRewardJob`s.
 
@@ -700,5 +707,6 @@ def assemble_jobs(
             ),
             steer_disabled=bool(steer_disabled_seq[i]),
             w_predicate=w_predicate,
+            strided_k=int(strided_k),
         ))
     return jobs
