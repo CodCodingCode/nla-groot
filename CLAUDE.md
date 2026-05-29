@@ -2,6 +2,17 @@
 
 Repo-wide guidance loaded into every conversation. Keep it short; expand the per-area docs (`docs/sft_plan/`, `docs/grpo/`, etc.) for depth.
 
+## Commit after every milestone
+
+**When a meaningful unit of work is finished and verified — a new script that runs, a fix that's confirmed, a doc that's complete — commit it before moving on.** Don't wait to be asked; "important thing done" is the trigger. The cost of a commit is seconds; the cost of losing an afternoon's work to a crash or a bad edit is hours.
+
+Rules of thumb:
+- **Commit the work, not the working tree.** Stage only the files that belong to the milestone you just finished (`git add <those files>`). Leave unrelated pre-existing changes alone — don't sweep them into the commit. If in doubt about whether a dirty file is yours, ask or leave it.
+- **Verify first.** Smoke-test the script / confirm the fix before committing. A commit should capture a known-good state, not an untested guess.
+- **This repo commits straight to `main`** (see the history). Match that; don't open a branch unless asked.
+- Generated artifacts under `data/` are gitignored — never force-add them.
+- End commit messages with the `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` trailer.
+
 ## Long-running jobs MUST be detached
 
 **Any command expected to run > 30 minutes must be detached from the Claude session and from the user's shell.** Claude's background-task wrapper has a finite lifetime (observed kills after ~3-4 hours of wall clock); the user's SSH session can drop. A run tied to either is gone the moment the parent dies, and you discover this after burning hours of compute. See `docs/train.md` "Detachment knobs" for the failure mode and the exact mechanics.
