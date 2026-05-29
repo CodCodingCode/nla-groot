@@ -155,6 +155,11 @@ def ensure_slot_token(tokenizer, base_model, slot_str: str) -> int:
 
     Returns the single-token id of ``slot_str`` after the operation.  Idempotent:
     if the token already encodes to a single id, no change is made.
+
+    For multi-slot setups (K>=2) prefer ``ensure_slot_tokens`` which batches
+    every new token into one ``resize_token_embeddings`` call -- calling
+    this function in a 128-iteration loop pays ~4 s per call (single-token
+    resize + embedding copy) ≈ 8 min for K=128 even with mean_resizing=False.
     """
     existing = tokenizer.encode(slot_str, add_special_tokens=False)
     if isinstance(existing, list) and len(existing) == 1:
@@ -181,6 +186,60 @@ def ensure_slot_token(tokenizer, base_model, slot_str: str) -> int:
             f"After add_special_tokens, {slot_str!r} still does not tokenize to a single id: {ids}"
         )
     return int(ids[0])
+
+
+def ensure_slot_tokens(tokenizer, base_model, slot_strs):
+    """Batched variant of :func:`ensure_slot_token`.
+
+    Adds every missing string to ``tokenizer`` in one ``add_special_tokens``
+    call, then resizes ``base_model``'s embedding ONCE. Returns the
+    per-string single-token ids in input order.
+
+    The K=128 spatial AV recipe calls this with 128 strings; the legacy
+    loop-of-singles path took ~30 min per AV load (one resize per token,
+    each resize O(vocab x hidden)). Batching collapses it to one resize,
+    cutting the cost to roughly ``one_resize + 128 * encode_lookup`` ≈ 10s.
+
+    Idempotent: tokens that already encode to a single id are returned
+    without modification. Order of returned ids matches ``slot_strs``.
+    """
+    slot_strs = list(slot_strs)
+    if not slot_strs:
+        return []
+    # First, classify each slot string as already-present vs needing-add.
+    pending: list[str] = []
+    existing_ids: dict[str, int] = {}
+    for s in slot_strs:
+        ids = tokenizer.encode(s, add_special_tokens=False)
+        if isinstance(ids, list) and len(ids) == 1:
+            existing_ids[s] = int(ids[0])
+        else:
+            pending.append(s)
+    if pending:
+        # Deduplicate while preserving order so add_special_tokens gets
+        # each new string at most once.
+        seen: set[str] = set()
+        uniq_pending = [s for s in pending if not (s in seen or seen.add(s))]
+        n_added = tokenizer.add_special_tokens(
+            {"additional_special_tokens": uniq_pending}
+        )
+        if n_added > 0 and base_model is not None:
+            base_model.resize_token_embeddings(
+                len(tokenizer), mean_resizing=False,
+            )
+    out: list[int] = []
+    for s in slot_strs:
+        if s in existing_ids:
+            out.append(existing_ids[s])
+            continue
+        ids = tokenizer.encode(s, add_special_tokens=False)
+        if not (isinstance(ids, list) and len(ids) == 1):
+            raise RuntimeError(
+                f"After batched add_special_tokens, {s!r} still does not "
+                f"tokenize to a single id: {ids}"
+            )
+        out.append(int(ids[0]))
+    return out
 
 
 class ActivationVerbalizer(nn.Module):
@@ -231,18 +290,23 @@ class ActivationVerbalizer(nn.Module):
 
         # V5 multi-slot ids. Register K distinct ``<|act_slot_i|>`` tokens
         # when ``av_num_image_slots > 1`` so ``image_patch`` rows can inject
-        # one activation vector per patch position. ``ensure_slot_token`` is
-        # idempotent so calling it for every i is safe.
+        # one activation vector per patch position. ensure_slot_tokens batches
+        # all K names into one add_special_tokens + one resize_token_embeddings
+        # call -- a loop of singletons paid ~4s/token (single-token resize +
+        # vocab x hidden copy), so K=128 took ~8 min single-threaded. The
+        # batched path is one resize and ~10s total.
         multi_strs: list[str] = []
-        multi_ids: list[int] = []
         if int(cfg.av_num_image_slots) > 1:
-            for i in range(int(cfg.av_num_image_slots)):
-                s = cfg.multi_slot_token_str_fmt.format(i=i)
-                tid = ensure_slot_token(self.tokenizer, self.base, s)
-                multi_strs.append(s)
-                multi_ids.append(int(tid))
+            multi_strs = [
+                cfg.multi_slot_token_str_fmt.format(i=i)
+                for i in range(int(cfg.av_num_image_slots))
+            ]
+        if multi_strs:
+            multi_ids_list = ensure_slot_tokens(self.tokenizer, self.base, multi_strs)
+        else:
+            multi_ids_list = []
         self.cfg.multi_slot_token_strs = tuple(multi_strs)
-        self.cfg.multi_slot_token_ids = tuple(multi_ids)
+        self.cfg.multi_slot_token_ids = tuple(int(t) for t in multi_ids_list)
 
         self.act_proj = nn.Linear(cfg.activation_dim, hidden_size, bias=True)
         if cfg.activation_dim == hidden_size:
