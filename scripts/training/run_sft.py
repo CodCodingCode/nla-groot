@@ -52,7 +52,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ar-layers", type=int, default=16,
                    help="Number of decoder layers AR keeps after truncation. Default 16 "
                         "matches GR00T's SELECT_LAYER so AR depth mirrors the activation's "
-                        "training layer.")
+                        "training layer. Pass 0 to disable truncation entirely (v9 "
+                        "recipe: use all Qwen3-4B layers; ~2x AR forward time, ~20%% "
+                        "more trainable params via LoRA on the back half).")
+    p.add_argument("--ar-loss-mode", default="mse",
+                   choices=["mse", "decomposed", "huber"],
+                   help="AR reconstruction loss formulation. 'mse' (default, "
+                        "byte-identical to v3-v8) entangles direction + magnitude "
+                        "error. 'decomposed' splits into (1 - cosine) + "
+                        "ar_scale_weight * log-norm^2 -- targets the 'high cosine "
+                        "low FVE' pattern. 'huber' is smooth_l1, more outlier-robust "
+                        "than MSE but doesn't directly target magnitude.")
+    p.add_argument("--ar-scale-weight", type=float, default=0.1,
+                   help="Weight on the log-magnitude term when "
+                        "--ar-loss-mode=decomposed. Higher pushes magnitudes closer "
+                        "to target at some cost to direction quality. Ignored otherwise.")
     p.add_argument("--ar-clip-target-scaled", type=float, default=None,
                    help="If set, clamp the α-scaled AR target to ±value during "
                         "forward_sft (e.g. 5.0). Tames heavy tails; no effect on inference.")
@@ -502,6 +516,8 @@ def main(argv: list[str] | None = None) -> int:
         head_type=args.ar_head_type,
         spatial_n_positions=int(args.ar_spatial_n_positions),
         spatial_head_hidden=int(args.ar_spatial_head_hidden),
+        ar_loss_mode=args.ar_loss_mode,
+        ar_scale_weight=float(args.ar_scale_weight),
     )
     cfg = SFTConfig(
         activations_root=args.activations_root,

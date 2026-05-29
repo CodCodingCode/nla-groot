@@ -55,6 +55,10 @@ class ARConfig:
     base_model: str = "Qwen/Qwen3-4B-Instruct-2507"
     activation_dim: int = 2048
     alpha: float = 197.44
+    # 0 (sentinel) or any value >= the model's actual num_hidden_layers
+    # = no truncation, i.e. use all transformer blocks. Positive < depth
+    # truncates to the first N blocks (v8 default 16, paying compute /
+    # capacity for memory + speed). v9 recipe drops this to 0.
     truncate_to_n_layers: int = 16
     lora_rank: int = 32
     lora_alpha: int = 64
@@ -79,6 +83,18 @@ class ARConfig:
     ar_prompt_version: PromptVersion = "legacy"
     ar_include_step_index: bool = True
     ar_include_instruction: bool = True
+
+    # Reconstruction loss formulation (v9 lever for "cosine high, FVE
+    # negative" pattern). Plain MSE entangles direction + magnitude error
+    # under one gradient; decomposed splits them so we can weight each.
+    # "mse"               : standard ``F.mse_loss(pred_scaled, target_scaled)`` -- byte-identical to legacy.
+    # "decomposed"        : (1 - cosine(pred, target)).mean() + ar_scale_weight * (log||pred|| - log||target||)^2.mean()
+    # "huber"             : ``F.smooth_l1_loss(pred_scaled, target_scaled)`` -- smoother gradient than MSE for outliers.
+    ar_loss_mode: Literal["mse", "decomposed", "huber"] = "mse"
+    # Weight on the log-magnitude term in the decomposed loss. Ignored
+    # unless ``ar_loss_mode == "decomposed"``. Dial up to push magnitudes
+    # closer to target.
+    ar_scale_weight: float = 0.1
 
     # Stage-3 plan: spatial AR output. ``scalar`` (default, V3/V4/V5 byte-
     # identical) returns a single ``(B, H)`` vector per text input that gets
@@ -363,7 +379,14 @@ class ActivationReconstructor(nn.Module):
         if self.cfg.clip_target_scaled is not None:
             clip = float(self.cfg.clip_target_scaled)
             target_scaled = target_scaled.clamp(-clip, clip)
-        mse = nn.functional.mse_loss(pred_scaled, target_scaled)
+        # ``mse`` is the name we keep for the *training* loss for back-compat
+        # with the rest of the codebase (caller logs as ``ar_mse``). The
+        # underlying formula depends on ``cfg.ar_loss_mode``. The returned
+        # ``pred_scaled`` is the raw AR prediction either way, so eval / NCE /
+        # ĥ-injection paths are unchanged.
+        mse = _ar_recon_loss(
+            pred_scaled, target_scaled, self.cfg,
+        )
         if not return_nce:
             return mse, pred_scaled
 
@@ -497,6 +520,55 @@ class ActivationReconstructor(nn.Module):
 # Helpers
 # ----------------------------------------------------------------------------
 
+def _ar_recon_loss(
+    pred_scaled: torch.Tensor,
+    target_scaled: torch.Tensor,
+    cfg: "ARConfig",
+) -> torch.Tensor:
+    """Reconstruction loss dispatched on ``cfg.ar_loss_mode``.
+
+    All three modes operate in α-scaled space (same as legacy MSE) so the
+    loss magnitude is comparable to v8 runs at startup and the existing
+    LR / warmup schedules transfer.
+
+    - ``mse``        : ``F.mse_loss(pred, target)`` (byte-identical to legacy).
+    - ``huber``      : ``F.smooth_l1_loss(pred, target)``. Same as MSE for
+                       small errors; linear for large errors. Mitigates
+                       outlier-dominated gradients.
+    - ``decomposed`` : separates direction and scale errors so each can be
+                       weighted. Direction term is ``(1 - cos(pred, tgt))``
+                       averaged over rows; scale term is squared log-norm
+                       error averaged over rows. Targets the "high cosine
+                       low FVE" pattern where MSE alone can't tell the
+                       model that magnitude is the problem.
+    """
+    mode = cfg.ar_loss_mode
+    if mode == "mse":
+        return nn.functional.mse_loss(pred_scaled, target_scaled)
+    if mode == "huber":
+        return nn.functional.smooth_l1_loss(pred_scaled, target_scaled)
+    if mode == "decomposed":
+        # Reduce K dim for spatial heads by flattening (B, K, H) -> (B*K, H)
+        # so direction / scale are per-row metrics for either head type.
+        if pred_scaled.dim() == 3:
+            p = pred_scaled.reshape(-1, pred_scaled.shape[-1])
+            t = target_scaled.reshape(-1, target_scaled.shape[-1])
+        else:
+            p = pred_scaled
+            t = target_scaled
+        eps = 1e-6
+        p_norm = p.norm(dim=-1).clamp_min(eps)
+        t_norm = t.norm(dim=-1).clamp_min(eps)
+        cos = (p * t).sum(dim=-1) / (p_norm * t_norm)
+        dir_loss = (1.0 - cos).mean()
+        scale_loss = (torch.log(p_norm) - torch.log(t_norm)).pow(2).mean()
+        return dir_loss + float(cfg.ar_scale_weight) * scale_loss
+    raise ValueError(
+        f"ARConfig.ar_loss_mode must be one of "
+        f"'mse' / 'decomposed' / 'huber'; got {mode!r}"
+    )
+
+
 def _truncate_layers(model, keep: int):
     """Trim the model's decoder stack to the first ``keep`` layers, in place.
 
@@ -510,9 +582,10 @@ def _truncate_layers(model, keep: int):
             f"Model backbone {type(backbone).__name__} has no `.layers`; "
             "AR layer truncation cannot proceed without manual handling."
         )
-    if keep <= 0:
-        raise ValueError(f"truncate_to_n_layers must be > 0; got {keep}.")
-    if keep >= len(layers):
+    if keep < 0:
+        raise ValueError(f"truncate_to_n_layers must be >= 0; got {keep}.")
+    if keep == 0 or keep >= len(layers):
+        # 0 (sentinel) or >= actual depth => no truncation.
         return model
     # ModuleList does not support slice assignment directly; rebuild.
     new_list = nn.ModuleList([layers[i] for i in range(keep)])

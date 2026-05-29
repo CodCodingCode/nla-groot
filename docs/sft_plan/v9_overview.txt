@@ -1,0 +1,134 @@
+v9 — Reconstruction-quality lever for the codec
+=================================================
+
+v9 = v8 + (no AR truncation) + (magnitude-aware reconstruction loss).
+
+It targets a specific pathology v8 ended in, not a fundamentally new
+architecture or new data:
+
+  v8 final (step 5600, mid-run snapshot used here):
+    val MSE        ≈ 350  (raw activation-space units)
+    val cosine     ≈ 0.526
+    val FVE        ≈ -82
+    closed_greedy/cosine ≈ 0.556
+    closed_greedy/fve    ≈ -76
+
+The "high cosine + deeply negative FVE" signature means: the codec
+captures *direction* in activation space well enough, but the *magnitude*
+of each reconstructed vector is systematically wrong. Plain MSE training
+can't fix this on its own because direction error and magnitude error
+both contribute to MSE with the same gradient sign — the optimizer can't
+tell which is the bigger problem and tends to anchor on the easier-to-
+optimize component (direction here).
+
+------------------------------------------------------------------------
+
+1. Why we kept truncate_to_n_layers=16 through v8
+
+Originally a memory + speed constraint, not a principled architectural
+choice. Activation extraction reads layer-16 hidden states from GR00T's
+Cosmos-Reason2-2B backbone (a Qwen3-VL truncated at layer 16). The
+*targets* live at "layer 16 semantic depth." The AR is a *separate*
+Qwen3-4B-Instruct model whose job is text -> 2048-d vector matching that
+target — its transformer depth is a free hyperparameter, not tied to
+anything about the target.
+
+Truncating AR to 16 layers was inherited from v3 — likely the original
+authors needed memory budget for the AR + AV + frozen policy + DiT all
+on one H100. It became default and no one revisited it.
+
+The capacity-matching argument ("AR depth should mirror target source
+depth") is hand-wavy. The AR doesn't need to share semantic level with
+its target; it needs to be expressive enough to map text -> target.
+Full Qwen3-4B has roughly twice the layers and twice the LoRA-eligible
+modules, giving the head more capacity to refine its reconstruction.
+
+------------------------------------------------------------------------
+
+2. Why decomposed loss specifically
+
+The relevant math:
+
+  MSE(p, t)  =  ||p - t||²
+              =  ||p||² + ||t||² - 2 ||p|| ||t|| cos(p, t)
+              =  ||p||² + ||t||² - 2 ||p|| ||t|| (1 - dir_loss)
+              =  (||p|| - ||t||)² + 2 ||p|| ||t|| dir_loss
+                        ────────         ──────────────────
+                        magnitude          direction
+
+So plain MSE *does* contain both terms — but multiplicatively coupled.
+The gradient with respect to ||p|| depends on both the magnitude error
+and the direction error simultaneously. When direction is bad, the
+optimizer can't push magnitude into the right neighborhood without
+making direction worse. When direction is OK (cosine ~0.55), the
+gradient on magnitude is damped by the cosine term and progress slows.
+
+Decomposing the loss as:
+
+  loss = (1 - cosine(p, t)).mean()
+       + ar_scale_weight * (log||p|| - log||t||)².mean()
+
+removes this coupling. The direction term is a pure cosine cost (no
+||p|| or ||t|| in the gradient). The magnitude term is a log-norm-ratio
+cost (scale-invariant; over- and under-shoot equally penalized). The
+two terms can be weighted independently via ar_scale_weight, letting
+us crank up the magnitude signal until norms come into line.
+
+This is the simplest possible intervention that addresses the symptom
+without changing what the model has to predict.
+
+------------------------------------------------------------------------
+
+3. What we expect v9 to move
+
+Predicted direction of change (not magnitudes):
+
+  Metric                        v8 final     v9 expected     reason
+  ─────────────────────────────────────────────────────────────────
+  val cosine                    0.526        0.50-0.55       slight drop OK (we de-prioritize this)
+  val MSE (raw units)           350          150-250         magnitude term tightens norms
+  val FVE                       -82          -10 to +0.1     consequence of MSE drop
+  closed_greedy cosine          0.556        0.55-0.60       not the target metric for v9
+  closed_greedy MSE             347          120-220         the headline v9 metric
+  closed_greedy FVE             -76          -10 to +0.2     headline v9 metric
+  steer_lift_predicate          unknown      +0.05 to +0.20  IF magnitude was the real bottleneck
+  step time                     ~6 s         ~9-12 s         from full AR depth
+
+The cosine "slight drop OK" is important: a small decrease in cosine
+in exchange for substantially better FVE/MSE is a win, because for
+*steering* the magnitudes need to be approximately right so the
+injected vector competes correctly with the live activation
+distribution at the patch positions. v8 had vectors with the wrong
+norm, which the policy may interpret as "small effect" or "outlier
+direction," ignoring the codec.
+
+------------------------------------------------------------------------
+
+4. What v9 does NOT fix
+
+- Caption quality (whether AV produces intent-distinguishing text). v9
+  inherits the v6 labels and AV recipe; if captions are still generic
+  scene descriptions, v9 reconstructs them faithfully but the codec is
+  still inert. Caption audit should run independently.
+- The truncate=0 + decomposed-loss change does not introduce new
+  trainable capacity that helps with *semantics* — it helps with
+  reconstruction faithfulness on the already-learned semantic content.
+- Sim eval protocol: --sim-max-steps=100 leaves nearly all BDDL
+  predicates at 0% success even on baseline runs. r_sim is the only
+  measurable signal at that horizon. Bump to 200-300 for the v9 CF
+  eval if predicates are the headline.
+
+------------------------------------------------------------------------
+
+5. Timing
+
+Launch only after v8_full_6400 + its CF eval has finished. Two reasons:
+
+(a) v9 needs the GPU. With v8 still running, a parallel v9 run on the
+    same H100 will OOM.
+(b) v9 is a one-axis change against v8. Knowing v8's CF eval number
+    tells us whether magnitude really is the bottleneck, or whether v9
+    is fixing the wrong thing.
+
+v9 is expected to take ~18-22 hours at 6400 steps with the canonical
+recipe in v9_runbook.md.
