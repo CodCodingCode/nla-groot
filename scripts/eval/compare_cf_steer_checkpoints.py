@@ -158,6 +158,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--forbid-sim-cache", action="store_true",
                    help="Assert that the sim reward worker is constructed with "
                         "cache_path=None (no train cache reuse during eval).")
+    p.add_argument("--sim-cache-path", default=None,
+                   help="Optional path to a sim-rollout cache JSONL. New entries "
+                        "are appended; existing entries with matching keys are "
+                        "returned instantly. The cache key for no_steer arms "
+                        "(steer_disabled=True) intentionally omits placement / "
+                        "text / steer_h_fp so those entries are reusable across "
+                        "SFT checkpoints, AR versions, and placement variants. "
+                        "Semantic arms include the AR fingerprint, so they "
+                        "scope per-checkpoint automatically.")
     p.add_argument("--require-distinct-intents", action="store_true",
                    help="Drop rows whose source_intent == target_intent (or "
                         "source_task == target_task) before sampling. Without "
@@ -529,13 +538,17 @@ def main(argv: list[str] | None = None) -> int:
 
     worker = None
     if args.video_dir is None:
-        # cache_path=None is critical for publishable eval: never reuse train
-        # cache values, even if the key happens to collide. --forbid-sim-cache
-        # makes the assumption explicit (script never passes a cache path
-        # anyway, but flag-gating documents intent in the saved config).
-        cache_path = None
+        # Sim-rollout cache. The cache key for steer_disabled=True entries
+        # omits checkpoint-scoped fields (placement / text / steer_h_fp) so
+        # no_steer rollouts are portable across SFT runs. Semantic-arm cache
+        # keys include the AR fingerprint so they scope per-checkpoint
+        # automatically -- there's no risk of reusing a stale codec's
+        # behavior across runs. --forbid-sim-cache forces cache_path=None as
+        # a belt-and-braces guard for paranoid publishable runs.
+        cache_path = args.sim_cache_path
         if args.forbid_sim_cache and cache_path is not None:
-            print("FATAL: --forbid-sim-cache violated", file=sys.stderr)
+            print("FATAL: --forbid-sim-cache violated; remove --sim-cache-path",
+                  file=sys.stderr)
             return 4
         total_jobs = max(
             1, len(samples) * len(cond_list) * len(intent_arms) * len(causal_arms),

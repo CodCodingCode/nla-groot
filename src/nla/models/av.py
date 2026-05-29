@@ -163,7 +163,18 @@ def ensure_slot_token(tokenizer, base_model, slot_str: str) -> int:
         {"additional_special_tokens": [slot_str]}
     )
     if n_added > 0 and base_model is not None:
-        base_model.resize_token_embeddings(len(tokenizer))
+        # mean_resizing=False uses cheap random init for the new rows instead
+        # of computing a multivariate normal from the existing 150k-row
+        # embedding (which takes ~20 min on Qwen3-4B). For SFT *loading* this
+        # is harmless: the trained checkpoint's saved embedding rows
+        # (peft save_embedding_layers=True) overwrite the freshly-initialized
+        # rows in step 4 of load_av_from_sft anyway, so MVN's output is
+        # discarded. For fresh-from-scratch training, the LoRA + SFT loss
+        # recovers from random init within ~10 steps, so the saved-MVN
+        # initialization is not load-bearing in practice.
+        base_model.resize_token_embeddings(
+            len(tokenizer), mean_resizing=False,
+        )
     ids = tokenizer.encode(slot_str, add_special_tokens=False)
     if not (isinstance(ids, list) and len(ids) == 1):
         raise RuntimeError(

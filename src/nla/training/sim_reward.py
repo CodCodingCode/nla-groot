@@ -80,6 +80,14 @@ def sim_cache_key(
     and the disabled flag while sharing the other fields, so those must
     flow into the key too or the in-memory cache silently returns a stale
     arm's rollout. Default args keep legacy callers byte-identical.
+
+    Special case for ``steer_disabled=True``: the wrapper skips the steer
+    hook entirely, so the rollout outcome is independent of
+    ``placement``, ``steer_h_fp``, and ``text``. We drop those from the
+    key so no_steer entries are reusable across SFT checkpoints, AR
+    versions, and placement variants. Use ``noop_v2=1`` as the format
+    marker so a legacy reader pointed at a v2 cache misses cleanly
+    instead of returning stale data.
     """
     h = hashlib.sha1()
     h.update(env_name.encode("utf-8"))
@@ -88,6 +96,20 @@ def sim_cache_key(
     h.update(b"\x00")
     h.update(source_id.encode("utf-8"))
     h.update(b"\x00")
+    if steer_disabled:
+        # text / placement / steer_h_fp are not in the cache key because
+        # the rollout doesn't consume them under steer_disabled.
+        h.update(str(int(seed)).encode("utf-8"))
+        h.update(b"\x00")
+        h.update(str(int(sim_max_steps)).encode("utf-8"))
+        h.update(b"\x00")
+        h.update(("lang=" + (policy_language_override or "")).encode("utf-8"))
+        h.update(b"\x00")
+        h.update(b"noop_v2=1")
+        if w_predicate is not None:
+            h.update(b"\x00")
+            h.update(("wpred=" + f"{float(w_predicate):.6g}").encode("utf-8"))
+        return h.hexdigest()
     h.update(text.encode("utf-8"))
     h.update(b"\x00")
     h.update(str(int(seed)).encode("utf-8"))
@@ -97,14 +119,11 @@ def sim_cache_key(
     h.update(str(placement).encode("utf-8"))
     h.update(b"\x00")
     h.update(str(steer_h_fp).encode("utf-8"))
-    if policy_language_override is not None or steer_disabled:
-        # Only mix the v2 fields into the hash when one of them deviates
-        # from the legacy default, so cache files produced before this
-        # change are still read back with the same key.
+    if policy_language_override is not None:
         h.update(b"\x00")
-        h.update(("lang=" + (policy_language_override or "")).encode("utf-8"))
+        h.update(("lang=" + policy_language_override).encode("utf-8"))
         h.update(b"\x00")
-        h.update(("noop=" + ("1" if steer_disabled else "0")).encode("utf-8"))
+        h.update(b"noop=0")
     if w_predicate is not None:
         h.update(b"\x00")
         h.update(("wpred=" + f"{float(w_predicate):.6g}").encode("utf-8"))
