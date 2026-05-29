@@ -1,0 +1,277 @@
+v8 SFT — design synthesis
+=========================
+
+What v8 is, why it exists, what changed from v7, and how to evaluate it.
+Updated 2026-05-28 from v8 pilot + the in-flight `v8_libero_4suite` run.
+
+---
+
+## 1. What v8 is in one sentence
+
+v8 = v7 SFT recipe **+ K=128 spatial scaling + v6 labels (task-bullet) + speed
+& detachment infrastructure**. No new loss terms. No new architecture beyond
+sizing the spatial head and AV slot grid to match GR00T's actual 128
+image-patch tokens.
+
+v8 is not a separate recipe in `src/nla/training/recipes.py` — it is launched
+as `--recipe v7` with three K-size flags pinned at the CLI and a different
+labels JSONL. The recipe.py constants still say K=8; that is intentional
+(the K=128 decision is host-/policy-specific, not a universal default).
+
+See:
+- docs/sft_plan/v7_overview.txt — v7 baseline + Stage 0/Stage 4 history
+- docs/sft_plan/v7_runbook.md — v7 per-flag rationale (most still applies)
+- docs/train.md — current operational launch (the canonical command)
+
+---
+
+## 2. Why v8 — three things v7 left unfixed
+
+### 2a. K=8 spatial head was inert
+
+v7 introduced `ar_head_type=spatial` with `spatial_n_positions=8`. The
+intent: one AR vector per pooled image-patch, instead of one vector
+broadcast to all 64 patches.
+
+What actually happened: GR00T-N1.7 (Cosmos-Reason2-2B with adaptive vision
+tokens) emits **128** image-patch tokens per frame, not 8. K=8 was a 16×
+sub-sample, picked when we believed the policy's grid was 8×8 = 64 patches
+pooled by stride 2. The position embeddings in the K=8 head never
+differentiated — `std(pe) ≈ 0.02` (init noise), off-diagonal cosine ≈ 0 —
+because there was no signal forcing the 8 slots to specialize.
+
+v8 fix: `--ar-spatial-n-positions 128`, `--image-patch-pooling-strided-k 128`,
+`--av-num-image-slots 128`. The full grid; no sub-sampling.
+
+### 2b. v5 labels were scene-only
+
+v5 labels (`data/labels/libero_4suite_v5/labels.jsonl`) describe what is
+*visible*: object positions, gripper state, plan bullets. They do not name
+the active task. The action-effect probe on v7 SFT showed that captions
+trained on v5 produce behaviorally inert codecs even when teacher-forced FVE
+looks fine — the AV learns "describe the scene" rather than "encode the
+action intent".
+
+v8 fix: `--labels-jsonl data/labels/libero_4suite_v6_with_task/labels.jsonl`.
+v6 = v5 + a trailing `- task: {instruction}` bullet on every example. This
+gives the AV an explicit text token to allocate intent capacity to.
+
+### 2c. v7 SFT runs were being silently killed
+
+A 7.5-hour v7 run launched as a normal background bash job would be killed
+by Claude's background-task subsystem partway through, with no error trace
+in the log. The training process was a child of the harness's shell session
+and was cleaned up when the conversation/session lifecycle ended.
+
+v8 fix: launch with `setsid nohup ... < /dev/null &`. PPID=1, own session,
+no controlling TTY, ignores SIGHUP. Survives shell exit and harness cleanup.
+The canonical command is in docs/train.md TL;DR.
+
+---
+
+## 3. What did *not* change from v7
+
+These v7 design decisions still hold in v8 — most of v7_runbook.md still
+applies, line for line:
+
+- `action_consistency_weight = 1.0` (policy-effect loss is primary)
+- `action_consistency_image_patch_only = False` (all position types see policy)
+- `action_consistency_blend = 0.5` (train at the blend eval uses)
+- `ar_weight = 0.1`, `ar_contrastive_weight = 0.3` (recon demoted to regularizer)
+- `ar_nce_hard_negative_source = topk_cosine` with the v5 hard-neg index
+- `ar_av_mix_max = 0.7`, `ar_av_mix_warmup_frac = 0.3`, `ar_av_mix_sample = True`
+- `balance_position_mix = True`, `batch_stratified_positions = True`
+- `learning_rate = 5e-5`, `grad_accum_steps = 2`, `batch_size = 4` (effective 8)
+- `eval_closed_loop = True`, `split_by = episode`, `held_out_fraction = 0.05`
+
+If something works in v7, it works in v8 unchanged. v8 changed three things,
+documented above.
+
+---
+
+## 4. New CLI knobs in v8
+
+These flags are not new in code — they exist on `run_sft.py` — but they're
+new in the canonical v8 launch:
+
+| Flag | v7 default | v8 value | Why |
+|---|---|---|---|
+| `--ar-spatial-n-positions` | 8 (recipe) | **128** | Match GR00T's actual patch count |
+| `--image-patch-pooling-strided-k` | 8 (recipe) | **128** | Full grid input to AR |
+| `--av-num-image-slots` | 8 (recipe) | **128** | One slot per patch |
+| `--labels-jsonl` | v5 | **v6_with_task** | task bullet ⇒ intent capacity |
+| `--num-workers` | 0 | **8** | DataLoader parallelism (~1.2–1.3×) |
+| `--action-consistency-every-n-steps` | 1 | **2** | Frozen-policy fwd every other step (~1.3×) |
+
+`--num-workers` was added in commit 41dbddb (after v7 ran with workers=0).
+Defaults preserve old behavior — passing it is opt-in.
+
+`--action-consistency-every-n-steps 2` halves the policy-effect gradient
+per step but ~1.5× steps per hour. Net positive in wall clock; behavioral
+cost (does this hurt codec quality?) is **untested as of 2026-05-28**.
+
+---
+
+## 5. The Three Axes — scaled
+
+The "three axes" framing from v7 (docs/sft_plan/v7_overview.txt §2) still
+holds in v8. What changed is axis 2b — K went from 8 to 128.
+
+### 5a. Position types (unchanged)
+
+| Position | What it encodes |
+|---|---|
+| `last_text` | High-level intent (this category absorbs `anchor`) |
+| `image_patch` | Visual grounding evidence the policy consumes |
+
+50/50 quota per batch via `batch_stratified_positions=true`. Logged as
+`fve/position=image_patch`, `fve/position=last_text` at every val step.
+
+### 5b. Spatial K=128 axis (the v8 scaling)
+
+Within `image_patch`, the AR head now emits **128** distinct vectors — one
+per pooled spatial position. Previously K=8, structurally a 16× sub-sample
+of the policy's actual grid.
+
+`StratifiedFve` accepts `(B, K, H)` targets; aggregate metrics are means
+over the K axis. There is **no per-K log line yet** — a useful addition if
+we want to diagnose whether K=128 is differentiating or collapsing. The
+diagnostic command lives in docs/train.md §5: load `ar/head.pt`, check
+`std(position_embeddings)` (init was 0.02) and off-diagonal cosine.
+
+### 5c. Three success predicates (unchanged)
+
+From v7_runbook.md lines 182–194, still the ultimate behavioral gates:
+
+| Predicate | Question | Gate |
+|---|---|---|
+| `steer_lift` = matched − no_steer | Does the codec do anything? | ≥ +5pp |
+| `semantic_gap` = matched − mismatched | Does the right codec beat the wrong one? | ≥ +5pp |
+| `causal_specificity` = matched − matched_null | Is content (not magnitude) what wins? | ≥ +5pp |
+
+All three on n ≥ 32 held-out CF pairs, `language_swap` protocol,
+`image_patch` placement.
+
+---
+
+## 6. Eval standards in v8
+
+### In-loop (every `--eval-every` steps)
+
+Same as v7. Identical metric set, logged with the same keys:
+- `ce`, `fve`, `mse`, `cosine` (teacher-forced, mentally prefix `tf/`)
+- `closed_greedy/{fve,mse,cosine}` (closed-loop, the headline)
+- `fve/position={image_patch,last_text}` stratified
+- `closed_greedy/fve/position={image_patch,last_text}` stratified
+
+Closed-loop temperature sweeps run only as the final eval (not in-loop).
+
+### Post-training gates
+
+From docs/train.md §"Post-training checks":
+
+1. `[final]` line of `sft.log` — free, runs at end of training
+2. **Action-effect probe** with `--placement image_patch_all` — gates GRPO
+   (`median_rms ≥ 0.05`)
+3. **Random-vector control** (`--random-control`) — detects measurement
+   artifacts where codec "passes" but is functionally inert
+4. **Spatial probe** with `--placement image_patch_strided` — optional, tests
+   whether K=128 differentiation adds signal beyond the mean
+5. **Position-embedding differentiation** — instant; catches a dead spatial
+   head (see snippet in docs/train.md §5)
+
+### Headline FVE gates (from v7, still apply)
+
+| Gate | Threshold |
+|---|---|
+| `closed_greedy/fve` overall | > 0.30 |
+| `closed_greedy/fve/position=image_patch` | > 0.20 |
+| Memorization proxy (`temp=0.0 − temp=1.0`) | < 0.15 |
+| Generalization gap (train_sub − val) | < 0.10 |
+| Pre-GRPO action-effect probe median_rms | ≥ 0.05 |
+
+---
+
+## 7. Training throughput in v8
+
+Observed on the in-flight `v8_libero_4suite` run (1800 steps, batch=4,
+grad_accum=2, num_workers=8, action_consistency_every_n_steps=2,
+action_consistency_weight=1.0, K=128):
+
+- Steps 105–200: ~4.1 s/step (392 s for 95 steps)
+- This is ~1.6× faster than v7's ~6.7 s/step baseline
+- 1800-step run projects to ~2.0 hours (vs v7's 7.5 hours at 4000 steps)
+- 4000-step v8 full-budget run projects to ~4.5 hours
+
+The bottleneck is now closer to the frozen-policy forward (which still runs
+on every other step). GPU utilization should be ~85% with `num_workers=8`;
+we have not verified this with `nvidia-smi` on the in-flight run.
+
+The v8 pilot (`v8_pilot_k128`, 400 steps, action_consistency_weight=0.0)
+ran at ~2.1 s/step — the action-consistency forward accounts for the
+~2 s/step delta. This matches v7's measurement.
+
+---
+
+## 8. Current run status (2026-05-28)
+
+| Run | Steps | Purpose | Status |
+|---|---|---|---|
+| `data/sft/v8_pilot_k128` | 400 | Architecture sanity (K=128 + v6 labels), no action_consistency | Done; was used to validate the recipe before launching full |
+| `data/sft/v8_libero_4suite` | 1800 | First full v8 with action_consistency=1.0 | **In flight** (~step 200 of 1800 as of writing) |
+
+The 1800-step total comes from the "short pilot for fast iteration" recipe
+in docs/train.md — enough to clear architecture validation in one
+afternoon, not enough to fully converge. A 4000-step full v8 should follow
+if the 1800-step run clears the action-effect gate.
+
+Notable first-val numbers from `v8_libero_4suite` (step 100):
+- `closed_greedy/fve = -898.65` (well below the +0.30 gate)
+- `closed_greedy/cosine = 0.7616` (high — codec produces correctly-oriented
+  but wrong-magnitude reconstructions)
+- `closed_greedy/fve/position=image_patch = -833.96`
+- `closed_greedy/fve/position=last_text = -8721.39` (last_text is much
+  worse than image_patch — surprising; v7 was the other way around at
+  comparable step counts)
+
+The deeply negative FVE with high cosine is the same regime v7 was in at
+step 100 — high cosine, magnitudes off, FVE measured against per-dim
+batch mean baseline is sensitive to magnitude error. Action-effect probe
+is the more practical gate at this stage; FVE recovery (if it happens)
+will come late in training.
+
+---
+
+## 9. What v8 does NOT test
+
+- **last_text as an additional AV input slot** — proposed v9; ~3–4 h
+  implementation effort. v8 only changes K, labels, and infra.
+- **action_consistency at every step** — v8 uses every-other-step. Whether
+  every-step gives meaningfully better policy-effect at the cost of 2× wall
+  time is open.
+- **K > 128** — GR00T currently emits 128 patches; going higher would need
+  a different pooling strategy.
+- **FSDP across multiple H100s** — ~3× expected speedup on this loss stack
+  (the action_consistency forward shards cleanly). Single-H100 only so far.
+- **Different labels** beyond v6 — e.g. labels with explicit `spatial:`
+  bullets per patch region, which v7_runbook.md §"Image_patch caption
+  refresh" calls out as high-leverage if K=128 doesn't unblock image_patch
+  by itself.
+
+---
+
+## 10. File locations
+
+| File | What it is |
+|---|---|
+| `scripts/training/run_sft.py` | Training entrypoint |
+| `src/nla/training/sft.py` | SFT loop, _evaluate, StratifiedFve usage |
+| `src/nla/training/recipes.py` | V7_SFT_DEFAULTS (still the active recipe; v8 inherits) |
+| `src/nla/models/av.py`, `ar.py` | AV / AR with spatial head |
+| `scripts/eval/action_effect_probe.py` | The pre-GRPO gate |
+| `data/sft/v8_libero_4suite/` | In-flight 1800-step v8 run |
+| `data/sft/v8_pilot_k128/` | 400-step architecture sanity pilot |
+| `data/labels/libero_4suite_v6_with_task/` | v6 labels with task bullet |
+| `data/activations/libero_4suite_v4_combined/` | K=128 activations + hard-neg index |
+| `docs/train.md` | Canonical launch command + post-training checks |
+| `docs/sft_plan/v8_runbook.md` | Operational launch (this doc's sibling) |
