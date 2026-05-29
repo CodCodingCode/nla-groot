@@ -48,6 +48,22 @@ ps -p $PID -o pid,ppid,tty,sid,stat
 
 If you (Claude) are about to launch a python training run, eval run, or anything else expected to take > 30 min and the command does **not** start with `setsid nohup ...`, stop. Use the detached pattern. The 5 minutes it takes to wire up properly is worth more than the hours you'll spend re-running after an external kill.
 
+### Always surface the tail command immediately after launching
+
+**Every time you (Claude) launch a training, eval, probe, or any other long-running job (anything written to a log file the user might want to watch), include the exact `tail -F` command in the same response.** Don't make the user ask. Don't paraphrase the path. Spell out both:
+
+1. The raw tail (to see everything as it happens):
+   ```
+   tail -F /lambda/nfs/Natha/nla-groot/data/<sub>/<name>_launch.log
+   ```
+2. A filtered tail for the signal lines (errors + the metric they're waiting for):
+   ```
+   tail -F /lambda/nfs/Natha/nla-groot/data/<sub>/<name>_launch.log \
+     | grep -E "\\[step .*\\] val |\\[checkpoint\\].*saved|SFT done|FATAL|Traceback|OOM|Killed|pred=|Wrote |steer_lift"
+   ```
+
+This applies whether the launch was your idea or the user's, whether it's foreground or detached, and whether they explicitly asked or not. If you launch three jobs, give three tail commands. The user can't read what they don't know exists, and the cost of two extra lines is zero. Missing tail commands → the user spends minutes hunting for the right log path → that's the cost.
+
 ## Fast inspection iteration
 
 For "look at what the checkpoint does" iteration — viewing rollouts, comparing matched vs mismatched intent on the same scene, eyeballing init states — use the warm-REPL + long-lived steer-server stack. It does **not** speed up training; it speeds up the post-training inspection loop (drops "look at 5 init states" from ~50s to ~0.5s, "one rollout" from ~50s cold to ~20s warm).
