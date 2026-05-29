@@ -172,13 +172,43 @@ From docs/train.md §"Post-training checks":
 
 1. `[final]` line of `sft.log` — free, runs at end of training
 2. **Action-effect probe** with `--placement image_patch_all` — gates GRPO
-   (`median_rms ≥ 0.05`)
+   (`median_rms ≥ 0.05`). NOTE: the probe collapses K=128 → 1 via mean-pool;
+   this is a sanity gate, not a faithful test of v8 as trained.
 3. **Random-vector control** (`--random-control`) — detects measurement
    artifacts where codec "passes" but is functionally inert
-4. **Spatial probe** with `--placement image_patch_strided` — optional, tests
-   whether K=128 differentiation adds signal beyond the mean
+4. **Spatial probe** with `--placement image_patch_strided` — tests
+   whether K=128 differentiation adds signal beyond the mean. This is the
+   architecturally-correct test for v8: K=128 vectors injected at K=128
+   patch positions, matching what AR was trained to emit.
 5. **Position-embedding differentiation** — instant; catches a dead spatial
    head (see snippet in docs/train.md §5)
+
+### Sim-side CF eval uses all K=128 positions (no mean-pool)
+
+Prior to commit 354b5ca, the sim-side wrapper
+(`src/nla/steering/sim_policy_wrapper.py::_resolve_steer_batch`) only
+accepted `[B, H]` for `steer_h_batch`. v8's spatial AR returns `[B, K, H]`
+with K=128, so the compare/CF eval scripts had to mean-pool over K and
+broadcast a single vector via `image_patch_all` — throwing away the
+spatial structure v8 was trained on. The first sim CF eval on the
+1800-step pilot ran this degraded path and showed `steer_lift ≈ 0`
+(t=0.26) — that result is not a verdict on v8, it's a verdict on the
+mean-pooled-fallback codec.
+
+The fix threads `[B, K, H]` end-to-end:
+
+- `_resolve_steer_batch` accepts `ndim=3` and returns per-row `(K, H)`
+- `BatchedBackboneFeaturesSteerHook` accepts per-row `[K, H]` and applies
+  K distinct vectors at K resolved patch positions
+- `SimRewardJob`, `assemble_jobs`, and the batched_rollout JSON payload
+  carry `strided_k` so `SteerSpec.strided_k` resolves correctly per call
+- `compare_cf_steer_checkpoints.py --sim-placement image_patch_strided
+  --strided-k 128` runs v8 as designed, no mean-pool
+
+This means the post-training CF eval for v8 should use
+`image_patch_strided` (not `image_patch_all`) and `--strided-k 128`. The
+mean-pool path is kept as a fallback for placements like `last_text`
+that target a single token.
 
 ### Headline FVE gates (from v7, still apply)
 

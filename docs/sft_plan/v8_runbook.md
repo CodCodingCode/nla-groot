@@ -112,15 +112,24 @@ Identical to v7 with one substitution at step 1:
      at every val step.
 2. **Action-effect probe** (~10 min) — see docs/train.md §2.
    - Gate: `median_rms ≥ 0.05` across n=32 CF pairs with `--placement image_patch_all`.
+   - Note: this probe mean-pools the K=128 spatial AR output → 1 vector;
+     it's a sanity gate, not the architecturally-correct test.
 3. **Random-vector control** (~10 min) — see docs/train.md §3.
    - If random control passes at similar rms as the actual codec, the codec
      is functionally inert despite "passing" the probe.
-4. **Spatial probe** (~10 min, optional) — `--placement image_patch_strided`.
-   - Tests whether the K=128 differentiation contributes signal beyond the mean.
-5. **Position-embedding differentiation check** (instant) — see docs/train.md §5.
+4. **Spatial probe** (~10 min) — `--placement image_patch_strided`.
+   - The architecturally-correct test: K=128 vectors at K=128 patch
+     positions, exactly how v8 was trained. Promoted from "optional" after
+     commit 354b5ca enabled the full `[B, K, H]` path through the sim
+     wrapper.
+5. **CF sim eval** with `image_patch_strided` (~30-60 min for n=32).
+   - `compare_cf_steer_checkpoints.py --sim-placement image_patch_strided
+     --strided-k 128`. Uses all K=128 patch positions end-to-end (no
+     mean-pool). Returns `steer_lift_predicate` and `semantic_gap_predicate`.
+6. **Position-embedding differentiation check** (instant) — see docs/train.md §5.
    - If `std(pe) ≈ 0.02` and off-diagonal cosine ≈ 0, the spatial head never
      differentiated — K is wasted.
-6. **GRPO v8** — *not started.* GRPO is on hold until SFT alone moves
+7. **GRPO v8** — *not started.* GRPO is on hold until SFT alone moves
    axis-2 (judge grounding). Stage 0 showed AR injection is inert at
    trained α, so GRPO won't rescue an SFT that didn't shift grounding.
 
@@ -131,6 +140,8 @@ Identical to v7 with one substitution at step 1:
 | `ModuleNotFoundError: No module named 'nla'` after setsid+nohup launch | `PYTHONPATH=src` set inline, not exported | `export PYTHONPATH=src` before the setsid command |
 | Run silently disappears after ~few hours, no error trace | Claude background-task subsystem cleanup | Launch with `setsid nohup ... < /dev/null &`; verify PPID=1 with `ps -o ppid= <pid>` |
 | Probe `image_patch_spatial` errors "AR emitted N vectors but GR00T has 128" | K mismatch | `--ar-spatial-n-positions 128` (was 8 in old recipe) |
+| Sim CF eval fails: `steer_h_batch ndarray must be [B,H]; got (B, 128, 2048)` | Sim wrapper used to reject 3D AR output | Fixed in commit 354b5ca. If you see this on an older checkout, pull main or pass `--sim-placement image_patch_all` to force the mean-pool fallback (lossy — discards K=128). |
+| Sim CF eval runs but `steer_lift ≈ 0` despite probe passing | Likely running the mean-pool fallback (`image_patch_all`) instead of the architecturally-correct path | Re-run with `--sim-placement image_patch_strided --strided-k 128`. The mean-pool path tests a degraded codec. |
 | Captions are scene-only, no action verb | Using v5 labels without `task:` bullet | `--labels-jsonl data/labels/libero_4suite_v6_with_task/labels.jsonl` |
 | AV build takes 15–20 minutes on first launch | Embedding resize for 128 new slot tokens; mean-cov MVN init is slow | Acceptable on first launch; reuse a fresh-tokens checkpoint to skip |
 | `[hard-neg topk_cosine] 1/95430 anchors have no admissible negatives; fall back to repeating anchor's caption` | Single edge-case row in the index | Harmless; warning only |
