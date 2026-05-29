@@ -491,10 +491,31 @@ def main(argv: list[str] | None = None) -> int:
             return steer_real, trained_placement, True
         raise ValueError(f"unknown causal arm: {causal_arm!r}")
 
+    import time as _time
+    def _stage(msg: str, start: float) -> float:
+        now = _time.time()
+        print(f"[compare] {msg} ({now - start:.1f}s)", flush=True)
+        return now
+
+    _t0 = _time.time()
+    print(
+        f"[compare] loading activations reader from {args.activations_root}",
+        flush=True,
+    )
     reader = ActivationShardReader(args.activations_root)
+    _t0 = _stage("activations reader loaded", _t0)
+
+    print(f"[compare] loading AR from {sft_dir / 'ar'} (device={args.device})", flush=True)
     ar = load_ar_from_sft(sft_dir / "ar", device=args.device, freeze=True)
+    _t0 = _stage("AR loaded", _t0)
+
+    print(f"[compare] loading AV (sft) from {sft_dir / 'av'} (device={args.device})", flush=True)
     av_sft = load_av_from_sft(sft_dir / "av", device=args.device, freeze=True)
+    _t0 = _stage("AV (sft) loaded", _t0)
+
+    print(f"[compare] loading AV (grpo) from {grpo_av} (device={args.device})", flush=True)
     av_grpo = load_av_from_sft(grpo_av, device=args.device, freeze=True)
+    _t0 = _stage("AV (grpo) loaded", _t0)
 
     cond_list = [c.strip() for c in args.conditions.split(",") if c.strip()]
     av_by_cond = {"sft_av": av_sft, "grpo_av": av_grpo}
@@ -564,7 +585,8 @@ def main(argv: list[str] | None = None) -> int:
             n_workers = max(1, int(args.sim_n_workers))
         print(
             f"[compare] SimRewardWorker config: sim_batch_size={sim_batch_size} "
-            f"n_workers={n_workers} total_jobs={total_jobs}",
+            f"n_workers={n_workers} total_jobs={total_jobs}  "
+            f"sim_cache_path={cache_path!r}",
             flush=True,
         )
         worker = SimRewardWorker(
@@ -575,6 +597,11 @@ def main(argv: list[str] | None = None) -> int:
             rollout_python=libero_py,
             cache_path=cache_path,
         )
+        print(
+            f"[compare] sim worker ready; "
+            f"in-memory cache has {len(worker._cache)} entries",
+            flush=True,
+        )
     video_root = Path(args.video_dir) if args.video_dir else None
 
     results: list[dict] = []
@@ -583,6 +610,10 @@ def main(argv: list[str] | None = None) -> int:
         intent = row["target_intent"]
         task = row["target_task"]
         env = row["target_env_name"]
+        print(
+            f"[compare] sample [{i+1}/{len(samples)}] {sid} -> {task}",
+            flush=True,
+        )
         item = reader.get(sid)
         features = item["features"]
         if row.get("position_index") is not None and row.get("position_type"):
