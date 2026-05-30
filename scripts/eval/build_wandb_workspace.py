@@ -11,6 +11,14 @@ train/gpu_memory_reserved_gb, val/*, val/closed_greedy/*). Adapt the
 list of LinePlot(y=...) entries if a new training script logs different
 keys.
 
+Every LinePlot pins ``x="_step"`` -- W&B's auto-incremented step counter
+that ``wandb.log(payload, step=N)`` writes to. The previous version did
+not, and a buggy ``define_metric(step_metric="train/step")`` call inside
+sft.py made charts default to a non-existent ``train/step`` axis, which
+silently rendered "no data" on every panel even though metrics WERE
+logged. The sft.py bug is fixed; pinning x explicitly here is belt-and-
+braces against any future regression.
+
 Usage::
 
     PYTHONPATH=src .venv/bin/python scripts/eval/build_wandb_workspace.py \\
@@ -57,16 +65,16 @@ def main() -> int:
             name="🎯 Headline (codec quality)",
             panels=[
                 wr.LinePlot(
-                    title="closed_greedy/cosine (higher = better)",
-                    y=["val/closed_greedy/cosine"], smoothing_factor=0.0,
+                    title="closed_greedy/cosine ↑",
+                    y=["val/closed_greedy/cosine"], x="_step",
                 ),
                 wr.LinePlot(
-                    title="closed_greedy/mse (lower = better)",
-                    y=["val/closed_greedy/mse"], smoothing_factor=0.0,
+                    title="closed_greedy/mse ↓",
+                    y=["val/closed_greedy/mse"], x="_step",
                 ),
                 wr.LinePlot(
-                    title="closed_greedy/fve (higher = better)",
-                    y=["val/closed_greedy/fve"], smoothing_factor=0.0,
+                    title="closed_greedy/fve ↑",
+                    y=["val/closed_greedy/fve"], x="_step",
                 ),
             ],
             is_open=True,
@@ -74,13 +82,14 @@ def main() -> int:
         ws.Section(
             name="📉 Train losses",
             panels=[
-                wr.LinePlot(title="train/loss",   y=["train/loss"],   smoothing_factor=0.3),
-                wr.LinePlot(title="train/ce",     y=["train/ce"],     smoothing_factor=0.3),
-                wr.LinePlot(title="train/ar_mse", y=["train/ar_mse"], smoothing_factor=0.3),
-                wr.LinePlot(title="train/ar_nce", y=["train/ar_nce"], smoothing_factor=0.3),
+                wr.LinePlot(title="train/loss",   y=["train/loss"],   x="_step", smoothing_factor=0.3),
+                wr.LinePlot(title="train/ce",     y=["train/ce"],     x="_step", smoothing_factor=0.3),
+                wr.LinePlot(title="train/ar_mse", y=["train/ar_mse"], x="_step", smoothing_factor=0.3),
+                wr.LinePlot(title="train/ar_nce", y=["train/ar_nce"], x="_step", smoothing_factor=0.3),
                 wr.LinePlot(
                     title="train/action_consistency_loss",
-                    y=["train/action_consistency_loss"], smoothing_factor=0.3,
+                    y=["train/action_consistency_loss"], x="_step",
+                    smoothing_factor=0.3,
                 ),
             ],
             is_open=True,
@@ -88,10 +97,10 @@ def main() -> int:
         ws.Section(
             name="🧪 Val metrics (every 400 steps)",
             panels=[
-                wr.LinePlot(title="val/cosine", y=["val/cosine"]),
-                wr.LinePlot(title="val/mse",    y=["val/mse"]),
-                wr.LinePlot(title="val/ce",     y=["val/ce"]),
-                wr.LinePlot(title="val/fve",    y=["val/fve"]),
+                wr.LinePlot(title="val/cosine ↑", y=["val/cosine"], x="_step"),
+                wr.LinePlot(title="val/mse ↓",    y=["val/mse"],    x="_step"),
+                wr.LinePlot(title="val/ce ↓",     y=["val/ce"],     x="_step"),
+                wr.LinePlot(title="val/fve ↑",    y=["val/fve"],    x="_step"),
             ],
             is_open=True,
         ),
@@ -99,9 +108,9 @@ def main() -> int:
             name="💾 GPU memory (OOM watch)",
             panels=[
                 wr.LinePlot(title="train/gpu_memory_gb (allocated)",
-                            y=["train/gpu_memory_gb"]),
+                            y=["train/gpu_memory_gb"], x="_step"),
                 wr.LinePlot(title="train/gpu_memory_reserved_gb",
-                            y=["train/gpu_memory_reserved_gb"]),
+                            y=["train/gpu_memory_reserved_gb"], x="_step"),
             ],
             is_open=False,
         ),

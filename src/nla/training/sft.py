@@ -364,10 +364,13 @@ def _maybe_init_wandb(cfg: SFTConfig, out_dir: Path):
         # Define metrics so the run summary shows what we actually care about
         # instead of the alphabetically-first scalar (which has been "action_*"
         # in past runs, making the headline number meaningless).
+        #
+        # IMPORTANT: do NOT pass step_metric=... here. wandb.log(payload,
+        # step=N) writes to the default ``_step`` counter; setting
+        # step_metric="train/step" makes every chart look for a non-existent
+        # ``train/step`` series and silently render "no data". Letting
+        # define_metric default to _step lets wandb's auto-panels just work.
         try:
-            # Use step as the x-axis for all metrics.
-            wandb.define_metric("train/*", step_metric="train/step")
-            wandb.define_metric("val/*", step_metric="train/step")
             # Pin the important ones with appropriate reductions for the
             # "Summary" panel at the top of the run page.
             wandb.define_metric("train/loss", summary="last")
