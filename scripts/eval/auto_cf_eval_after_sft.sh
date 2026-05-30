@@ -231,3 +231,15 @@ print(f"  codec_above_lang                 {ca:+.4f}")
 PY
 
 echo "[$(date -u +%H:%M:%SZ)] all done. Result JSON: $OUT_JSON"
+
+# 8. Consolidate caption diag + CF eval into a single wandb run ----------
+echo "[$(date -u +%H:%M:%SZ)] logging consolidated eval results to wandb..."
+.venv/bin/python -u scripts/eval/log_eval_to_wandb.py \
+    --captions-json "$CAPTIONS_JSON" \
+    --cf-json "$OUT_JSON" \
+    --project nla-groot \
+    --entity nathanyan2008p-personal \
+    --run-name "${RUN_NAME}_eval" \
+    || echo "(wandb logging failed -- JSONs still on disk)"
+
+echo "[$(date -u +%H:%M:%SZ)] pipeline complete. Check W&B: https://wandb.ai/nathanyan2008p-personal/nla-groot/runs/?query=${RUN_NAME}_eval"
