@@ -565,17 +565,25 @@ class ActivationVerbalizer(nn.Module):
         *,
         step_indices: Sequence[int | None] | None = None,
         instructions: Sequence[str | None] | None = None,
+        target_intent_texts: Sequence[str | None] | None = None,
     ):
         """Teacher-forced SFT: CE only over the target completion tokens.
 
         ``step_indices`` / ``instructions`` are optional V5 context fields.
         When omitted, the prompt renders sentinel placeholders so the call
         site stays backward compatible.
+
+        ``target_intent_texts`` (v9): per-row intent strings. When provided
+        for an image_patch row, _row_prompt_spec routes to the multi-slot
+        intent-conditioned template (Target task line + revised closing
+        instruction). When None or per-row None, falls back to the
+        descriptive multi-slot prompt -- byte-identical to v3-v8 callers.
         """
         assert activations.shape[0] == len(position_types) == len(target_texts)
         input_ids, attention_mask, labels, slot_indices = self._tokenize_prompts(
             position_types, target_texts, device=activations.device,
             step_indices=step_indices, instructions=instructions,
+            target_intent_texts=target_intent_texts,
         )
         embeds = self._embed_with_injection(input_ids, attention_mask, slot_indices, activations)
         out = self.base(
