@@ -375,6 +375,8 @@ def _maybe_init_wandb(cfg: SFTConfig, out_dir: Path):
             wandb.define_metric("train/ar_mse", summary="min")
             wandb.define_metric("train/ar_nce", summary="last")
             wandb.define_metric("train/action_consistency_loss", summary="last")
+            wandb.define_metric("train/gpu_memory_gb", summary="max")
+            wandb.define_metric("train/gpu_memory_reserved_gb", summary="max")
             wandb.define_metric("val/mse", summary="min")
             wandb.define_metric("val/cosine", summary="max")
             wandb.define_metric("val/ce", summary="min")
@@ -1167,15 +1169,25 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                 # learning?" The rest (lr, qw_mean, p_av, ar_mix_used,
                 # ac_n_rows, ac_cache_hits/misses, elapsed_s) stays in
                 # metrics.jsonl for forensic debugging but never floods W&B.
+                # Exception: GPU memory IS load-bearing -- it tells us if
+                # the run is about to OOM. So we log it explicitly here
+                # (and skip W&B's auto-stats sampler that also drops temp /
+                # power / network bytes).
                 _WANDB_TRAIN_KEYS = (
                     "loss", "ce", "ar_mse", "ar_nce",
                     "action_consistency_loss",
                 )
-                _wandb_log(
-                    wandb_run,
-                    {f"train/{k}": row[k] for k in _WANDB_TRAIN_KEYS if k in row},
-                    step=step,
-                )
+                _wandb_payload = {
+                    f"train/{k}": row[k] for k in _WANDB_TRAIN_KEYS if k in row
+                }
+                if torch.cuda.is_available():
+                    _wandb_payload["train/gpu_memory_gb"] = (
+                        torch.cuda.memory_allocated() / (1024 ** 3)
+                    )
+                    _wandb_payload["train/gpu_memory_reserved_gb"] = (
+                        torch.cuda.memory_reserved() / (1024 ** 3)
+                    )
+                _wandb_log(wandb_run, _wandb_payload, step=step)
 
             if step > 0 and step % cfg.eval_every == 0:
                 metrics = _evaluate(

@@ -22,11 +22,12 @@ The bar for each W&B metric: would the user open this chart at 3am to decide "sh
 Required for SFT runs:
 - `train/loss`, `train/ce`, `train/ar_mse`, `train/ar_nce`
 - `train/action_consistency_loss` (when action-consistency is enabled)
+- `train/gpu_memory_gb`, `train/gpu_memory_reserved_gb` — load-bearing because they tell you whether a run is heading toward an OOM crash. Log via `torch.cuda.memory_allocated() / 1024**3`, not via W&B's auto-stats.
 - `val/*` (every val-side metric — fve, mse, cosine, ce, plus `closed_greedy/*`)
 - `final/*` (same metric set, at end of training)
 
 Hard-disabled:
-- W&B's auto-tracked system stats (`_disable_stats=True` in `wandb.init`). They sample every 15s and crowd out the training metrics, especially early in a run before the first eval.
+- W&B's auto-tracked system stats (`_disable_stats=True` in `wandb.init`). They sample every 15s and crowd out the training metrics, especially early in a run before the first eval. The one signal in that stream — GPU memory — is logged explicitly from our code instead (see above), so disabling the auto-stats loses only noise (temperature, power, network bytes, CPU%) and keeps what matters.
 - `lr` / `elapsed_s` / `qw_mean` / `p_av` / `ar_mix_used` / `action_consistency_n_rows` / `action_consistency_delta_norm` / `action_consistency_cache_hits` / `action_consistency_cache_misses`. These stay in `metrics.jsonl` for forensic debugging but never go to W&B.
 
 Pin the headline metrics via `wandb.define_metric(..., summary=...)` so the run-page summary shows the right reduction (`max` for cosine/fve, `min` for mse/ce, `last` for losses). Otherwise W&B picks the alphabetically-first scalar and the summary becomes meaningless.
