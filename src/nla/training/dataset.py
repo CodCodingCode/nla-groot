@@ -293,6 +293,7 @@ class LabeledPositionDataset(Dataset):
         exclude_position_types: tuple[str, ...] | None = None,
         include_position_types: tuple[str, ...] | None = None,
         ar_target_spatial: bool = False,
+        combine_image_patch_and_last_text: bool = False,
     ):
         # ``image_patch_pooling`` controls how the dataset materializes the
         # activation for rows whose ``position_type == "image_patch"``. The
@@ -316,6 +317,15 @@ class LabeledPositionDataset(Dataset):
         # a single [H] vector; the collator tiles them to [K, H] so all rows
         # share a shape.
         self.ar_target_spatial = bool(ar_target_spatial)
+        # v9 combined-mode: pack [K image-patches + 1 last_text] into one
+        # activation tensor per row, fed to AV as the K+1 slot inputs. The
+        # caller-supplied position_type for the label still drives which
+        # description is used as the CE target; the AV INPUT however is the
+        # same combined shape for every row, eliminating the v8 train/eval
+        # stratification asymmetry.
+        self.combine_image_patch_and_last_text = bool(
+            combine_image_patch_and_last_text
+        )
         if self.image_patch_pooling not in (
             "pinned", "mean_pool_image", "strided_image",
             "strided_image_multi", "center_image",
@@ -649,7 +659,66 @@ class LabeledPositionDataset(Dataset):
                 f"example {entry.source_example_id}"
             )
         vec_ar: torch.Tensor | None = None
+        # Default: keep the label's position_type unchanged. Combined mode
+        # overrides this to "combined" so AV routes to the multi-slot +
+        # last_text prompt regardless of which row this label came from.
+        emit_position_type: str = entry.position_type
         if (
+            self.combine_image_patch_and_last_text
+            and self.image_patch_pooling == "strided_image_multi"
+        ):
+            # v9 combined: pack K image-patches + 1 last_text into [K+1, H].
+            try:
+                from nla.extraction.position_strategies import apply as _apply_strategy
+                from nla.extraction.sampler import _last_text_index as _last_text_idx
+            except ImportError as e:
+                raise ImportError(
+                    "combine_image_patch_and_last_text requires "
+                    "nla.extraction.position_strategies + nla.extraction.sampler"
+                ) from e
+            image_mask = item.get("image_mask")
+            attention_mask = item.get("attention_mask")
+            if image_mask is None or attention_mask is None:
+                raise RuntimeError(
+                    "combine_image_patch_and_last_text requires the activation "
+                    "shard to carry image_mask + attention_mask; "
+                    f"shard for {entry.source_example_id} is missing them."
+                )
+            patches = _apply_strategy(
+                "strided_image_multi",
+                features,
+                image_mask,
+                attention_mask,
+                k=self.image_patch_pooling_strided_k,
+            ).contiguous().to(torch.float32)  # [K, H]
+            lt_idx = _last_text_idx(
+                torch.as_tensor(attention_mask), torch.as_tensor(image_mask),
+            )
+            if lt_idx is None:
+                # Defensive fallback: use the row's labeled position as the
+                # last_text vector if the mask logic can't find one (shouldn't
+                # happen for the v4_combined shards but keeps us safe).
+                lt_vec = features[pos].contiguous().to(torch.float32)
+            else:
+                lt_vec = features[int(lt_idx)].contiguous().to(torch.float32)
+            # Stack: [K image-patches; last_text] = [K+1, H]
+            vec = torch.cat(
+                [patches, lt_vec.unsqueeze(0)], dim=0,
+            ).contiguous()
+            if self.ar_target_spatial:
+                # AR head emits per-position predictions. We keep AR's target
+                # at K image-patches (the steerable channel); the last_text
+                # vector is INPUT context for AV but not an AR target.
+                vec_ar = patches.contiguous()
+            else:
+                vec_ar = patches.mean(dim=0).contiguous()
+            # Override position_type so AV's _row_prompt_spec routes to the
+            # combined template. The label's original ptype is preserved
+            # only insofar as it determines which description string is
+            # used as the target -- here we set the AV-facing type to
+            # "combined" so the right slot count + template are rendered.
+            emit_position_type = "combined"
+        elif (
             self.image_patch_pooling != "pinned"
             and entry.position_type == "image_patch"
         ):
@@ -712,7 +781,7 @@ class LabeledPositionDataset(Dataset):
         step_index = None if rec.step_index is None else int(rec.step_index)
         return LabeledPositionSample(
             activation=vec,
-            position_type=entry.position_type,
+            position_type=emit_position_type,
             position_index=pos,
             seq_len=int(rec.seq_len),
             description=entry.description,

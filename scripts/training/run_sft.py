@@ -283,6 +283,18 @@ def _build_parser() -> argparse.ArgumentParser:
              "fallback rows always use one slot.",
     )
     p.add_argument(
+        "--combine-positions",
+        action="store_true",
+        help="v9-combined: every row packs [K image-patch slots + 1 last_text "
+             "slot] into one AV input, instead of having half the batch be "
+             "image_patch-only and half last_text-only. AV sees both channels "
+             "of activation context simultaneously and produces the same "
+             "caption format; AR consumes only text and emits the same [K, H] "
+             "spatial vectors. Requires --image-patch-pooling strided_image_multi "
+             "and --av-num-image-slots K (typically 128). Registers a new "
+             "<|act_slot_last_text|> token in AV's vocab.",
+    )
+    p.add_argument(
         "--av-intent-conditioned",
         action="store_true",
         help="v9 lever: train AV with target_intent (= the LIBERO task "
@@ -573,6 +585,7 @@ def main(argv: list[str] | None = None) -> int:
         save_every=args.save_every,
         log_every=args.log_every,
         av_intent_conditioned=bool(args.av_intent_conditioned),
+        combine_image_patch_and_last_text=bool(args.combine_positions),
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
         held_out_fraction=args.held_out_fraction,

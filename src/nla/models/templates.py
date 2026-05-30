@@ -38,7 +38,7 @@ from __future__ import annotations
 from typing import Literal
 
 
-PositionType = Literal["last_text", "image_patch", "anchor", "fallback"]
+PositionType = Literal["last_text", "image_patch", "anchor", "fallback", "combined"]
 
 
 # Single-slot placeholder. ``AV_SLOT_PLACEHOLDER`` is the canonical name kept
@@ -50,6 +50,12 @@ AV_SLOT_PLACEHOLDER = "<<ACTIVATION_SLOT>>"
 # reserved special-token id (``<|act_slot_0|>``, ...) so the injector can map
 # slot k of K to its own (B, k, H) activation vector.
 AV_MULTI_SLOT_PLACEHOLDER_FMT = "<<ACT_SLOT_{i}>>"
+
+# Combined-mode placeholder for the single last_text activation that's packed
+# alongside the K image patches. The injector overwrites this token's embedding
+# with the row's last_text activation (the (K+1)-th vector after the K image
+# patches). Renders to a fresh special-token id at AV __init__ time.
+AV_LAST_TEXT_PLACEHOLDER = "<<ACT_SLOT_LAST_TEXT>>"
 
 
 # Legacy V3/V4 single-slot template (preserved verbatim so old checkpoints and
@@ -216,6 +222,73 @@ def _build_multi_slot_av_prompt(
     )
 
 
+def _build_combined_av_prompt(
+    *,
+    step_index: int | None,
+    instruction: str | None,
+    num_image_slots: int,
+    target_intent: str | None = None,
+) -> str:
+    """Render the V9-combined AV prompt: K image_patch slots + 1 last_text slot.
+
+    Layout:
+      Position type: combined.
+      Timestep: ...
+      Task instruction: "..."
+      Image patch activations:
+        patch 0: <<ACT_SLOT_0>>
+        ...
+        patch K-1: <<ACT_SLOT_{K-1}>>
+      Last-text activation: <<ACT_SLOT_LAST_TEXT>>
+      Target task: ...                  (only when target_intent provided)
+      Write a 5-6 bullet description ...
+
+    The model sees BOTH channels of context simultaneously on every row, so
+    the codec can learn from the spatial K=128 activations *and* the
+    text-grounded last_text activation at once. Caption target stays the
+    same per-row description -- AV learns to describe the scene given the
+    full activation grid + the language-side hidden state.
+    """
+    if num_image_slots < 1:
+        raise ValueError(f"num_image_slots must be >= 1, got {num_image_slots}")
+    slot_lines = "\n".join(
+        f"  patch {i}: {AV_MULTI_SLOT_PLACEHOLDER_FMT.format(i=i)}"
+        for i in range(num_image_slots)
+    )
+    intent_clause = (
+        f"Target task: {str(target_intent).strip()}\n" if target_intent else ""
+    )
+    closing = (
+        "Write a 5-6 bullet description (one per line, '- <category>: <content>.'). "
+        "Use these categories in order: scene, target, distractor, gripper, spatial, "
+        "task. The last bullet ('- task:') must be the imperative for the target "
+        "task above, phrased exactly as the model's instruction would say it. "
+        "Write the bullets so that, if an activation reconstructor mapped this "
+        "text back into backbone space, the resulting vector would make the policy "
+        "execute the target task in this scene.\n"
+        if target_intent else
+        "Describe, in 4-5 bullet points (one per line, '- <category>: <content>.'), "
+        "what features the model is internally tracking across these patches and "
+        "language state to predict its next action. The last bullet should describe "
+        "what this combined activation collectively encodes.\n"
+    )
+    return (
+        "You are interpretability tooling for the GR00T N1.7 vision-language-action "
+        "robot model. You are shown the model's internal backbone activations across "
+        "all image patches plus the last-text token's hidden state, "
+        + ("plus a target task you want the policy to execute next.\n" if target_intent else "for this scene.\n")
+        + "Position type: combined.\n"
+        f"Timestep: {_format_step_index(step_index)}.\n"
+        f"Task instruction: \"{_format_instruction(instruction)}\"\n"
+        "Image patch activations:\n"
+        f"{slot_lines}\n"
+        f"Last-text activation: {AV_LAST_TEXT_PLACEHOLDER}\n"
+        f"{intent_clause}"
+        f"{closing}"
+        "Bullets:"
+    )
+
+
 def render_av_prompt(
     position_type: PositionType,
     *,
@@ -250,6 +323,15 @@ def render_av_prompt(
         (which is V5-shaped regardless of version, since it never shipped in
         V3/V4).
     """
+    if position_type == "combined":
+        # V9-combined: K image_patch slots + 1 last_text slot. num_slots is
+        # the K (number of image-patch slots); the last_text slot is fixed.
+        return _build_combined_av_prompt(
+            step_index=step_index,
+            instruction=instruction,
+            num_image_slots=num_slots,
+            target_intent=target_intent,
+        )
     if target_intent is not None and num_slots == 1:
         # Single-slot intent-conditioned path (legacy CF-eval default; kept
         # so existing callers stay byte-identical when num_slots=1).

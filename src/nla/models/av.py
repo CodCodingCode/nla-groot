@@ -125,6 +125,15 @@ class AVConfig:
     # ``<|act_slot_0|>`` ... ``<|act_slot_7|>`` -- one fresh special token per
     # patch position. Mirrors ``new_slot_token_str`` for the K-slot path.
     multi_slot_token_str_fmt: str = "<|act_slot_{i}|>"
+    # v9 combined-mode: train AV with K image-patch slots + 1 last_text slot
+    # packed into a single prompt per row (instead of stratifying rows into
+    # image_patch-only and last_text-only). When True, every row presents
+    # both channels of activation context simultaneously. ``last_text_slot_
+    # token_str`` is the token reserved for the final activation; its id is
+    # resolved at __init__ alongside the multi-slot ids.
+    combine_image_patch_and_last_text: bool = False
+    last_text_slot_token_str: str = "<|act_slot_last_text|>"
+    last_text_slot_token_id: int = -1
     # Resolved at __init__: list of ``len == av_num_image_slots`` token ids
     # for the multi-slot path. Empty when ``av_num_image_slots <= 1``.
     multi_slot_token_ids: tuple[int, ...] = ()
@@ -301,10 +310,27 @@ class ActivationVerbalizer(nn.Module):
                 cfg.multi_slot_token_str_fmt.format(i=i)
                 for i in range(int(cfg.av_num_image_slots))
             ]
-        if multi_strs:
-            multi_ids_list = ensure_slot_tokens(self.tokenizer, self.base, multi_strs)
+        # v9 combined mode: register one extra slot token for the last_text
+        # activation. Batched alongside the multi-slot tokens so AV's
+        # ensure_slot_tokens call still pays the single fast-resize cost.
+        last_text_slot_token = (
+            cfg.last_text_slot_token_str
+            if cfg.combine_image_patch_and_last_text
+            else None
+        )
+        all_strs = list(multi_strs)
+        if last_text_slot_token is not None:
+            all_strs.append(last_text_slot_token)
+        if all_strs:
+            all_ids_list = ensure_slot_tokens(self.tokenizer, self.base, all_strs)
         else:
-            multi_ids_list = []
+            all_ids_list = []
+        if last_text_slot_token is not None:
+            multi_ids_list = all_ids_list[:-1]
+            self.cfg.last_text_slot_token_id = int(all_ids_list[-1])
+        else:
+            multi_ids_list = all_ids_list
+            self.cfg.last_text_slot_token_id = -1
         self.cfg.multi_slot_token_strs = tuple(multi_strs)
         self.cfg.multi_slot_token_ids = tuple(int(t) for t in multi_ids_list)
 
@@ -359,6 +385,7 @@ class ActivationVerbalizer(nn.Module):
         """
         cfg = self.cfg
         num_slots = 1
+        is_combined = position_type == "combined"
         if (
             cfg.av_prompt_version == "context_v5"
             and position_type == "image_patch"
@@ -369,6 +396,11 @@ class ActivationVerbalizer(nn.Module):
             # target_intent and render the intent-conditioned variant when
             # provided, otherwise the descriptive variant. This is what
             # closes the train/eval prompt-shape gap (v9 intent-aware SFT).
+            num_slots = int(cfg.av_num_image_slots)
+        if is_combined:
+            # v9 combined: K image-patch slots + 1 last_text slot. num_slots
+            # here is the K (image-patch count); the +1 for last_text is
+            # injected via the AV_LAST_TEXT_PLACEHOLDER replacement below.
             num_slots = int(cfg.av_num_image_slots)
 
         step_arg = step_index if cfg.av_include_step_index else None
@@ -383,7 +415,7 @@ class ActivationVerbalizer(nn.Module):
             prompt_version=cfg.av_prompt_version,
         )
 
-        if num_slots == 1:
+        if num_slots == 1 and not is_combined:
             prompt = prompt.replace(AV_SLOT_PLACEHOLDER, cfg.slot_token_str)
         else:
             for i in range(num_slots):
@@ -391,15 +423,29 @@ class ActivationVerbalizer(nn.Module):
                     AV_MULTI_SLOT_PLACEHOLDER_FMT.format(i=i),
                     cfg.multi_slot_token_strs[i],
                 )
+        if is_combined:
+            from nla.models.templates import AV_LAST_TEXT_PLACEHOLDER
+            prompt = prompt.replace(
+                AV_LAST_TEXT_PLACEHOLDER, cfg.last_text_slot_token_str,
+            )
         return prompt, num_slots
 
-    def _row_slot_positions(self, prompt_ids: list[int], num_slots: int) -> list[int]:
-        """Locate the ``num_slots`` slot token ids inside ``prompt_ids``.
+    def _row_slot_positions(
+        self,
+        prompt_ids: list[int],
+        num_slots: int,
+        *,
+        include_last_text: bool = False,
+    ) -> list[int]:
+        """Locate the slot token ids inside ``prompt_ids``.
 
-        Returns a list of length ``num_slots``; slot 0 is the single-slot id
-        when ``num_slots == 1`` and the multi-slot ids in order otherwise.
+        Returns a list of length ``num_slots`` (or ``num_slots + 1`` in
+        ``include_last_text`` mode). Order: K image-patch slots followed by
+        the last_text slot at the tail when combined mode is on. The k-th
+        position consumes the k-th activation from the row's ``(K+1, H)``
+        tensor.
         """
-        if num_slots == 1:
+        if num_slots == 1 and not include_last_text:
             try:
                 return [prompt_ids.index(self.cfg.slot_token_id)]
             except ValueError as e:
@@ -417,6 +463,20 @@ class ActivationVerbalizer(nn.Module):
                     f"AV multi-slot token id {tid} (slot {i}) not found in "
                     "tokenized prompt; check multi_slot_token_str_fmt matches "
                     "the rendered template."
+                ) from e
+        if include_last_text:
+            tid = self.cfg.last_text_slot_token_id
+            if tid < 0:
+                raise RuntimeError(
+                    "include_last_text=True but last_text_slot_token_id is unset. "
+                    "Did you build AV with combine_image_patch_and_last_text=True?"
+                )
+            try:
+                positions.append(prompt_ids.index(tid))
+            except ValueError as e:
+                raise ValueError(
+                    f"AV last_text slot token id {tid} not found in tokenized "
+                    "prompt; check last_text_slot_token_str matches the template."
                 ) from e
         return positions
 
@@ -484,7 +544,10 @@ class ActivationVerbalizer(nn.Module):
                 instruction=instr,
             )
             prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-            slot_positions = self._row_slot_positions(prompt_ids, num_slots)
+            slot_positions = self._row_slot_positions(
+                prompt_ids, num_slots,
+                include_last_text=(pos_type == "combined"),
+            )
             row_labels = [-100] * len(prompt_ids)
 
             if target_texts is not None:
@@ -727,7 +790,10 @@ class ActivationVerbalizer(nn.Module):
                 instruction=instr,
             )
             prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-            slot_positions = self._row_slot_positions(prompt_ids, num_slots)
+            slot_positions = self._row_slot_positions(
+                prompt_ids, num_slots,
+                include_last_text=(pos_type == "combined"),
+            )
             gen_len = int(gen_attention_mask[b].sum().item())
             gen_real = gen_token_ids[b, :gen_len].tolist() if gen_len > 0 else []
             row = prompt_ids + gen_real

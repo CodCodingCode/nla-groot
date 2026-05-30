@@ -101,6 +101,16 @@ class SFTConfig:
     # AV input).
     av_intent_conditioned: bool = False
 
+    # v9-combined: pack [K image-patch slots + 1 last_text slot] into ONE
+    # AV input per row, instead of stratifying into image_patch-only and
+    # last_text-only rows. AV sees both channels of activation context
+    # simultaneously and produces the same caption format. AR still
+    # consumes only text and emits the same [K, H] spatial vectors. When
+    # True: forces image_patch_pooling="strided_image_multi", batch
+    # stratification is meaningless (every row is "combined"), and AV's
+    # ensure_slot_tokens registers a new <|act_slot_last_text|> token.
+    combine_image_patch_and_last_text: bool = False
+
     # Optional Weights & Biases logging. When ``wandb_project`` is set,
     # the SFT loop calls wandb.init() at startup and mirrors every metric
     # that already goes to metrics.jsonl plus the per-log_every train
@@ -497,6 +507,7 @@ def _make_dataloaders(cfg: SFTConfig):
         exclude_position_types=cfg.exclude_position_types,
         include_position_types=cfg.include_position_types,
         ar_target_spatial=(cfg.ar_cfg.head_type == "spatial"),
+        combine_image_patch_and_last_text=cfg.combine_image_patch_and_last_text,
     )
     val_ds = LabeledPositionDataset(
         cfg.activations_root, cfg.labels_jsonl,
@@ -513,6 +524,7 @@ def _make_dataloaders(cfg: SFTConfig):
         exclude_position_types=cfg.exclude_position_types,
         include_position_types=cfg.include_position_types,
         ar_target_spatial=(cfg.ar_cfg.head_type == "spatial"),
+        combine_image_patch_and_last_text=cfg.combine_image_patch_and_last_text,
     )
     logger.info("Train labels: %d  Val labels: %d", len(train_ds), len(val_ds))
 
@@ -590,7 +602,14 @@ def _make_dataloaders(cfg: SFTConfig):
 
 
 def _build_models(cfg: SFTConfig):
-    logger.info("Building AV (%s)", cfg.av_cfg.base_model)
+    # Propagate the SFT-level combine flag into AVConfig so AV registers the
+    # extra <|act_slot_last_text|> token at __init__ time.
+    if cfg.combine_image_patch_and_last_text and not cfg.av_cfg.combine_image_patch_and_last_text:
+        cfg.av_cfg.combine_image_patch_and_last_text = True
+    logger.info(
+        "Building AV (%s)  combined_input=%s",
+        cfg.av_cfg.base_model, cfg.av_cfg.combine_image_patch_and_last_text,
+    )
     av = ActivationVerbalizer(cfg.av_cfg).to(cfg.device)
     logger.info("Building AR (%s, %d layers)", cfg.ar_cfg.base_model, cfg.ar_cfg.truncate_to_n_layers)
     # Share tokenizer with AV so we don't add the slot token to a second one.
