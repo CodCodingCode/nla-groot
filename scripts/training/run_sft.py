@@ -282,6 +282,19 @@ def _build_parser() -> argparse.ArgumentParser:
              "Only consulted on image_patch rows; last_text / anchor / "
              "fallback rows always use one slot.",
     )
+    p.add_argument(
+        "--av-intent-conditioned",
+        action="store_true",
+        help="v9 lever: train AV with target_intent (= the LIBERO task "
+             "instruction for each row) always provided in the prompt. "
+             "Matches the prompt shape that CF-eval uses at inference, "
+             "eliminating the v8 K=128-vs-K=1 prompt OOD penalty (~0.02 "
+             "cosine in the side eval, but the full effect on steer_lift "
+             "is what we're measuring with v9). Multi-slot + intent now "
+             "renders via _build_multi_slot_av_prompt's intent-conditioned "
+             "variant; behavior is byte-identical for K=1 or "
+             "--av-num-image-slots=1 callers.",
+    )
     p.add_argument("--min-bullets", type=int, default=None,
                    help="Drop labels whose description has fewer than this many '-' "
                         "bullet lines. Use to filter degenerate captions.")
@@ -547,6 +560,7 @@ def main(argv: list[str] | None = None) -> int:
         eval_every=args.eval_every,
         save_every=args.save_every,
         log_every=args.log_every,
+        av_intent_conditioned=bool(args.av_intent_conditioned),
         held_out_fraction=args.held_out_fraction,
         max_train_items=args.max_train_items,
         max_val_items=args.max_val_items,

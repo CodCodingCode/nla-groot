@@ -361,10 +361,14 @@ class ActivationVerbalizer(nn.Module):
         num_slots = 1
         if (
             cfg.av_prompt_version == "context_v5"
-            and target_intent is None
             and position_type == "image_patch"
             and int(cfg.av_num_image_slots) > 1
         ):
+            # K-slot path for image_patch rows. Intent is optional here --
+            # render_av_prompt + _build_multi_slot_av_prompt accept
+            # target_intent and render the intent-conditioned variant when
+            # provided, otherwise the descriptive variant. This is what
+            # closes the train/eval prompt-shape gap (v9 intent-aware SFT).
             num_slots = int(cfg.av_num_image_slots)
 
         step_arg = step_index if cfg.av_include_step_index else None

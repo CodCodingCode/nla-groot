@@ -158,12 +158,21 @@ def _build_multi_slot_av_prompt(
     step_index: int | None,
     instruction: str | None,
     num_slots: int,
+    target_intent: str | None = None,
 ) -> str:
     """Render the multi-slot AV prompt for ``image_patch`` rows.
 
     Lays out ``num_slots`` lines of ``  patch i: <<ACT_SLOT_i>>`` after the
     context block. The AV injector finds each slot id, overwrites it with the
     matching projected activation, and runs the LM.
+
+    When ``target_intent`` is provided, the prompt is *intent-conditioned*:
+    a ``Target task:`` line is appended after the patches and the closing
+    instruction asks for a caption that would make the policy execute the
+    target task in this scene. This is the multi-slot equivalent of
+    AV_PROMPT_INTENT_CONDITIONED_TEMPLATE so SFT training and CF-eval can
+    use the same prompt shape (eliminates the K=1 vs K=128 OOD penalty
+    that bit v8).
     """
     if num_slots < 1:
         raise ValueError(f"num_slots must be >= 1, got {num_slots}")
@@ -171,16 +180,38 @@ def _build_multi_slot_av_prompt(
         f"  patch {i}: {AV_MULTI_SLOT_PLACEHOLDER_FMT.format(i=i)}"
         for i in range(num_slots)
     )
+    if target_intent is None:
+        # Descriptive multi-slot prompt (legacy, byte-identical).
+        return (
+            f"Position type: {position_type}.\n"
+            f"Timestep: {_format_step_index(step_index)}.\n"
+            f"Task instruction: \"{_format_instruction(instruction)}\"\n"
+            "Activation patches:\n"
+            f"{slot_lines}\n"
+            "Describe, in 4-5 bullet points (one per line, '- <category>: <content>.'), "
+            "what features the model is internally tracking across these patches to "
+            "predict its next action. The last bullet should describe what these "
+            "patches collectively encode.\n"
+            "Bullets:"
+        )
+    # Intent-conditioned multi-slot variant.
     return (
+        "You are interpretability tooling for the GR00T N1.7 vision-language-action "
+        "robot model. You are shown the model's internal backbone activations across "
+        "all image patches, plus a target task you want the policy to execute next.\n"
         f"Position type: {position_type}.\n"
         f"Timestep: {_format_step_index(step_index)}.\n"
         f"Task instruction: \"{_format_instruction(instruction)}\"\n"
         "Activation patches:\n"
         f"{slot_lines}\n"
-        "Describe, in 4-5 bullet points (one per line, '- <category>: <content>.'), "
-        "what features the model is internally tracking across these patches to "
-        "predict its next action. The last bullet should describe what these "
-        "patches collectively encode.\n"
+        f"Target task: {str(target_intent).strip()}\n"
+        "Write a 5-6 bullet description (one per line, '- <category>: <content>.'). "
+        "Use these categories in order: scene, target, distractor, gripper, spatial, "
+        "task. The last bullet ('- task:') must be the imperative for the target "
+        "task above, phrased exactly as the model's instruction would say it. "
+        "Write the bullets so that, if an activation reconstructor mapped this "
+        "text back into backbone space, the resulting vector would make the policy "
+        "execute the target task in this scene.\n"
         "Bullets:"
     )
 
@@ -219,18 +250,18 @@ def render_av_prompt(
         (which is V5-shaped regardless of version, since it never shipped in
         V3/V4).
     """
-    if target_intent is not None:
-        if num_slots != 1:
-            raise ValueError(
-                "Intent-conditioned AV prompt only supports num_slots=1; "
-                f"got num_slots={num_slots}."
-            )
+    if target_intent is not None and num_slots == 1:
+        # Single-slot intent-conditioned path (legacy CF-eval default; kept
+        # so existing callers stay byte-identical when num_slots=1).
         return AV_PROMPT_INTENT_CONDITIONED_TEMPLATE.format(
             position_type=position_type,
             step_index=_format_step_index(step_index),
             instruction=_format_instruction(instruction),
             target_intent=str(target_intent).strip(),
         )
+    # Multi-slot + intent path falls through to _build_multi_slot_av_prompt
+    # below, which now accepts target_intent and renders the intent-conditioned
+    # variant.
 
     if prompt_version == "legacy":
         if num_slots != 1:
@@ -252,6 +283,7 @@ def render_av_prompt(
             step_index=step_index,
             instruction=instruction,
             num_slots=num_slots,
+            target_intent=target_intent,
         )
 
     return AV_PROMPT_TEMPLATE.format(

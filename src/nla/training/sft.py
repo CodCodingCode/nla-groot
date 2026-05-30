@@ -90,6 +90,17 @@ class SFTConfig:
     save_every: int = 200
     log_every: int = 5
 
+    # v9 lever: train AV with target_intent always provided, matching the
+    # CF-eval prompt shape. When True, the SFT loop passes
+    # ``target_intent_texts=batch['instruction']`` to every av.forward_sft
+    # and av.generate call (training, closed-loop eval, scheduled-sampling
+    # AR-input generation). Forces the K=128 multi-slot prompt to render
+    # with the intent-conditioned variant of _build_multi_slot_av_prompt,
+    # so training and CF eval share the same prompt structure. Default
+    # False = legacy v3-v8 behavior (descriptive multi-slot, no intent in
+    # AV input).
+    av_intent_conditioned: bool = False
+
     gradient_checkpointing: bool = True
 
     # If True, draw training rows with a ``WeightedRandomSampler`` so per-batch
@@ -528,6 +539,34 @@ def _av_context_from_batch(batch: dict) -> tuple[list[int | None], list[str | No
     return [None] * B, [None] * B
 
 
+def _av_intents_from_batch(
+    batch: dict,
+    enabled: bool,
+) -> list[str | None] | None:
+    """Per-row target_intent for the intent-conditioned multi-slot AV prompt.
+
+    Returns ``None`` (no intent override; legacy descriptive prompt) when
+    ``enabled`` is False or the batch lacks an ``instruction`` field. When
+    enabled and the field is present, returns a per-row list of intent
+    strings (one per batch row), which the AV prompt builder threads into
+    the K=128 multi-slot intent-conditioned template.
+
+    Reuses ``batch['instruction']`` -- the LIBERO task instruction the
+    activation came from -- as the intent. This is the same string the
+    CF-eval passes via ``target_intent_texts`` at inference, so SFT and
+    eval see the same prompt structure (closing the v8 train/eval
+    prompt-shape OOD gap).
+    """
+    if not enabled:
+        return None
+    if "instruction" not in batch:
+        return None
+    return [
+        None if instr is None else str(instr)
+        for instr in batch["instruction"]
+    ]
+
+
 def _closed_loop_eval(
     av,
     ar,
@@ -536,6 +575,7 @@ def _closed_loop_eval(
     *,
     temperature: float,
     max_batches: int | None,
+    intent_enabled: bool = False,
 ) -> dict[str, float]:
     """Run h -> AV.generate -> AR -> ĥ and return stratified FVE/MSE/cosine.
 
@@ -560,6 +600,7 @@ def _closed_loop_eval(
         acts_av = batch["activations_av"].to(device)
         acts_ar = batch["activations_ar"].to(device)
         step_indices, instructions = _av_context_from_batch(batch)
+        intents = _av_intents_from_batch(batch, intent_enabled)
         gen_out = av.generate(
             activations=acts_av,
             position_types=batch["position_type"],
@@ -567,6 +608,7 @@ def _closed_loop_eval(
             temperature=temp_arg,
             step_indices=step_indices,
             instructions=instructions,
+            target_intent_texts=intents,
         )
         texts = gen_out["text"]
         pred_scaled = ar(
@@ -606,6 +648,7 @@ def _evaluate(
     *,
     closed_loop_temperatures: tuple[float, ...] = (),
     closed_loop_max_batches: int | None = None,
+    intent_enabled: bool = False,
 ) -> dict[str, float]:
     if val_loader is None or len(val_loader) == 0:
         return {}
@@ -622,12 +665,14 @@ def _evaluate(
         acts_av = batch["activations_av"].to(device)
         acts_ar = batch["activations_ar"].to(device)
         step_indices, instructions = _av_context_from_batch(batch)
+        intents = _av_intents_from_batch(batch, intent_enabled)
         out = av.forward_sft(
             activations=acts_av,
             position_types=batch["position_type"],
             target_texts=batch["description"],
             step_indices=step_indices,
             instructions=instructions,
+            target_intent_texts=intents,
         )
         ce_sum += float(out.loss.item()) * acts_ar.shape[0]
         ce_n += acts_ar.shape[0]
@@ -663,6 +708,7 @@ def _evaluate(
             av, ar, val_loader, device,
             temperature=float(temperature),
             max_batches=closed_loop_max_batches,
+            intent_enabled=intent_enabled,
         )
         for k, v in cl.items():
             metrics[f"closed_{tag}/{k}"] = v
@@ -856,10 +902,12 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
             descs = batch["description"]
             ptypes = batch["position_type"]
             step_indices, instructions = _av_context_from_batch(batch)
+            intents = _av_intents_from_batch(batch, cfg.av_intent_conditioned)
 
             av_out = av.forward_sft(
                 activations=acts_av, position_types=ptypes, target_texts=descs,
                 step_indices=step_indices, instructions=instructions,
+                target_intent_texts=intents,
             )
             ce = av_out.loss
 
@@ -880,6 +928,7 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                         temperature=0.7 if cfg.ar_av_mix_do_sample else 1.0,
                         step_indices=step_indices,
                         instructions=instructions,
+                        target_intent_texts=intents,
                     )
                 av.train()
                 ar_input_text = [t.strip() or "(empty)" for t in gen_out["text"]]
@@ -1012,6 +1061,7 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                         cfg.closed_loop_temperatures if cfg.eval_closed_loop else ()
                     ),
                     closed_loop_max_batches=cfg.closed_loop_max_batches,
+                    intent_enabled=cfg.av_intent_conditioned,
                 )
                 if metrics:
                     row = {"step": step, "phase": "val", **metrics, "elapsed_s": time.time() - start}
@@ -1049,6 +1099,7 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
             cfg.closed_loop_temperatures if cfg.eval_closed_loop else ()
         ),
         closed_loop_max_batches=cfg.closed_loop_max_batches,
+        intent_enabled=cfg.av_intent_conditioned,
     )
     if metrics:
         row = {"step": step, "phase": "final", **metrics, "elapsed_s": time.time() - start}
