@@ -13,6 +13,26 @@ Rules of thumb:
 - Generated artifacts under `data/` are gitignored — never force-add them.
 - End commit messages with the `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` trailer.
 
+## W&B logs only meaningful training metrics — never system fluff
+
+**When you add or modify W&B logging, only log metrics that answer "is training getting better?" Don't log lr / step-rate / GPU temperature / network bytes / quality-weight scalars / cache hit counts / batch sizes — that's noise that buries the actually useful curves.**
+
+The bar for each W&B metric: would the user open this chart at 3am to decide "should I let this run finish?" If no, it doesn't belong in W&B.
+
+Required for SFT runs:
+- `train/loss`, `train/ce`, `train/ar_mse`, `train/ar_nce`
+- `train/action_consistency_loss` (when action-consistency is enabled)
+- `val/*` (every val-side metric — fve, mse, cosine, ce, plus `closed_greedy/*`)
+- `final/*` (same metric set, at end of training)
+
+Hard-disabled:
+- W&B's auto-tracked system stats (`_disable_stats=True` in `wandb.init`). They sample every 15s and crowd out the training metrics, especially early in a run before the first eval.
+- `lr` / `elapsed_s` / `qw_mean` / `p_av` / `ar_mix_used` / `action_consistency_n_rows` / `action_consistency_delta_norm` / `action_consistency_cache_hits` / `action_consistency_cache_misses`. These stay in `metrics.jsonl` for forensic debugging but never go to W&B.
+
+Pin the headline metrics via `wandb.define_metric(..., summary=...)` so the run-page summary shows the right reduction (`max` for cosine/fve, `min` for mse/ce, `last` for losses). Otherwise W&B picks the alphabetically-first scalar and the summary becomes meaningless.
+
+The reference implementation lives in `src/nla/training/sft.py` (`_maybe_init_wandb` + `_wandb_log` + the `_WANDB_TRAIN_KEYS` whitelist inside the train loop). Match that style for new wandb sites in other training scripts (GRPO, surrogate PPO, etc.).
+
 ## Long-running jobs MUST be detached
 
 **Any command expected to run > 30 minutes must be detached from the Claude session and from the user's shell.** Claude's background-task wrapper has a finite lifetime (observed kills after ~3-4 hours of wall clock); the user's SSH session can drop. A run tied to either is gone the moment the parent dies, and you discover this after burning hours of compute. See `docs/train.md` "Detachment knobs" for the failure mode and the exact mechanics.

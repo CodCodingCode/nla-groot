@@ -325,6 +325,16 @@ def _maybe_init_wandb(cfg: SFTConfig, out_dir: Path):
     python-dotenv) so the user doesn't have to ``export`` it manually. Run
     name defaults to the output_dir basename. Any error in init is logged
     but non-fatal -- training continues without W&B.
+
+    Hardens against W&B's default "fill the dashboard with system stats"
+    behavior:
+      - ``_disable_stats=True`` turns off auto-tracking of GPU power /
+        temperature / network bytes / CPU utilization. Those distract from
+        the metrics that actually tell us if training is converging.
+      - ``define_metric`` pins the loss / reconstruction / steer-relevant
+        metrics so they appear in the run summary (top of the run page)
+        with the right reduction (last for losses, min for MSE, max for
+        cosine). Otherwise W&B picks the alphabetically-first scalar.
     """
     if not cfg.wandb_project:
         return None
@@ -349,7 +359,31 @@ def _maybe_init_wandb(cfg: SFTConfig, out_dir: Path):
             config=_serialize_config(cfg),
             dir=str(out_dir),
             resume="allow",
+            settings=wandb.Settings(_disable_stats=True),
         )
+        # Define metrics so the run summary shows what we actually care about
+        # instead of the alphabetically-first scalar (which has been "action_*"
+        # in past runs, making the headline number meaningless).
+        try:
+            # Use step as the x-axis for all metrics.
+            wandb.define_metric("train/*", step_metric="train/step")
+            wandb.define_metric("val/*", step_metric="train/step")
+            # Pin the important ones with appropriate reductions for the
+            # "Summary" panel at the top of the run page.
+            wandb.define_metric("train/loss", summary="last")
+            wandb.define_metric("train/ce", summary="last")
+            wandb.define_metric("train/ar_mse", summary="min")
+            wandb.define_metric("train/ar_nce", summary="last")
+            wandb.define_metric("train/action_consistency_loss", summary="last")
+            wandb.define_metric("val/mse", summary="min")
+            wandb.define_metric("val/cosine", summary="max")
+            wandb.define_metric("val/ce", summary="min")
+            wandb.define_metric("val/fve", summary="max")
+            wandb.define_metric("val/closed_greedy/mse", summary="min")
+            wandb.define_metric("val/closed_greedy/cosine", summary="max")
+            wandb.define_metric("val/closed_greedy/fve", summary="max")
+        except Exception as e:
+            logger.warning("[wandb] define_metric failed (non-fatal): %s", e)
         logger.info(
             "[wandb] initialized run %s (project=%s) -> %s",
             run.id, cfg.wandb_project, run.url,
@@ -1129,10 +1163,17 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                             row["action_consistency_delta_norm"],
                             step,
                         )
+                # Only log the metrics that actually answer "is the codec
+                # learning?" The rest (lr, qw_mean, p_av, ar_mix_used,
+                # ac_n_rows, ac_cache_hits/misses, elapsed_s) stays in
+                # metrics.jsonl for forensic debugging but never floods W&B.
+                _WANDB_TRAIN_KEYS = (
+                    "loss", "ce", "ar_mse", "ar_nce",
+                    "action_consistency_loss",
+                )
                 _wandb_log(
                     wandb_run,
-                    {f"train/{k}": v for k, v in row.items()
-                     if k not in ("step", "phase")},
+                    {f"train/{k}": row[k] for k in _WANDB_TRAIN_KEYS if k in row},
                     step=step,
                 )
 
