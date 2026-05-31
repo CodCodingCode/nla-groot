@@ -26,7 +26,7 @@ export default function App() {
     <div className="layout">
       <Nav sections={sections} generatedAt={data.generated_at} />
       <main>
-        <Hero scorecard={data.scorecard} />
+        <Hero data={data} />
         <Problem />
         <Pipeline />
         <Protocol />
@@ -35,8 +35,9 @@ export default function App() {
         <Repro />
         <div className="foot">
           Snapshot generated {data.generated_at}. Numbers come from{" "}
-          <code>data/sft/libero_4suite_v3</code> and{" "}
-          <code>data/eval/steerability_v1_vs_v3</code>.{" "}
+          <code>data/sft/{data.run_name}_launch.log</code>,{" "}
+          <code>data/eval/{data.run_name}_paired_captions.json</code>, and{" "}
+          <code>data/eval/{data.run_name}_cf_strided_cached.json</code>.{" "}
           <a
             href="https://github.com/CodCodingCode/nla-groot"
             target="_blank"

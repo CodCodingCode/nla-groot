@@ -1,408 +1,755 @@
 {
-  "generated_at": "2026-05-20T21:25:24+00:00",
-  "scorecard": {
-    "checkpoint": "data/sft/libero_4suite_v3",
-    "overall": "FAIL",
-    "metrics": [
-      {
-        "name": "retrieval_margin",
-        "value": 0.1244436679931169,
-        "threshold_pass": 0.05,
-        "threshold_warn": 0.02,
-        "higher_is_better": true,
-        "verdict": "PASS",
-        "required_for_overall": true
-      },
-      {
-        "name": "judge_grounding_specific_pct",
-        "value": 0.4166666666666667,
-        "threshold_pass": 0.55,
-        "threshold_warn": 0.4,
-        "higher_is_better": true,
-        "verdict": "WARN",
-        "required_for_overall": true
-      },
-      {
-        "name": "judge_anti_template_specific_pct",
-        "value": 0.08333333333333333,
-        "threshold_pass": 0.5,
-        "threshold_warn": 0.3,
-        "higher_is_better": true,
-        "verdict": "FAIL",
-        "required_for_overall": true
-      },
-      {
-        "name": "retrieval_at_1",
-        "value": 0.03932584269662921,
-        "threshold_pass": 0.25,
-        "threshold_warn": 0.15,
-        "higher_is_better": true,
-        "verdict": "FAIL",
-        "required_for_overall": false
-      },
-      {
-        "name": "retrieval_at_5",
-        "value": 0.12359550561797752,
-        "threshold_pass": 0.55,
-        "threshold_warn": 0.4,
-        "higher_is_better": true,
-        "verdict": "FAIL",
-        "required_for_overall": false
-      },
-      {
-        "name": "judge_appropriateness_pct",
-        "value": 1.0,
-        "threshold_pass": 0.8,
-        "threshold_warn": 0.6,
-        "higher_is_better": true,
-        "verdict": "PASS",
-        "required_for_overall": false
-      },
-      {
-        "name": "closed_greedy_cosine",
-        "value": 0.38771790685132146,
-        "threshold_pass": 0.55,
-        "threshold_warn": 0.4,
-        "higher_is_better": true,
-        "verdict": "FAIL",
-        "required_for_overall": false
-      },
-      {
-        "name": "sim_correct_success",
-        "value": 0.0,
-        "threshold_pass": 0.3,
-        "threshold_warn": 0.15,
-        "higher_is_better": true,
-        "verdict": "FAIL",
-        "required_for_overall": false
-      },
-      {
-        "name": "sim_correct_minus_baseline_floor",
-        "value": -1.0,
-        "threshold_pass": -0.1,
-        "threshold_warn": -0.3,
-        "higher_is_better": true,
-        "verdict": "FAIL",
-        "required_for_overall": false
-      },
-      {
-        "name": "sim_wrong_minus_baseline",
-        "value": -1.0,
-        "threshold_pass": 0.0,
-        "threshold_warn": 0.05,
-        "higher_is_better": false,
-        "verdict": "PASS",
-        "required_for_overall": false
-      },
-      {
-        "name": "sim_correct_minus_wrong",
-        "value": 0.0,
-        "threshold_pass": 0.05,
-        "threshold_warn": 0.0,
-        "higher_is_better": true,
-        "verdict": "WARN",
-        "required_for_overall": false
-      }
-    ],
-    "sources": {
-      "retrieval_json": "data/sft/libero_4suite_v3/retrieval_margin.json",
-      "judge_jsonl": "data/sft/libero_4suite_v3/llm_judge.jsonl",
-      "metrics_jsonl": "data/sft/libero_4suite_v3/metrics.jsonl",
-      "sim_ab_json": "data/sft/libero_4suite_v3/sim_ab.json",
-      "scorecard_benchmark": {
-        "steering_metrics_path": "/lambda/nfs/Natha/nla-groot/data/eval/steerability_v1_vs_v3/metrics.json",
-        "av_metrics_path": "/lambda/nfs/Natha/nla-groot/data/eval/steerability_v1_vs_v3/av_metrics.json",
-        "scorecard_backup": "/lambda/nfs/Natha/nla-groot/data/eval/steerability_v1_vs_v3/v3_scorecard.before_patch.json"
-      }
-    },
-    "config": {
-      "judge_n": 32,
-      "judge_n_template": 32,
-      "training_step": 14500,
-      "sim_present": true,
-      "sim_n_episodes_per_arm": 0,
-      "sim_per_suite": {},
-      "benchmark_note": "patched_via_steerability_eval"
-    }
+  "generated_at": "2026-05-31T03:41:18+00:00",
+  "run_name": "v9_combined_12k",
+  "codec_final": {
+    "val_cosine": 0.7954,
+    "val_mse": 7.4783,
+    "val_fve": -0.5772,
+    "val_ce": 0.5546,
+    "closed_greedy_cosine": 0.851,
+    "closed_greedy_mse": 5.609,
+    "closed_greedy_fve": -0.183,
+    "alpha_norm": 203.97713487289315,
+    "rms_error_raw_units": 2.3683327468917876,
+    "relative_norm_error_pct": 1.161077563113923,
+    "angle_degrees": 31.679397966793825,
+    "step": 0,
+    "total_steps": 12000
   },
-  "judge": [
-    {
-      "checkpoint": "libero_goal_pilot",
-      "holdout": "libero_goal_holdout",
-      "source": "gold",
-      "grounding": 0.8333333333333334,
-      "appropriateness": 0.9166666666666666,
-      "template_distinguishable": 0.8333333333333334,
-      "n_rows": 24
-    },
-    {
-      "checkpoint": "libero_goal_pilot",
-      "holdout": "libero_goal_holdout",
-      "source": "av_pred",
-      "grounding": 0.3333333333333333,
-      "appropriateness": 0.6666666666666666,
-      "template_distinguishable": 0.5,
-      "n_rows": 24
-    },
-    {
-      "checkpoint": "libero_4suite_v3",
-      "holdout": "libero_goal_holdout",
-      "source": "gold",
-      "grounding": 0.8333333333333334,
-      "appropriateness": 1.0,
-      "template_distinguishable": 0.8333333333333334,
-      "n_rows": 24
-    },
-    {
-      "checkpoint": "libero_4suite_v3",
-      "holdout": "libero_goal_holdout",
-      "source": "av_pred",
-      "grounding": 0.5833333333333334,
-      "appropriateness": 1.0,
-      "template_distinguishable": 0.5,
-      "n_rows": 24
-    },
-    {
-      "checkpoint": "libero_4suite_v3",
-      "holdout": "libero_4suite_holdout",
-      "source": "gold",
-      "grounding": 0.75,
-      "appropriateness": 1.0,
-      "template_distinguishable": 0.5,
-      "n_rows": 24
-    },
-    {
-      "checkpoint": "libero_4suite_v3",
-      "holdout": "libero_4suite_holdout",
-      "source": "av_pred",
-      "grounding": 0.4166666666666667,
-      "appropriateness": 1.0,
-      "template_distinguishable": 0.08333333333333333,
-      "n_rows": 24
-    }
-  ],
-  "sim": [
-    {
-      "condition": "baseline",
-      "success_any": 1.0,
-      "success_final": 0.3333333333333333,
-      "mean_steps": 300.0,
-      "target_disp_m": 0.1449973411699882,
-      "target_min_ee_m": 0.04097108935677687,
-      "target_winner_rate": 1.0,
-      "bowl_disp_m": 0.1449973411699882
-    },
-    {
-      "condition": "steer_bowl_plate",
-      "success_any": 0.0,
-      "success_final": 0.0,
-      "mean_steps": 300.0,
-      "target_disp_m": 0.07159293488365194,
-      "target_min_ee_m": 0.20405924335780856,
-      "target_winner_rate": 1.0,
-      "bowl_disp_m": 0.07159293488365194
-    },
-    {
-      "condition": "steer_wine_rack",
-      "success_any": 0.0,
-      "success_final": 0.0,
-      "mean_steps": 300.0,
-      "target_disp_m": 0.06559038054027254,
-      "target_min_ee_m": 0.161036276642111,
-      "target_winner_rate": 0.0,
-      "bowl_disp_m": 0.07254601744246053
-    },
-    {
-      "condition": "steer_bowl_stove",
-      "success_any": 0.0,
-      "success_final": 0.0,
-      "mean_steps": 300.0,
-      "target_disp_m": 0.07737196322277677,
-      "target_min_ee_m": 0.23787642157950747,
-      "target_winner_rate": 1.0,
-      "bowl_disp_m": 0.07737196322277677
-    },
-    {
-      "condition": "steer_bowl_plate_v3",
-      "success_any": 0.0,
-      "success_final": 0.0,
-      "mean_steps": 300.0,
-      "target_disp_m": 0.06921144839461157,
-      "target_min_ee_m": 0.10750296614986077,
-      "target_winner_rate": 0.6666666666666666,
-      "bowl_disp_m": 0.06921144839461157
-    },
-    {
-      "condition": "steer_wine_rack_v3",
-      "success_any": 0.0,
-      "success_final": 0.0,
-      "mean_steps": 300.0,
-      "target_disp_m": 0.07049602249114513,
-      "target_min_ee_m": 0.11328559113114871,
-      "target_winner_rate": 0.0,
-      "bowl_disp_m": 0.07159293488365194
-    },
-    {
-      "condition": "steer_bowl_stove_v3",
-      "success_any": 0.0,
-      "success_final": 0.0,
-      "mean_steps": 300.0,
-      "target_disp_m": 0.07159293488365194,
-      "target_min_ee_m": 0.22069744584145054,
-      "target_winner_rate": 1.0,
-      "bowl_disp_m": 0.07159293488365194
-    }
-  ],
   "training": [
     {
-      "step": 500,
-      "fve": -321.34486798292255,
-      "closed_greedy_fve": -289.8177110814777
+      "step": 600,
+      "val_cosine": 0.7812,
+      "val_mse": 69.0769,
+      "val_fve": -13.5687,
+      "closed_greedy_cosine": 0.7933,
+      "closed_greedy_mse": 62.7908,
+      "closed_greedy_fve": -12.2429,
+      "train_loss": 2.9024,
+      "train_ar_mse": 0.3121,
+      "train_ce": 0.8609
     },
     {
-      "step": 1000,
-      "fve": -188.9916579078292,
-      "closed_greedy_fve": -191.6338567505413
+      "step": 1200,
+      "val_cosine": 0.764,
+      "val_mse": 40.4109,
+      "val_fve": -7.5229,
+      "closed_greedy_cosine": 0.7694,
+      "closed_greedy_mse": 39.276,
+      "closed_greedy_fve": -7.2835,
+      "train_loss": 2.7011,
+      "train_ar_mse": 0.2883,
+      "train_ce": 0.7069
     },
     {
-      "step": 1500,
-      "fve": -171.74093420640298,
-      "closed_greedy_fve": -204.77897298222288
+      "step": 1800,
+      "val_cosine": 0.7904,
+      "val_mse": 19.1535,
+      "val_fve": -3.0396,
+      "closed_greedy_cosine": 0.8058,
+      "closed_greedy_mse": 17.3695,
+      "closed_greedy_fve": -2.6633,
+      "train_loss": 2.7572,
+      "train_ar_mse": 0.2395,
+      "train_ce": 0.7056
     },
     {
-      "step": 2000,
-      "fve": -117.07439864738782,
-      "closed_greedy_fve": -121.47289415995013
-    },
-    {
-      "step": 2500,
-      "fve": -106.03405898724448,
-      "closed_greedy_fve": -114.63150334237753
+      "step": 2400,
+      "val_cosine": 0.8123,
+      "val_mse": 12.9633,
+      "val_fve": -1.734,
+      "closed_greedy_cosine": 0.8238,
+      "closed_greedy_mse": 11.6813,
+      "closed_greedy_fve": -1.4637,
+      "train_loss": 2.7203,
+      "train_ar_mse": 0.1748,
+      "train_ce": 0.7836
     },
     {
       "step": 3000,
-      "fve": -102.20067333616457,
-      "closed_greedy_fve": -107.45629561310362
+      "val_cosine": 0.8144,
+      "val_mse": 10.2244,
+      "val_fve": -1.1564,
+      "closed_greedy_cosine": 0.8201,
+      "closed_greedy_mse": 10.0301,
+      "closed_greedy_fve": -1.1154,
+      "train_loss": 2.9025,
+      "train_ar_mse": 0.1815,
+      "train_ce": 0.8645
     },
     {
-      "step": 3500,
-      "fve": -94.63778822808128,
-      "closed_greedy_fve": -102.84330645461993
+      "step": 3600,
+      "val_cosine": 0.8159,
+      "val_mse": 10.7704,
+      "val_fve": -1.2715,
+      "closed_greedy_cosine": 0.8195,
+      "closed_greedy_mse": 10.5367,
+      "closed_greedy_fve": -1.2222,
+      "train_loss": 2.7258,
+      "train_ar_mse": 0.1801,
+      "train_ce": 0.6131
     },
     {
-      "step": 4000,
-      "fve": -95.4818050891231,
-      "closed_greedy_fve": -109.34226840511639
+      "step": 4200,
+      "val_cosine": 0.8145,
+      "val_mse": 10.2551,
+      "val_fve": -1.1629,
+      "closed_greedy_cosine": 0.8182,
+      "closed_greedy_mse": 9.9451,
+      "closed_greedy_fve": -1.0975,
+      "train_loss": 2.5962,
+      "train_ar_mse": 0.186,
+      "train_ce": 0.5869
     },
     {
-      "step": 4500,
-      "fve": -79.07478739017078,
-      "closed_greedy_fve": -79.33621937149286
+      "step": 4800,
+      "val_cosine": 0.7562,
+      "val_mse": 14.5383,
+      "val_fve": -2.0662,
+      "closed_greedy_cosine": 0.7715,
+      "closed_greedy_mse": 13.3764,
+      "closed_greedy_fve": -1.8212,
+      "train_loss": 2.6722,
+      "train_ar_mse": 0.2545,
+      "train_ce": 0.5921
     },
     {
-      "step": 5000,
-      "fve": -76.54609879623112,
-      "closed_greedy_fve": -91.7675620192363
-    },
-    {
-      "step": 5500,
-      "fve": -72.77136285061314,
-      "closed_greedy_fve": -66.45262129610354
+      "step": 5400,
+      "val_cosine": 0.8176,
+      "val_mse": 8.1166,
+      "val_fve": -0.7118,
+      "closed_greedy_cosine": 0.8333,
+      "closed_greedy_mse": 7.4152,
+      "closed_greedy_fve": -0.5639,
+      "train_loss": 2.7141,
+      "train_ar_mse": 0.1706,
+      "train_ce": 0.6838
     },
     {
       "step": 6000,
-      "fve": -70.44283695183229,
-      "closed_greedy_fve": -64.65152769277337
+      "val_cosine": 0.8156,
+      "val_mse": 8.0022,
+      "val_fve": -0.6877,
+      "closed_greedy_cosine": 0.8268,
+      "closed_greedy_mse": 7.4798,
+      "closed_greedy_fve": -0.5775,
+      "train_loss": 2.4483,
+      "train_ar_mse": 0.1669,
+      "train_ce": 0.5114
     },
     {
-      "step": 6500,
-      "fve": -66.33012962953624,
-      "closed_greedy_fve": -62.75081002574051
+      "step": 6600,
+      "val_cosine": 0.821,
+      "val_mse": 7.7032,
+      "val_fve": -0.6246,
+      "closed_greedy_cosine": 0.8462,
+      "closed_greedy_mse": 6.6836,
+      "closed_greedy_fve": -0.4096,
+      "train_loss": 2.665,
+      "train_ar_mse": 0.1657,
+      "train_ce": 0.6608
     },
     {
-      "step": 7000,
-      "fve": -61.77550866394669,
-      "closed_greedy_fve": -62.81616361535976
+      "step": 7200,
+      "val_cosine": 0.8203,
+      "val_mse": 7.709,
+      "val_fve": -0.6259,
+      "closed_greedy_cosine": 0.8355,
+      "closed_greedy_mse": 7.114,
+      "closed_greedy_fve": -0.5004,
+      "train_loss": 2.6617,
+      "train_ar_mse": 0.158,
+      "train_ce": 0.6667
     },
     {
-      "step": 7500,
-      "fve": -67.96161614130531,
-      "closed_greedy_fve": -84.50762006678964
+      "step": 7800,
+      "val_cosine": 0.8173,
+      "val_mse": 7.375,
+      "val_fve": -0.5554,
+      "closed_greedy_cosine": 0.8453,
+      "closed_greedy_mse": 6.2758,
+      "closed_greedy_fve": -0.3236,
+      "train_loss": 2.5774,
+      "train_ar_mse": 0.1879,
+      "train_ce": 0.5959
     },
     {
-      "step": 8000,
-      "fve": -55.65016068562989,
-      "closed_greedy_fve": -57.416241549547735
-    },
-    {
-      "step": 8500,
-      "fve": -46.274637332496255,
-      "closed_greedy_fve": -48.06205247238152
+      "step": 8400,
+      "val_cosine": 0.8135,
+      "val_mse": 7.4642,
+      "val_fve": -0.5742,
+      "closed_greedy_cosine": 0.8414,
+      "closed_greedy_mse": 6.4354,
+      "closed_greedy_fve": -0.3573,
+      "train_loss": 2.6243,
+      "train_ar_mse": 0.1688,
+      "train_ce": 0.6717
     },
     {
       "step": 9000,
-      "fve": -51.04201197093374,
-      "closed_greedy_fve": -43.69782412879003
+      "val_cosine": 0.8141,
+      "val_mse": 7.0296,
+      "val_fve": -0.4826,
+      "closed_greedy_cosine": 0.8472,
+      "closed_greedy_mse": 5.8254,
+      "closed_greedy_fve": -0.2286,
+      "train_loss": 2.5996,
+      "train_ar_mse": 0.1818,
+      "train_ce": 0.6026
     },
     {
-      "step": 9500,
-      "fve": -46.546056304373415,
-      "closed_greedy_fve": -50.524957494336036
+      "step": 9600,
+      "val_cosine": 0.8142,
+      "val_mse": 7.2262,
+      "val_fve": -0.524,
+      "closed_greedy_cosine": 0.8489,
+      "closed_greedy_mse": 6.0783,
+      "closed_greedy_fve": -0.282,
+      "train_loss": 2.5612,
+      "train_ar_mse": 0.1789,
+      "train_ce": 0.5948
     },
     {
-      "step": 10000,
-      "fve": -39.1600879256786,
-      "closed_greedy_fve": -33.82093906283144
+      "step": 10200,
+      "val_cosine": 0.8045,
+      "val_mse": 7.4513,
+      "val_fve": -0.5715,
+      "closed_greedy_cosine": 0.8468,
+      "closed_greedy_mse": 5.958,
+      "closed_greedy_fve": -0.2566,
+      "train_loss": 2.6141,
+      "train_ar_mse": 0.1702,
+      "train_ce": 0.5954
     },
     {
-      "step": 10500,
-      "fve": -42.53203562170643,
-      "closed_greedy_fve": -42.75057461719286
+      "step": 10800,
+      "val_cosine": 0.8007,
+      "val_mse": 7.3449,
+      "val_fve": -0.5491,
+      "closed_greedy_cosine": 0.8522,
+      "closed_greedy_mse": 5.6078,
+      "closed_greedy_fve": -0.1827,
+      "train_loss": 2.6738,
+      "train_ar_mse": 0.1726,
+      "train_ce": 0.6049
     },
     {
-      "step": 11000,
-      "fve": -39.04438424307859,
-      "closed_greedy_fve": -48.29143290474275
+      "step": 11400,
+      "val_cosine": 0.7986,
+      "val_mse": 7.4095,
+      "val_fve": -0.5627,
+      "closed_greedy_cosine": 0.8532,
+      "closed_greedy_mse": 5.5766,
+      "closed_greedy_fve": -0.1761,
+      "train_loss": 2.548,
+      "train_ar_mse": 0.1494,
+      "train_ce": 0.6047
     },
     {
-      "step": 11500,
-      "fve": -33.88552739868076,
-      "closed_greedy_fve": -34.88848261752136
-    },
-    {
-      "step": 12000,
-      "fve": -29.328447006011086,
-      "closed_greedy_fve": -27.398427341065553
-    },
-    {
-      "step": 12500,
-      "fve": -27.268705007371288,
-      "closed_greedy_fve": -29.57879072486286
-    },
-    {
-      "step": 13000,
-      "fve": -26.563940784142805,
-      "closed_greedy_fve": -26.07129979003841
-    },
-    {
-      "step": 13500,
-      "fve": -24.49967115304776,
-      "closed_greedy_fve": -25.97295681980671
-    },
-    {
-      "step": 14000,
-      "fve": -23.987342497953836,
-      "closed_greedy_fve": -26.88869010787404
-    },
-    {
-      "step": 14500,
-      "fve": -23.524013774639066,
-      "closed_greedy_fve": -25.675344134232265
-    },
-    {
-      "step": 15000,
-      "fve": -23.59343038016035,
-      "closed_greedy_fve": -25.998501813577068
+      "step": 0,
+      "val_cosine": 0.7954,
+      "val_mse": 7.4783,
+      "val_fve": -0.5772,
+      "closed_greedy_cosine": 0.851,
+      "closed_greedy_mse": 5.609,
+      "closed_greedy_fve": -0.183,
+      "train_loss": 0.6215,
+      "train_ar_mse": 0.1579,
+      "train_ce": 0.5546
     }
-  ]
+  ],
+  "caption_diag": {
+    "n_samples": 10,
+    "mean_char_overlap": 0.2170831118031566,
+    "mean_bullet_diff_count": 6.0,
+    "interpretation": "AV is strongly intent-conditional. Captions substantively differ; high chance of clear publishable steering.",
+    "paired_samples": [
+      {
+        "source_id": "goal__traj000044_step000022",
+        "matched_intent": "open the middle drawer of the cabinet",
+        "mismatched_intent": "put the wine bottle on top of the cabinet",
+        "char_overlap": 0.12314225053078556,
+        "bullet_diff": 6,
+        "caption_matched_preview": "- scene: A cabinet is visible beside the table, with the middle drawer area accessible on the right side.\n- target: the middle drawer handle of the cabinet\n- distractor: the top drawer and the other cabinet handles\n- gripper: the robot gripper positioned near the cabinet front\n- spatial: The target drawer is on the right side of the scene, between the top and bottom drawers.\n- task: open the middle drawer of the cabinet",
+        "caption_mismatched_preview": "- scene: A tabletop scene with a wooden cabinet at the right, a small metal bowl near the center, a red-rimmed plate below it, and a dark bottle standing near the cabinet; robot arms are visible above the table.\n- target: the wine bottle near the cabinet\n- distractor: the small metal bowl and the plate on the table\n- gripper: the robot gripper near the bottle\n- spatial: The bottle is to the right of the bowl and above the plate, close to the cabinet edge.\n- task: pick up the wine bottle and place it on the cabinet"
+      },
+      {
+        "source_id": "goal__traj000339_step000006",
+        "matched_intent": "put the wine bottle on top of the cabinet",
+        "mismatched_intent": "put the bowl on the plate",
+        "char_overlap": 0.28258887876025524,
+        "bullet_diff": 6,
+        "caption_matched_preview": "- scene: A tabletop scene with a wooden cabinet at the right, a small metal bowl near the center, a red-rimmed plate below it, and a dark bottle standing near the cabinet; robot arms are visible above the table.\n- target: the wine bottle near the cabinet\n- distractor: the small metal bowl and the plate on the table\n- gripper: the robot gripper near the bottle\n- spatial: The bottle is to the right of the bowl and above the plate; the cabinet is on the right side of the frame.\n- task: pick up the wine bottle and place it on the cabinet",
+        "caption_mismatched_preview": "- scene: A tabletop workspace with a robot arm above a light wooden surface. A black bowl sits near a small cookie box, and a plate is visible nearby. Other kitchen items and a dark cabinet are in the background.\n- target: the black bowl near the cookie box\n- distractor: the plate and other nearby objects on the table\n- gripper: the robot gripper positioned above the bowl\n- spatial: The bowl is near the cookie box and below the gripper; the plate is off to the side on the table.\n- task: pick up the black bowl on the cookie box and place it on the plate"
+      },
+      {
+        "source_id": "goal__traj000029_step000034",
+        "matched_intent": "open the middle drawer of the cabinet",
+        "mismatched_intent": "put the wine bottle on the rack",
+        "char_overlap": 0.11267605633802817,
+        "bullet_diff": 6,
+        "caption_matched_preview": "- scene: A wooden cabinet drawer is open on a light tabletop, with a black bowl visible near the drawer and a plate on the table.\n- target: the open middle drawer of the cabinet\n- distractor: the black bowl near the drawer opening\n- gripper: the robot gripper positioned above the cabinet\n- spatial: The drawer is open on the right side of the frame, with the bowl inside and the plate on the table to the left.\n- task: open the middle drawer of the cabinet",
+        "caption_mismatched_preview": "- scene: The robot is positioned over a table with the wine bottle visible near the rack area.\n- target: the wine bottle\n- distractor: the bowl and nearby plate\n- gripper: the gripper holding the bottle\n- spatial: The bottle is directly under the gripper and the rack is to the right.\n- task: put the wine bottle on the rack"
+      },
+      {
+        "source_id": "goal__traj000016_step000054",
+        "matched_intent": "open the top drawer and put the bowl inside",
+        "mismatched_intent": "put the bowl on the stove",
+        "char_overlap": 0.3434343434343434,
+        "bullet_diff": 6,
+        "caption_matched_preview": "- scene: A wooden cabinet drawer is open on a light tabletop, with a black bowl visible near the drawer and a plate nearby.\n- target: the black bowl\n- distractor: the open drawer area and nearby plate\n- gripper: the robot gripper positioned above the bowl\n- spatial: The bowl is near the drawer opening; the plate sits off to the side on the table.\n- task: open the top drawer and put the bowl inside",
+        "caption_mismatched_preview": "- scene: A kitchen counter with a stove at the right, a black bowl near the stove, a plate on the counter, and a small packet in the middle; the robot arm is visible above the workspace.\n- target: the black bowl near the stove\n- distractor: the plate on the counter\n- gripper: the robot gripper near the bowl\n- spatial: The bowl is close to the stove on the right side of the counter; the plate is lower-left of the bowl.\n- task: pick up the black bowl on the stove and place it on the plate"
+      },
+      {
+        "source_id": "goal__traj000004_step000014",
+        "matched_intent": "put the bowl on the stove",
+        "mismatched_intent": "open the top drawer and put the bowl inside",
+        "char_overlap": 0.1122334455667789,
+        "bullet_diff": 6,
+        "caption_matched_preview": "- scene: A kitchen counter with a stove at the right, a black bowl near the stove, a plate on the counter, and a small packet in the middle; the robot arm is visible above the workspace.\n- target: the black bowl near the stove\n- distractor: the plate on the counter\n- gripper: the robot gripper near the bowl\n- spatial: The bowl is close to the stove on the right side of the counter; the plate is lower left of the bowl.\n- task: pick up the black bowl on the stove and place it on the plate",
+        "caption_mismatched_preview": "- scene: A wooden cabinet drawer is open on a light tabletop, with a black bowl visible near the drawer and a plate nearby.\n- target: the black bowl\n- distractor: the open drawer area and nearby plate\n- gripper: the robot gripper positioned above the bowl\n- spatial: The bowl is near the drawer opening; the plate sits off to the side on the table.\n- task: open the top drawer and put the bowl inside"
+      },
+      {
+        "source_id": "goal__traj000021_step000054",
+        "matched_intent": "put the bowl on top of the cabinet",
+        "mismatched_intent": "push the plate to the front of the stove",
+        "char_overlap": 0.12474849094567404,
+        "bullet_diff": 6,
+        "caption_matched_preview": "- scene: A tabletop scene with a robot arm above a light wooden surface. A black cabinet is on the right, a small metal bowl sits near the center, a plate is below it, and a small packet lies to the left.\n- target: the small metal bowl near the center of the table\n- distractor: the black cabinet on the right and the plate below the bowl\n- gripper: the robot gripper near the bowl\n- spatial: The bowl is left of the cabinet and above the plate; the gripper is positioned near the bowl.\n- task: pick up the bowl and place it on top of the cabinet",
+        "caption_mismatched_preview": "- scene: A kitchen counter with a stove at the right, a plate near the center, and a small bowl/cup near the lower left; the robot arm is visible above the workspace.\n- target: the plate\n- distractor: the small bowl/cup near the lower left\n- gripper: the robot gripper above the counter\n- spatial: The plate is in front of the stove area and slightly left of it; the bowl is lower left of the plate.\n- task: push the plate to the front of the stove"
+      },
+      {
+        "source_id": "goal__traj000252_step000004",
+        "matched_intent": "put the bowl on the stove",
+        "mismatched_intent": "open the middle drawer of the cabinet",
+        "char_overlap": 0.24733475479744135,
+        "bullet_diff": 6,
+        "caption_matched_preview": "- scene: A kitchen counter with a stove at the right, a black bowl near the stove, a plate on the counter, and a small packet in the middle; the robot arm is visible above the workspace.\n- target: the black bowl near the stove\n- distractor: the plate on the counter\n- gripper: the robot gripper near the bowl\n- spatial: The bowl is close to the stove on the right side of the counter; the plate is lower-left of the bowl.\n- task: pick up the black bowl on the stove and place it on the plate",
+        "caption_mismatched_preview": "- scene: A wooden cabinet is visible with a drawer unit on the right, a plate on the table, and a small bowl-like object near the cabinet area.\n- target: the middle drawer handle of the cabinet\n- distractor: the plate on the table\n- gripper: the robot gripper positioned near the cabinet front\n- spatial: The target drawer is on the right side of the scene, with the gripper approaching from the left.\n- task: open the middle drawer of the cabinet"
+      },
+      {
+        "source_id": "goal__traj000152_step000018",
+        "matched_intent": "put the wine bottle on top of the cabinet",
+        "mismatched_intent": "turn on the stove",
+        "char_overlap": 0.32783705140640157,
+        "bullet_diff": 6,
+        "caption_matched_preview": "- scene: A tabletop scene with a wooden cabinet at the right, a small metal bowl near the center, a red-rimmed plate below it, and a dark bottle standing near the cabinet; robot arms are visible above.\n- target: the wine bottle near the cabinet\n- distractor: the small metal bowl and the plate on the table\n- gripper: the robot gripper near the bottle\n- spatial: The bottle is to the right of the bowl and above the plate; the cabinet is on the right side of the frame.\n- task: pick up the wine bottle and place it on the cabinet",
+        "caption_mismatched_preview": "- scene: A kitchen counter with a stove at the right, a black bowl near the stove, a plate on the counter, and a small packet in the middle; the stove area is visible with a burner surface.\n- target: the black bowl near the stove\n- distractor: the plate on the counter\n- gripper: the robot gripper positioned above the bowl\n- spatial: The bowl is near the stove on the right side of the counter; the plate is lower left of the bowl.\n- task: pick up the black bowl on the stove and place it on the plate"
+      },
+      {
+        "source_id": "goal__traj000034_step000008",
+        "matched_intent": "put the bowl on the plate",
+        "mismatched_intent": "put the cream cheese in the bowl",
+        "char_overlap": 0.33212996389891697,
+        "bullet_diff": 6,
+        "caption_matched_preview": "- scene: A tabletop workspace with a robot arm above a light wooden surface. A black bowl sits near a small cookie box, and a plate is visible nearby. Other small items and a dark cabinet-like object are also present.\n- target: the black bowl near the cookie box\n- distractor: the plate and other small objects on the table\n- gripper: the robot gripper positioned above the bowl area\n- spatial: The bowl is near the cookie box and the plate is nearby on the table.\n- task: pick up the black bowl on the cookie box and place it on the plate",
+        "caption_mismatched_preview": "- scene: A tabletop workspace with a robot arm above a light wood surface; a black bowl sits near the lower right, a small rectangular package is near the center, and a dark cabinet or box is on the right.\n- target: the small rectangular cream cheese package\n- distractor: the black bowl at the lower right\n- gripper: the robot gripper near the center-left of the workspace\n- spatial: The cream cheese package is left of the bowl and below the robot arm; the bowl is to the right and slightly below the package.\n- task: pick up the cream cheese and place it in the bowl"
+      },
+      {
+        "source_id": "goal__traj000044_step000042",
+        "matched_intent": "put the bowl on the stove",
+        "mismatched_intent": "put the wine bottle on top of the cabinet",
+        "char_overlap": 0.16470588235294117,
+        "bullet_diff": 6,
+        "caption_matched_preview": "- scene: A kitchen counter with a stove at the right, a black bowl near the stove, a plate on the counter, and a small packet in the middle; the robot arm is visible above the workspace.\n- target: the black bowl near the stove\n- distractor: the plate on the counter\n- gripper: the robot gripper near the bowl\n- spatial: The bowl is close to the stove on the right side of the counter; the plate is lower-left of the bowl.\n- task: pick up the black bowl on the stove and place it on the plate",
+        "caption_mismatched_preview": "- scene: A tabletop scene with a wooden cabinet at the right, a small metal bowl near the center, a red-rimmed plate below it, and a dark bottle standing near the cabinet; robot arms are visible above.\n- target: the wine bottle near the cabinet\n- distractor: the small metal bowl and the plate on the table\n- gripper: the robot gripper near the bottle\n- spatial: The bottle is to the right of the bowl and above the plate; the cabinet is on the right side of the frame.\n- task: pick up the wine bottle and place it on the cabinet"
+      }
+    ]
+  },
+  "cf_eval": {
+    "status": "complete",
+    "n_complete": 32,
+    "n_target": 32,
+    "steer_lift": {
+      "mean": 0.11705545017806193,
+      "std": 0.13975233188044656,
+      "se": 0.025100259776333688,
+      "t": 4.663515486338916,
+      "wins": 25,
+      "losses": 7,
+      "ties": 0,
+      "n": 32
+    },
+    "sem_gap": {
+      "mean": 0.18783510524857167,
+      "std": 0.1601212340727397,
+      "se": 0.028758622606534338,
+      "t": 6.531436078092733,
+      "wins": 26,
+      "losses": 6,
+      "ties": 0,
+      "n": 32
+    },
+    "lang_swap": {
+      "mean": 0.08431272668531162,
+      "std": 0.12032148374446051,
+      "se": 0.02161037642823352,
+      "t": 3.9014927373110795,
+      "wins": 22,
+      "losses": 8,
+      "ties": 2,
+      "n": 32
+    },
+    "codec_above_lang": 0.10352237856326005,
+    "predicate_rates": {
+      "matched_semantic": 0.0,
+      "matched_no_steer": 0.0,
+      "mismatched_semantic": 0.0,
+      "mismatched_no_steer": 0.0
+    },
+    "per_sample": [
+      {
+        "sample_index": 0,
+        "target_task": "push_the_plate_to_the_front_of_the_stove",
+        "m_sem": 0.46180719385544455,
+        "m_nost": 0.17532526453336078,
+        "mm_sem": 0.3621336594223976,
+        "mm_nost": 0.06866759061813354,
+        "steer_lift": 0.2864819293220838,
+        "sem_gap": 0.09967353443304694,
+        "lang_swap": 0.10665767391522724
+      },
+      {
+        "sample_index": 1,
+        "target_task": "turn_on_the_stove",
+        "m_sem": 0.34074242413043976,
+        "m_nost": 0.18605043987433112,
+        "mm_sem": 0.0,
+        "mm_nost": 0.10915880898634589,
+        "steer_lift": 0.15469198425610864,
+        "sem_gap": 0.34074242413043976,
+        "lang_swap": 0.07689163088798523
+      },
+      {
+        "sample_index": 2,
+        "target_task": "put_the_cream_cheese_in_the_bowl",
+        "m_sem": 0.3676662892103195,
+        "m_nost": 0.2528902937968572,
+        "mm_sem": 0.04976469278335571,
+        "mm_nost": 0.07271809379259742,
+        "steer_lift": 0.11477599541346234,
+        "sem_gap": 0.3179015964269638,
+        "lang_swap": 0.18017220000425976
+      },
+      {
+        "sample_index": 3,
+        "target_task": "put_the_cream_cheese_in_the_bowl",
+        "m_sem": 0.4550463445484638,
+        "m_nost": 0.4268434302260478,
+        "mm_sem": 0.1535579115152359,
+        "mm_nost": 0.07410037517547607,
+        "steer_lift": 0.028202914322416006,
+        "sem_gap": 0.3014884330332279,
+        "lang_swap": 0.35274305505057174
+      },
+      {
+        "sample_index": 4,
+        "target_task": "put_the_wine_bottle_on_top_of_the_cabinet",
+        "m_sem": 0.3610257456700007,
+        "m_nost": 0.3672371332844098,
+        "mm_sem": 0.24929363528887427,
+        "mm_nost": 0.3214806715647379,
+        "steer_lift": -0.006211387614409147,
+        "sem_gap": 0.1117321103811264,
+        "lang_swap": 0.045756461719671904
+      },
+      {
+        "sample_index": 5,
+        "target_task": "put_the_wine_bottle_on_top_of_the_cabinet",
+        "m_sem": 0.3324771821498871,
+        "m_nost": 0.3835095365842183,
+        "mm_sem": 0.216336190700531,
+        "mm_nost": 0.3706406454245249,
+        "steer_lift": -0.05103235443433124,
+        "sem_gap": 0.11614099144935608,
+        "lang_swap": 0.012868891159693419
+      },
+      {
+        "sample_index": 6,
+        "target_task": "open_the_top_drawer_and_put_the_bowl_inside",
+        "m_sem": 0.523002514615655,
+        "m_nost": 0.2897334670027097,
+        "mm_sem": 0.21082332481940586,
+        "mm_nost": 0.1741843745112419,
+        "steer_lift": 0.23326904761294526,
+        "sem_gap": 0.3121791897962491,
+        "lang_swap": 0.11554909249146778
+      },
+      {
+        "sample_index": 7,
+        "target_task": "put_the_bowl_on_the_stove",
+        "m_sem": 0.5024958848953247,
+        "m_nost": 0.18764590968688327,
+        "mm_sem": 0.16753890365362167,
+        "mm_nost": 0.16743958741426468,
+        "steer_lift": 0.31484997520844143,
+        "sem_gap": 0.33495698124170303,
+        "lang_swap": 0.020206322272618593
+      },
+      {
+        "sample_index": 8,
+        "target_task": "put_the_cream_cheese_in_the_bowl",
+        "m_sem": 0.3959304764866829,
+        "m_nost": 0.2592873374621073,
+        "mm_sem": 0.13200509548187256,
+        "mm_nost": 0.030796955029169685,
+        "steer_lift": 0.1366431390245756,
+        "sem_gap": 0.26392538100481033,
+        "lang_swap": 0.22849038243293762
+      },
+      {
+        "sample_index": 9,
+        "target_task": "put_the_bowl_on_the_plate",
+        "m_sem": 0.45727231353521347,
+        "m_nost": 0.38136597226063407,
+        "mm_sem": 0.16921791682640708,
+        "mm_nost": 0.16791689644257224,
+        "steer_lift": 0.0759063412745794,
+        "sem_gap": 0.2880543967088064,
+        "lang_swap": 0.21344907581806183
+      },
+      {
+        "sample_index": 10,
+        "target_task": "turn_on_the_stove",
+        "m_sem": 0.3593362172444661,
+        "m_nost": 0.16562951604525245,
+        "mm_sem": 0.0,
+        "mm_nost": 0.10574249426523841,
+        "steer_lift": 0.19370670119921368,
+        "sem_gap": 0.3593362172444661,
+        "lang_swap": 0.05988702178001404
+      },
+      {
+        "sample_index": 11,
+        "target_task": "put_the_bowl_on_top_of_the_cabinet",
+        "m_sem": 0.2876641179124514,
+        "m_nost": 0.3411538476745287,
+        "mm_sem": 0.17118472109238303,
+        "mm_nost": 0.16938992589712143,
+        "steer_lift": -0.05348972976207733,
+        "sem_gap": 0.11647939682006836,
+        "lang_swap": 0.1717639217774073
+      },
+      {
+        "sample_index": 12,
+        "target_task": "put_the_wine_bottle_on_the_rack",
+        "m_sem": 0.2895694623390833,
+        "m_nost": 0.25001954535643256,
+        "mm_sem": 0.3389173150062561,
+        "mm_nost": 0.3225086530049642,
+        "steer_lift": 0.03954991698265076,
+        "sem_gap": -0.04934785266717279,
+        "lang_swap": -0.07248910764853161
+      },
+      {
+        "sample_index": 13,
+        "target_task": "turn_on_the_stove",
+        "m_sem": 0.31535274535417557,
+        "m_nost": 0.13395923376083374,
+        "mm_sem": 0.0,
+        "mm_nost": 0.03464488188425696,
+        "steer_lift": 0.18139351159334183,
+        "sem_gap": 0.31535274535417557,
+        "lang_swap": 0.09931435187657678
+      },
+      {
+        "sample_index": 14,
+        "target_task": "put_the_wine_bottle_on_top_of_the_cabinet",
+        "m_sem": 0.3645228371024132,
+        "m_nost": 0.3275885830322901,
+        "mm_sem": 0.201368843515714,
+        "mm_nost": 0.3976409286260605,
+        "steer_lift": 0.036934254070123074,
+        "sem_gap": 0.1631539935866992,
+        "lang_swap": -0.07005234559377038
+      },
+      {
+        "sample_index": 15,
+        "target_task": "push_the_plate_to_the_front_of_the_stove",
+        "m_sem": 0.5384785700589418,
+        "m_nost": 0.24948590993881226,
+        "mm_sem": 0.25984281301498413,
+        "mm_nost": 0.09332506855328876,
+        "steer_lift": 0.2889926601201296,
+        "sem_gap": 0.2786357570439577,
+        "lang_swap": 0.1561608413855235
+      },
+      {
+        "sample_index": 16,
+        "target_task": "put_the_wine_bottle_on_top_of_the_cabinet",
+        "m_sem": 0.3775089879830678,
+        "m_nost": 0.35077424347400665,
+        "mm_sem": 0.23313767214616138,
+        "mm_nost": 0.22487053275108337,
+        "steer_lift": 0.02673474450906116,
+        "sem_gap": 0.14437131583690643,
+        "lang_swap": 0.12590371072292328
+      },
+      {
+        "sample_index": 17,
+        "target_task": "put_the_bowl_on_the_stove",
+        "m_sem": 0.3254922305544217,
+        "m_nost": 0.297247476875782,
+        "mm_sem": 0.4542770187060038,
+        "mm_nost": 0.17813459783792496,
+        "steer_lift": 0.02824475367863971,
+        "sem_gap": -0.12878478815158206,
+        "lang_swap": 0.11911287903785706
+      },
+      {
+        "sample_index": 18,
+        "target_task": "turn_on_the_stove",
+        "m_sem": 0.37860324482123053,
+        "m_nost": 0.0,
+        "mm_sem": 0.0,
+        "mm_nost": 0.01247776548067725,
+        "steer_lift": 0.37860324482123053,
+        "sem_gap": 0.37860324482123053,
+        "lang_swap": -0.01247776548067725
+      },
+      {
+        "sample_index": 19,
+        "target_task": "put_the_wine_bottle_on_top_of_the_cabinet",
+        "m_sem": 0.3799937566121419,
+        "m_nost": 0.39065692822138465,
+        "mm_sem": 0.45630842943986255,
+        "mm_nost": 0.3933595269918442,
+        "steer_lift": -0.010663171609242739,
+        "sem_gap": -0.07631467282772064,
+        "lang_swap": -0.00270259877045953
+      },
+      {
+        "sample_index": 20,
+        "target_task": "put_the_cream_cheese_in_the_bowl",
+        "m_sem": 0.4099042018254598,
+        "m_nost": 0.06279491384824115,
+        "mm_sem": 0.26634527246157325,
+        "mm_nost": 0.23452898363272345,
+        "steer_lift": 0.34710928797721863,
+        "sem_gap": 0.14355892936388653,
+        "lang_swap": -0.1717340697844823
+      },
+      {
+        "sample_index": 21,
+        "target_task": "open_the_middle_drawer_of_the_cabinet",
+        "m_sem": 0.15987597902615863,
+        "m_nost": 0.0,
+        "mm_sem": 0.0,
+        "mm_nost": 0.0,
+        "steer_lift": 0.15987597902615863,
+        "sem_gap": 0.15987597902615863,
+        "lang_swap": 0.0
+      },
+      {
+        "sample_index": 22,
+        "target_task": "put_the_wine_bottle_on_top_of_the_cabinet",
+        "m_sem": 0.3684898490707079,
+        "m_nost": 0.33560682336489356,
+        "mm_sem": 0.4350212439894676,
+        "mm_nost": 0.32912380496660865,
+        "steer_lift": 0.03288302570581436,
+        "sem_gap": -0.0665313949187597,
+        "lang_swap": 0.006483018398284912
+      },
+      {
+        "sample_index": 23,
+        "target_task": "open_the_top_drawer_and_put_the_bowl_inside",
+        "m_sem": 0.46820611506700516,
+        "m_nost": 0.5374551316102345,
+        "mm_sem": 0.33452504128217697,
+        "mm_nost": 0.2463626191020012,
+        "steer_lift": -0.06924901654322935,
+        "sem_gap": 0.13368107378482819,
+        "lang_swap": 0.2910925125082333
+      },
+      {
+        "sample_index": 24,
+        "target_task": "put_the_bowl_on_the_plate",
+        "m_sem": 0.5095264924069245,
+        "m_nost": 0.4081273525953293,
+        "mm_sem": 0.166600801050663,
+        "mm_nost": 0.16496003419160843,
+        "steer_lift": 0.10139913981159521,
+        "sem_gap": 0.3429256913562615,
+        "lang_swap": 0.24316731840372086
+      },
+      {
+        "sample_index": 25,
+        "target_task": "push_the_plate_to_the_front_of_the_stove",
+        "m_sem": 0.5468680653721094,
+        "m_nost": 0.20567942659060157,
+        "mm_sem": 0.06866759061813354,
+        "mm_nost": 0.06866759061813354,
+        "steer_lift": 0.34118863878150785,
+        "sem_gap": 0.47820047475397587,
+        "lang_swap": 0.13701183597246802
+      },
+      {
+        "sample_index": 26,
+        "target_task": "put_the_cream_cheese_in_the_bowl",
+        "m_sem": 0.39919534573952353,
+        "m_nost": 0.3407933861017227,
+        "mm_sem": 0.07292536894480384,
+        "mm_nost": 0.027442276477813724,
+        "steer_lift": 0.058401959637800815,
+        "sem_gap": 0.3262699767947197,
+        "lang_swap": 0.313351109623909
+      },
+      {
+        "sample_index": 27,
+        "target_task": "put_the_wine_bottle_on_top_of_the_cabinet",
+        "m_sem": 0.3840194543202718,
+        "m_nost": 0.3658946628371874,
+        "mm_sem": 0.27981334924697876,
+        "mm_nost": 0.4211534957091013,
+        "steer_lift": 0.01812479148308438,
+        "sem_gap": 0.10420610507329303,
+        "lang_swap": -0.05525883287191391
+      },
+      {
+        "sample_index": 28,
+        "target_task": "put_the_wine_bottle_on_top_of_the_cabinet",
+        "m_sem": 0.3781012470523516,
+        "m_nost": 0.36076467732588446,
+        "mm_sem": 0.41586756209532416,
+        "mm_nost": 0.3278459757566452,
+        "steer_lift": 0.017336569726467133,
+        "sem_gap": -0.037766315042972565,
+        "lang_swap": 0.03291870156923926
+      },
+      {
+        "sample_index": 29,
+        "target_task": "put_the_wine_bottle_on_top_of_the_cabinet",
+        "m_sem": 0.3589853545029958,
+        "m_nost": 0.3704928010702133,
+        "mm_sem": 0.38210297127564746,
+        "mm_nost": 0.37270747870206833,
+        "steer_lift": -0.011507446567217527,
+        "sem_gap": -0.023117616772651672,
+        "lang_swap": -0.002214677631855011
+      },
+      {
+        "sample_index": 30,
+        "target_task": "put_the_wine_bottle_on_top_of_the_cabinet",
+        "m_sem": 0.3484948128461838,
+        "m_nost": 0.41008616735537845,
+        "mm_sem": 0.30157310515642166,
+        "mm_nost": 0.4341015244523684,
+        "steer_lift": -0.061591354509194673,
+        "sem_gap": 0.046921707689762115,
+        "lang_swap": -0.02401535709698993
+      },
+      {
+        "sample_index": 31,
+        "target_task": "push_the_plate_to_the_front_of_the_stove",
+        "m_sem": 0.4828859517971674,
+        "m_nost": 0.06866759061813354,
+        "mm_sem": 0.06866759061813354,
+        "mm_nost": 0.06866759061813354,
+        "steer_lift": 0.4142183611790339,
+        "sem_gap": 0.4142183611790339,
+        "lang_swap": 0.0
+      }
+    ]
+  }
 }

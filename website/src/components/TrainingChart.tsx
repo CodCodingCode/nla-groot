@@ -21,18 +21,18 @@ export default function TrainingChart({ points }: Props) {
     .filter((p) => p.step !== null && p.step !== undefined)
     .map((p) => ({
       step: p.step,
-      fve: p.fve ?? null,
-      closed_greedy_fve: p.closed_greedy_fve ?? null,
+      val_cosine: p.val_cosine ?? null,
+      closed_greedy_cosine: p.closed_greedy_cosine ?? null,
     }));
 
   return (
     <div className="card">
-      <p className="chart-title">SFT validation curves</p>
+      <p className="chart-title">SFT closed-loop reconstruction during training</p>
       <p className="chart-sub">
-        Teacher-forced FVE versus closed-loop greedy FVE during the
-        <code> libero_4suite_v3</code> run. Closed-loop tracks teacher-forced
-        closely — a strong autoencoder signal that, on its own, does not
-        predict caption grounding or behavioral steering.
+        Held-out closed-greedy and teacher-forced cosine over training
+        steps. Closed-loop cosine climbing past 0.8 indicates the codec is
+        producing direction-correct reconstructions even from its own
+        decoded captions, not just teacher-forced text.
       </p>
       <ResponsiveContainer width="100%" height={260}>
         <LineChart data={data} margin={{ top: 12, right: 16, bottom: 24, left: 8 }}>
@@ -52,7 +52,7 @@ export default function TrainingChart({ points }: Props) {
             domain={[0, 1]}
             tickFormatter={(v: number) => v.toFixed(2)}
             label={{
-              value: "FVE",
+              value: "cosine (higher = better)",
               angle: -90,
               position: "insideLeft",
               fontSize: 11,
@@ -62,8 +62,8 @@ export default function TrainingChart({ points }: Props) {
           <Legend />
           <Line
             type="monotone"
-            dataKey="fve"
-            name="teacher-forced FVE"
+            dataKey="val_cosine"
+            name="teacher-forced cosine"
             stroke="#1f3a8a"
             strokeWidth={1.6}
             dot={false}
@@ -71,8 +71,8 @@ export default function TrainingChart({ points }: Props) {
           />
           <Line
             type="monotone"
-            dataKey="closed_greedy_fve"
-            name="closed-loop greedy FVE"
+            dataKey="closed_greedy_cosine"
+            name="closed-loop greedy cosine"
             stroke="#b07a14"
             strokeWidth={1.6}
             strokeDasharray="4 3"
@@ -82,8 +82,9 @@ export default function TrainingChart({ points }: Props) {
         </LineChart>
       </ResponsiveContainer>
       <p className="source">
-        Source: <code>data/sft/libero_4suite_v3/metrics.jsonl</code> (val and
-        final phases, subsampled).
+        Source: parsed from <code>data/sft/&lt;run&gt;_launch.log</code>{" "}
+        <code>[step N] val</code> and <code>[final] val</code> lines
+        (subsampled).
       </p>
     </div>
   );
