@@ -74,9 +74,14 @@ class ServerConfig:
     """UTF-8 file with the AR bullet prompt (preferred for multi-line input)."""
 
     placement: Literal[
-        "last_text", "image_patch", "anchor", "image_patch_all", "fixed"
+        "last_text", "image_patch", "anchor", "image_patch_all",
+        "image_patch_spatial", "image_patch_strided", "fixed",
     ] = "image_patch"
     """Where in the backbone token sequence to inject the steer vector."""
+
+    strided_k: int = 0
+    """K for image_patch_strided placement; must match the AR's spatial K
+    output. v8 uses K=128 (full patch grid). Ignored for other placements."""
 
     blend: float = 1.0
     """Blend factor (1.0 = hard replace; 0.0 = no-op passthrough)."""
@@ -182,6 +187,7 @@ def main(config: ServerConfig) -> None:
             blend=float(config.blend),
             fixed_token_index=config.fixed_token_index,
             image_patch_seed=int(config.image_patch_seed),
+            strided_k=int(config.strided_k),
         )
         policy = NlaSteerGr00tPolicy(
             policy,
