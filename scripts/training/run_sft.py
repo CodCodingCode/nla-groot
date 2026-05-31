@@ -308,6 +308,27 @@ def _build_parser() -> argparse.ArgumentParser:
              "--av-num-image-slots=1 callers.",
     )
     p.add_argument(
+        "--no-save-best", action="store_true",
+        help="Disable the parallel best-checkpoint snapshot. Default ON: a "
+             "separate best_av/ + best_ar/ is saved every time the val "
+             "metric --best-metric reaches a new peak, so the regular "
+             "save_every clobbers can never lose the highest-quality "
+             "checkpoint. The final log line names the best step + value.",
+    )
+    p.add_argument(
+        "--best-metric", default="closed_greedy/cosine",
+        help="Which val/eval metric drives best-checkpoint selection. "
+             "Default closed_greedy/cosine (the publishable closed-loop "
+             "reconstruction quality metric). Use the key as it appears "
+             "in the [step N] val log line.",
+    )
+    p.add_argument(
+        "--best-mode", default="max", choices=["max", "min"],
+        help="'max' (default) saves best when the metric reaches a new "
+             "high (cosine, fve). 'min' saves when it reaches a new low "
+             "(mse, ce).",
+    )
+    p.add_argument(
         "--wandb-project", default=None,
         help="W&B project name. When set, the SFT loop calls wandb.init() "
              "and mirrors every train/val/final metric to the cloud. "
@@ -586,6 +607,9 @@ def main(argv: list[str] | None = None) -> int:
         log_every=args.log_every,
         av_intent_conditioned=bool(args.av_intent_conditioned),
         combine_image_patch_and_last_text=bool(args.combine_positions),
+        save_best_checkpoint=not bool(args.no_save_best),
+        best_checkpoint_metric=args.best_metric,
+        best_checkpoint_mode=args.best_mode,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
         held_out_fraction=args.held_out_fraction,

@@ -301,6 +301,18 @@ class SFTConfig:
     # rows still go through the regular SFT objectives). ``None`` = no filter.
     action_consistency_suites: tuple[str, ...] | None = None
 
+    # Save a separate ``best_av/`` + ``best_ar/`` checkpoint whenever the val
+    # metric named in ``best_checkpoint_metric`` reaches a new peak. The
+    # regular ``av/`` + ``ar/`` paths still get overwritten on every
+    # ``save_every`` -- this is the parallel ``best`` snapshot so we never
+    # lose the highest-quality checkpoint to a regular-save clobber. When
+    # the metric isn't present in the eval (e.g. ``eval_closed_loop=False``)
+    # we silently skip without erroring.
+    save_best_checkpoint: bool = True
+    best_checkpoint_metric: str = "closed_greedy/cosine"
+    # "max" or "min". Use max for cosine/fve, min for mse/ce.
+    best_checkpoint_mode: Literal["max", "min"] = "max"
+
 
 def _setup_outputs(out_dir: Path) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -310,10 +322,18 @@ def _setup_outputs(out_dir: Path) -> dict[str, Path]:
         "log": out_dir / "log",
         "metrics": out_dir / "metrics.jsonl",
         "config": out_dir / "config.json",
+        # Parallel "best" snapshot (populated by the train loop whenever a
+        # new val-metric peak is reached). Always created so the path
+        # exists from the start; first save lands when first val eval fires.
+        "best_av": out_dir / "best_av",
+        "best_ar": out_dir / "best_ar",
+        "best_marker": out_dir / "best_checkpoint.json",
     }
     paths["av"].mkdir(exist_ok=True)
     paths["ar"].mkdir(exist_ok=True)
     paths["log"].mkdir(exist_ok=True)
+    paths["best_av"].mkdir(exist_ok=True)
+    paths["best_ar"].mkdir(exist_ok=True)
     return paths
 
 
@@ -430,6 +450,91 @@ def _wandb_log(run, payload: dict, step: int | None = None) -> None:
             run.log(clean)
     except Exception as e:  # pragma: no cover
         logger.warning("[wandb] log failed: %s", e)
+
+
+class _BestCheckpointTracker:
+    """Persist the highest-quality checkpoint based on a configured val metric.
+
+    Keeps a single rolling ``best_av/`` + ``best_ar/`` snapshot in the run's
+    output_dir. Whenever the train loop calls ``maybe_save_best(metrics,
+    step)`` and ``metrics[cfg.best_checkpoint_metric]`` reaches a new peak
+    (per ``cfg.best_checkpoint_mode``), the AV and AR are saved into the
+    best paths (overwriting the previous best) and a marker JSON is written
+    with the step + metric value. WandB gets the new peak as
+    ``train/best_<metric>`` so the dashboard shows the running best.
+
+    Defaults: track ``closed_greedy/cosine`` in ``max`` mode. Silently
+    skips when the metric isn't in the eval dict so callers with
+    eval_closed_loop=False don't crash.
+    """
+
+    def __init__(self, cfg: SFTConfig, paths: dict[str, Path], wandb_run):
+        self._cfg = cfg
+        self._paths = paths
+        self._wandb = wandb_run
+        self._metric_key = cfg.best_checkpoint_metric
+        self._mode = cfg.best_checkpoint_mode
+        self._best_value: float | None = None
+        self._best_step: int | None = None
+
+    def maybe_save_best(self, metrics: dict, step: int, av, ar) -> None:
+        if not self._cfg.save_best_checkpoint:
+            return
+        if self._metric_key not in metrics:
+            return
+        try:
+            cur = float(metrics[self._metric_key])
+        except (TypeError, ValueError):
+            return
+        if self._best_value is None:
+            is_new = True
+        elif self._mode == "max":
+            is_new = cur > self._best_value
+        elif self._mode == "min":
+            is_new = cur < self._best_value
+        else:
+            is_new = False
+        if not is_new:
+            return
+        prev = self._best_value
+        self._best_value = cur
+        self._best_step = step
+        try:
+            t0 = time.time()
+            av.save(str(self._paths["best_av"]))
+            ar.save(str(self._paths["best_ar"]))
+            marker = {
+                "step": step,
+                "metric_key": self._metric_key,
+                "metric_value": cur,
+                "metric_mode": self._mode,
+                "previous_best_value": prev,
+            }
+            self._paths["best_marker"].write_text(json.dumps(marker, indent=2))
+            logger.info(
+                "[checkpoint:best] step=%d  %s=%.4f (prev=%s)  saved in %.1fs",
+                step, self._metric_key, cur,
+                ("None" if prev is None else f"{prev:.4f}"),
+                time.time() - t0,
+            )
+            _wandb_log(
+                self._wandb,
+                {
+                    f"train/best_{self._metric_key}": cur,
+                    "train/best_step": step,
+                },
+                step=step,
+            )
+        except Exception as e:  # pragma: no cover
+            logger.warning("[checkpoint:best] save failed: %s", e)
+
+    @property
+    def best_value(self) -> float | None:
+        return self._best_value
+
+    @property
+    def best_step(self) -> int | None:
+        return self._best_step
 
 
 def _position_mix_sampler(
@@ -974,6 +1079,7 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
     paths["config"].write_text(json.dumps(_serialize_config(cfg), indent=2))
 
     wandb_run = _maybe_init_wandb(cfg, out_dir)
+    best_tracker = _BestCheckpointTracker(cfg, paths, wandb_run)
 
     torch.manual_seed(cfg.seed)
     train_loader, val_loader, train_ds, val_ds = _make_dataloaders(cfg)
@@ -1232,6 +1338,10 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
                         {f"val/{k}": v for k, v in metrics.items()},
                         step=step,
                     )
+                    # Save best-checkpoint snapshot if this eval set a new
+                    # peak for the configured metric (default
+                    # closed_greedy/cosine, max mode).
+                    best_tracker.maybe_save_best(metrics, step, av, ar)
                     final_metrics = metrics
 
             if step > 0 and step % cfg.save_every == 0:
@@ -1272,10 +1382,24 @@ def run_sft(cfg: SFTConfig) -> dict[str, Any]:
             {f"final/{k}": v for k, v in metrics.items()},
             step=step,
         )
+        # Final eval also considered for best-checkpoint comparison so the
+        # ``best`` snapshot reflects the highest-quality eval ever observed.
+        best_tracker.maybe_save_best(metrics, step, av, ar)
         final_metrics = metrics
 
     av.save(str(paths["av"]))
     ar.save(str(paths["ar"]))
+    # Surface the best-checkpoint summary in the final log so the user knows
+    # which step's weights are sitting in best_av/ + best_ar/.
+    if best_tracker.best_step is not None:
+        logger.info(
+            "[checkpoint:best] FINAL summary: best_step=%d  best_%s=%.4f  "
+            "at %s, %s",
+            best_tracker.best_step,
+            cfg.best_checkpoint_metric,
+            best_tracker.best_value,
+            paths["best_av"], paths["best_ar"],
+        )
     if tb is not None:
         tb.close()
     if wandb_run is not None:
