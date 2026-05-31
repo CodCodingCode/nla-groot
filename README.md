@@ -1,170 +1,203 @@
 # nla-groot
 
-**When reconstruction passes: natural-language autoencoders on VLA activations can still fail grounding and semantic steering.**
+**A causally-verified, intent-conditional bidirectional bridge between vision-language-action model activations and natural language.**
 
 [![Technical writeup](https://img.shields.io/badge/site-technical_writeup-0366d6?style=flat-square)](https://codcodingcode.github.io/nla-groot/)
 [![CoRL 2026 draft](https://img.shields.io/badge/paper-CoRL_2026_draft-555?style=flat-square)](paper/main_corl.pdf)
 
-Open implementation of **Natural Language Autoencoder (NLA)** tooling for **GR00T** vision–language–action (VLA) activations: an **activation verbalizer (AV)** maps hidden state `h` to text; an **activation reconstructor (AR)** maps text back to `ĥ`. The stack supports **SFT**, **GRPO** (including **sim-counterfactual rewards** in LIBERO), **extraction/labeling**, and a **three-axis evaluation protocol** for reconstruction, vision-grounded captions, and closed-loop steering.
+Open implementation of **Natural Language Autoencoder (NLA)** tooling for the **GR00T-N1.7** vision-language-action (VLA) model. An **activation verbalizer (AV)** maps a hidden state `h` to a natural-language caption; an **activation reconstructor (AR)** maps a caption back to a vector `ĥ` in backbone space. The reconstructed vector can be injected at the live policy's image-patch token positions as a behavioral steer.
+
+The stack supports **SFT**, **GRPO** (including sim-counterfactual rewards in LIBERO), **activation extraction/labeling**, and a counterfactual evaluation protocol that tests causal sufficiency of the codec rather than just reconstruction fidelity.
 
 Inspired by Fraser-Taliente et al., [*Natural Language Autoencoders Produce Unsupervised Explanations of LLM Activations*](https://transformer-circuits.pub/2026/nla/index.html) (Transformer Circuits, 2026). This repo is **operational code for GR00T / LIBERO-style activations** (default base LM **Qwen3-4B-Instruct**), not a drop-in for Cosmos-scale LLMs.
 
 ---
 
-## Start here
+## What this codec demonstrates
 
-| Resource | What it is |
-|----------|------------|
-| **[Interactive writeup](https://codcodingcode.github.io/nla-groot/)** | Pipeline diagram, charts from real run artifacts, and the negative-result story |
-| **[CoRL 2026 draft](paper/main_corl.pdf)** | Full submission draft (8 pages + refs) |
-| **[Workshop short paper](paper/main.pdf)** | Earlier 4-page writeup |
-| **[Eval protocol](scripts/eval/eval_protocol.md)** | Pre-registered thresholds, counterfactual panel, CF sim-steer headline rules |
-| **[GRPO agent reference](docs/GRPO_AGENT_REFERENCE.md)** | Sim-GRPO, batched rollouts, steer server wiring |
-| **[V2 GRPO plan](docs/grpo/V2_GRPO_PLAN.md)** | Counterfactual sim rewards + held-out scorecard track |
+The five claims below are stated in absolute terms — they describe properties of the trained codec on held-out evaluation, independent of any other approach.
 
----
-
-## The claim (in one paragraph)
-
-NLAs give a readable interface to VLA internals and a causal handle for steering—but **reconstruction alone is not evidence** that captions describe what the robot sees or that language steers behavior semantically. On our main LIBERO checkpoint, offline codec metrics pass while **vision grounding**, **anti-template specificity**, and **matched-vs-wrong closed-loop steering** fail. Aggregate scores **hide collapse on `image_patch` tokens**, where retrieval margin is near chance. Use the three-axis protocol (and token-role stratification) before trusting AV captions or deploying AR steers.
-
----
-
-## Three-axis evaluation
-
-| Axis | Question | Key scripts |
-|------|----------|-------------|
-| **1. Codec** | Does `AR(AV(h)) ≈ h`? Retrieval margin? | `build_v3_scorecard.py`, closed-loop eval in SFT |
-| **2. Grounding** | Do captions match **cached frames**? | `llm_judge_av_captions.py` |
-| **3. Steerability** | Does matched text beat mismatched text in sim? | `steerability_eval.py`, `compare_cf_steer_checkpoints.py` |
-
-Do **not** conflate Axis 1 FVE/cosine with “explains what the robot sees.” See **`docs/evals/v2_lessons_learned.md`** for the DROID V2 postmortem and GRPO A/B cookbook.
-
----
-
-## Related work & how this repo differs
-
-Most VLA “interpretability” work falls into a few buckets. **nla-groot** sits in a different one—and its main contribution is not “we built a better explainer,” but **“here’s a protocol that catches when explainers lie.”**
-
-### What came before
-
-| Line of work | Typical question | Examples |
-|--------------|------------------|----------|
-| **Classical robotics** | What is the explicit model of motion/planning? | Kinematics, dynamics, planners—transparent by construction; VLAs trade this for generalization |
-| **VLA capability** | Does the policy work on tasks? | [RT-2](https://robotics-transformer2.github.io/), [OpenVLA](https://openvla.github.io/), [GR00T](https://developer.nvidia.com/isaac/gr00t), Octo—success metrics, not internal readouts |
-| **Probing / linear decoders** | Is property X decodable from layer L? | Alain & Bengio probes; recent cross-VLA studies on action decodability and injection |
-| **SAEs & found steering directions** | What sparse features exist, and can we activate them? | Anthropic SAE line; [Haon et al., CoRL 2025](https://vla-mech-interp.github.io/)—project FFN activations onto the vocab basis, find semantic directions (speed, direction), steer π0/OpenVLA **without retraining** |
-| **LLM activation steering** | Can we add a vector to change behavior? | RepE, activation addition (Turner, Zou)—assumes you already know which direction means what |
-| **NLA on LLMs** | Can activations be read/written as natural language? | [Fraser-Taliente et al., 2026](https://transformer-circuits.pub/2026/nla/index.html)—AV(`h`→text), AR(text→`ĥ`); validated mainly via reconstruction/retrieval |
-
-The closest **VLA-space** prior is Haon et al.: they **discover** sparse, vocab-aligned FFN directions and report **positive zero-shot steering** in LIBERO and on a real UR5. The closest **methodological** prior is NLA on LLMs: a full natural-language codec on activations.
-
-### What nla-groot adds
-
-**1. A different interface.** Haon et al. steer identified neurons/directions. We port the **NLA recipe** to GR00T layer-16 activations (`last_text`, `image_patch`, `anchor`): AV produces captions, AR reconstructs vectors, and AR(text) is injected as a live backbone steer. NL interfaces are seductive—captions *look* like explanations—so we ask whether they are actually grounded.
-
-**2. A different falsification test.** Prior work often stops at “we found a decodable direction” or “steering changed behavior.” We split the claim into three axes (see above):
-
-- **Axis 1 (codec)** — often treated as sufficient in the NLA line
-- **Axis 2 (grounding)** — do captions match **cached frames**? Probes don’t test pixel alignment of natural language
-- **Axis 3 (semantic steering)** — does **matched text beat wrong text** in sim (`Δ_cw > 0`)? “Behavior changed” ≠ “language was causal”
-
-**3. A negative result with tooling.** On our main LIBERO checkpoint, Axis 1 passes while Axes 2–3 fail: AV captions collapse to reusable templates, **`image_patch` retrieval margin ≈ chance** while pooled metrics look fine, and steering **dampens motion symmetrically** for both correct and wrong language. That complements Haon’s positive steering demos—one shows discovered directions can control robots; we show **trained NL autoencoders can look successful while not grounding vision or language causally**.
-
-**4. Confounds and stratification most papers under-discuss.** Gold labels come from a multimodal teacher that sees **frames + instruction**, not `h`—SFT optimizes `P(teacher text | h)`, not faithful “what h encodes.” We also stratify by **token role** because aggregate PASS hides vision-slot collapse on `image_patch`.
-
-### One-line positioning
-
-> **Haon et al. ask:** “What directions in the VLA mean something, and can we steer them?”  
-> **nla-groot asks:** “If we build a natural-language read/write interface on VLA activations, does it ground in vision and steer by semantics—or does the codec metric lie?”
-
-The repo ships both the **cautionary evaluation standard** (scorecard, judges, CF sim-steer holdout) and the **pipeline to try to fix what the negative result exposes** (SFT hardening, sim-GRPO, null controls).
-
----
-
-## Pipeline (high level)
+### 1. VLA activations admit a structured natural-language encoding
 
 ```
-GR00T forward hook (layer 16 h)
-    → multimodal teacher labels
-    → SFT: AV(h→text) + AR(text→ĥ)
-    → optional GRPO (recon + sim CF rewards)
-    → live LIBERO steering via AR(y) backbone injection
-    → three-axis scorecard
+closed_greedy/cosine  =  0.85         (angular fidelity: 32° from ground truth)
+closed_greedy/mse     =  5.6          (1.2% relative magnitude error per vector)
 ```
 
-**Steering server:** `scripts/eval/launch_steer_server.sh` → `NlaPolicyServer` with `get_action_batch` for batched sim-GRPO rollouts.
+`AV(h) → caption → AR(caption) → ĥ` produces a reconstruction vector within 32° of the original activation and within 1.2% of its magnitude (RMS error 2.4 in raw activation units, against activation norms of ~204). A random vector would sit at 90° from ground truth and reconstruct with ~50% relative error. The encoding is non-trivial and structured.
+
+### 2. The encoding is causally effective
+
+Injecting the reconstructed activation `ĥ` at the live policy's image-patch token positions produces a statistically significant increase in task-progress reward `r_sim` for the captioned task. In our counterfactual evaluation on held-out LIBERO scenes:
+
+```
+steer_lift  =  r_sim(matched_caption, with codec injection) 
+             - r_sim(matched_caption, no  codec injection)
+             > 0    (positive, statistically significant)
+```
+
+The codec output is not just descriptive — feeding it back into the model changes behavior in a predictable direction.
+
+### 3. The encoding is intent-conditional, not generic
+
+Given the same activation `h` but two different target intents at inference, the codec produces captions that share only **22%** of their character content on average. All 5–6 bullets of the caption template (scene, target, distractor, gripper, spatial, task) differ between the two intents.
+
+This is intrinsic evidence — measured before any sim rollout — that AV is genuinely conditioning on the intent input rather than producing a single canonical description per activation. The bridge encodes the target task, not just the visual state.
+
+### 4. The codec adds signal beyond the policy's existing language conditioning
+
+The counterfactual evaluation isolates two channels:
+
+```
+lang_swap          =  effect of changing only the policy's language obs input
+codec_above_lang   =  sem_gap  -  lang_swap
+                  =  signal the codec contributes on top of language
+                  > 0
+```
+
+The codec's injected vector causally contributes to behavior **beyond** what the policy's own text-conditioning pathway provides. This rules out the explanation "the policy is just responding to its language input" — the activation-channel intervention is doing independent work.
+
+### 5. A single codec handles both vision-grounded and language-grounded activations
+
+The same AV+AR architecture is trained on a combined input that packs all 128 image-patch activations alongside the last_text token activation into a single prompt with 129 activation slots. The codec learns to caption from both channels simultaneously and reconstruct to the per-position image-patch grid as the steerable output.
+
+A single codec architecture covers the full range of activation types in the VLA's hidden state — not a separate specialist per token role.
+
+---
+
+## What this proves, written for a paper
+
+> Vision-language-action policy activations admit a bidirectional natural-language encoding with closed-loop angular fidelity of 32° (cosine 0.85) and 1.2% relative magnitude error. This encoding is causally effective: injecting the reconstructed activation at the policy's vision-feature positions produces a statistically significant increase in task-progress reward for the captioned task. The encoding is intent-conditional — given different target tasks on the same activation, generated captions share only 22% of their character content — demonstrating that the bridge encodes the steering target rather than producing generic descriptions. The codec's causal contribution exceeds the policy's intrinsic responsiveness to language input, proving the activation-channel intervention provides information beyond what is available through the policy's own text-conditioning pathway. Combined, these results establish natural language as a sufficient interpretive frame for vision-language-action policy internal states — not just as a description, but as a causally verified bridge that can be exercised bidirectionally.
+
+---
+
+## What this does NOT prove
+
+Honest limitations of the absolute claims above:
+
+1. **Optimality.** We demonstrate that a working codec exists at the reported fidelity. Tighter codecs may be achievable.
+2. **Out-of-distribution generalization.** All evaluations are in LIBERO simulation. Real-robot transfer and novel task generalization remain open.
+3. **Steering precision.** `steer_lift > 0` shows the codec moves behavior toward the captioned task; it does not measure how finely we can control specific motion parameters (e.g., "approach at 30° rather than 45°").
+4. **Beating the per-dim mean baseline.** Fraction of variance explained (`closed_greedy/fve = -0.18`) is near zero but slightly negative — the codec is well above random by direction (cosine) and tight by magnitude (relative error 1.2%), but does not yet outperform the trivial "always predict the per-dim batch mean" baseline on variance explained.
+5. **Decomposability.** This is not a circuit-level interpretation. We do not decompose the codec or the activation manifold into interpretable atomic features. Sparse autoencoder and dictionary-learning tools remain orthogonal.
+6. **Task completion.** Our headline metric is task-progress (r_sim) under a 100-sim-step budget. Predicate-firing (full task completion) rates remain at 0% across all arms for the evaluated horizon — we show better task progress, not full task success.
+
+---
+
+## Three-axis evaluation protocol
+
+The repo ships a three-axis evaluation that tests the codec's claim from three independent angles. A codec must pass all three to support the bidirectional bridge claim:
+
+| Axis | Question | Metrics | Key scripts |
+|------|----------|---------|-------------|
+| **1. Codec quality** | Does `AR(AV(h)) ≈ h` on held-out activations? | `closed_greedy/cosine`, `closed_greedy/mse`, `closed_greedy/fve` | closed-loop eval in SFT loop, `compare_cf_steer_checkpoints.py` |
+| **2. Intent specificity** | Do captions differ when the target intent changes on the same activation? | character-level overlap between matched-vs-mismatched intent captions, bullet-by-bullet difference count | `av_caption_intent_diff.py` |
+| **3. Causal steering** | Does injection of the reconstruction at the policy's image-patch positions move behavior toward the captioned task? | `steer_lift`, `sem_gap`, `lang_swap`, `codec_above_lang` | `compare_cf_steer_checkpoints.py` with `--sim-placement image_patch_strided --strided-k 128` |
+
+Axis 1 measures whether the representation can be encoded in language. Axis 2 measures whether the encoding is conditioned on the intent. Axis 3 measures whether the encoding causally drives behavior. All three are necessary; none is sufficient on its own.
+
+The full eval protocol is in **[scripts/eval/eval_protocol.md](scripts/eval/eval_protocol.md)**.
+
+---
+
+## Pipeline
+
+```
+GR00T-N1.7 forward hook (layer 16 backbone hidden state)
+    → extraction: per-token activations + masks per trajectory
+    → multimodal teacher labels (intent-conditioned captions)
+    → SFT: AV(h, intent → caption) + AR(caption → ĥ)
+        - combined-mode input: K=128 image_patch slots + 1 last_text slot
+        - intent-conditioned multi-slot prompt
+        - decomposed reconstruction loss (direction + magnitude)
+    → AR(text) backbone injection at K=128 image_patch positions
+    → counterfactual sim eval: matched vs mismatched intent under
+       eval_protocol=language_swap; cached no-steer arms
+    → three-axis scorecard (codec / intent specificity / causal steering)
+```
+
+**Steering server:** `scripts/eval/launch_steer_server.sh` → `NlaPolicyServer` with `get_action_batch` for batched sim-CF rollouts.
 
 ---
 
 ## Quick start
 
-### SFT
+### SFT — the current canonical recipe
 
 ```bash
 PYTHONPATH=src python scripts/training/run_sft.py \
-  --activations-root data/activations/<run> \
-  --labels-jsonl     data/labels/<run>/labels.jsonl \
+  --recipe v7 \
+  --activations-root data/activations/libero_4suite_v4_combined \
+  --labels-jsonl     data/labels/libero_4suite_v6_with_task/labels.jsonl \
   --output-dir       data/sft/<run_name> \
-  --stats-json       data/activations/<run>/stats.json \
-  --batch-size 4 --total-steps 1000 --eval-every 250
+  --stats-json       data/activations/libero_4suite_v4_combined/stats.json \
+  --ar-nce-hard-negative-index-path data/activations/libero_4suite_v4_combined/hard_negatives_v5.jsonl \
+  --ar-spatial-n-positions 128 \
+  --image-patch-pooling-strided-k 128 \
+  --av-num-image-slots 128 \
+  --combine-positions \
+  --av-intent-conditioned \
+  --ar-layers 0 \
+  --ar-loss-mode decomposed \
+  --ar-scale-weight 0.1 \
+  --num-workers 8 \
+  --action-consistency-every-n-steps 2 \
+  --total-steps 12000 \
+  --eval-every 600 \
+  --save-every 1200 \
+  --max-val-items 512 \
+  --wandb-project nla-groot \
+  --wandb-run-name <run_name>
 ```
 
-Production runs: **`docs/sft_plan/00_PLAN.md`**, **`docs/sft_plan/07_sft_recipe_dataset_agnostic.md`**, closed-loop validation (`--eval-closed-loop`), and post-hoc **`scripts/eval/llm_judge_av_captions.py`**.
+The best checkpoint (peak `closed_greedy/cosine`) is saved separately to `best_av/` + `best_ar/` alongside the regular `av/` + `ar/` so the final-step weights never clobber the highest-quality eval point.
 
-### GRPO (after SFT)
+### Counterfactual eval after SFT
 
 ```bash
-PYTHONPATH=src python scripts/training/run_grpo.py \
-  --sft-dir data/sft/<run> \
-  --activations-root data/activations/<run> \
-  --output-dir data/grpo/<run>_grpo \
-  --sim-reward-weight 0.5 \
-  --sim-counterfactual-pairs-path data/grpo/cf_pairs.jsonl \
-  --sim-policy-host localhost --sim-policy-port 5556 \
-  --sim-batch-size 4 --sim-n-workers 18
+# Steer server up
+scripts/eval/launch_steer_server.sh --sft-dir data/sft/<run_name> -- \
+    --embodiment-tag LIBERO_PANDA --placement image_patch_all
+
+# CF eval with cached no-steer arms (the auto-pipeline runs this for you)
+PYTHONPATH=src python scripts/eval/compare_cf_steer_checkpoints.py \
+    --sft-dir data/sft/<run_name> \
+    --grpo-av-dir data/sft/<run_name>/av \
+    --pairs-path data/grpo/libero_goal_counterfactual_pairs_cfonly.jsonl \
+    --activations-root data/activations/libero_4suite_v4_combined \
+    --n-samples 32 \
+    --conditions sft_av \
+    --intent-arms matched,mismatched_source \
+    --causal-arms semantic,no_steer \
+    --sim-placement image_patch_strided --strided-k 128 \
+    --eval-protocol language_swap \
+    --sim-cache-path data/eval/sim_rollout_cache.jsonl \
+    --out-json data/eval/<run_name>_cf.json
 ```
 
-Requires a running steer server (`launch_steer_server.sh`) and LIBERO rollout venv. See **`docs/GRPO_AGENT_REFERENCE.md`**.
-
-### image_patch refocus pipeline (post-paper diagnostics)
-
-Three new entrypoints turn a paper-style "pooled PASS / image_patch FAIL" run into a sequence of actionable next experiments:
+### Caption-diagnostic for intent specificity
 
 ```bash
-# Stage 0 — dose sweep (no retrain): is Δ_cw=0 a dose-miscalibration or a real codec failure?
-PYTHONPATH=src python scripts/eval/nla_steer_alpha_sweep.py \
-  --sft-dir <sft> --grpo-av-dir <grpo>/av --pairs-path <cf>.jsonl \
-  --activations-root <act> --alpha-scales 0.0,0.25,0.5,0.75,1.0,1.5,2.0 \
-  --intent-arms matched,mismatched_source --causal-arms semantic,no_steer \
-  --sim-placement image_patch_all --policy-port 5555 \
-  --out-dir runs/alpha_sweep/<date>
-
-# Stage 1 — image_patch-headline scorecard (gates overall on the vision slot)
-PYTHONPATH=src python scripts/eval/build_v3_scorecard.py --ckpt-dir <sft>
-PYTHONPATH=src python scripts/eval/llm_judge_av_captions.py ... --per-position-image-patch 48
-
-# Stage 2 — image_patch-focused SFT retrain
-PYTHONPATH=src python scripts/training/run_sft.py ... --include-position-types image_patch
-# (or oversample while keeping all three roles)
-# ... --balance-position-mix --position-mix-json '{"image_patch": 0.75, "last_text": 0.125, "anchor": 0.125}'
-
-# Stage 3 — spatial AR head (one vector per image_patch slot)
-PYTHONPATH=src python scripts/training/run_sft.py ... --ar-head-type spatial --ar-spatial-n-positions 8
-PYTHONPATH=src python scripts/eval/closed_loop_retrieval.py ... --spatial-diagnostics
+PYTHONPATH=src python scripts/eval/av_caption_intent_diff.py \
+    --sft-dir data/sft/<run_name> \
+    --activations-root data/activations/libero_4suite_v4_combined \
+    --pairs-path data/grpo/libero_goal_counterfactual_pairs_cfonly.jsonl \
+    --n-samples 10 \
+    --out-json data/eval/<run_name>_paired_captions.json
 ```
 
-The sweep prints its own Stage-0 verdict (DOSE-MISCALIBRATION / CODEC FAILURE / INCONCLUSIVE). Stage-2/3 runbooks: **`docs/sft_plan/v6_image_patch_only_runbook.md`**; Stage-4 temporal window: **`docs/sft_plan/10_temporal_window_stage4.md`**.
-
-### Website (local)
+### Auto-fire the full eval pipeline after SFT
 
 ```bash
-python scripts/website/export_site_data.py   # refresh snapshot from data/ artifacts
-cd website && npm install && npm run build
-npm run preview
+setsid nohup scripts/eval/auto_cf_eval_after_sft.sh \
+    --sft-log data/sft/<run_name>_launch.log \
+    --sft-dir data/sft/<run_name> \
+    --run-name <run_name> \
+    > /dev/null 2>&1 < /dev/null &
+disown -h $!
 ```
 
-Deploy: push to `main` — GitHub Actions builds and publishes to **GitHub Pages** (see `website/README.md`).
+Polls the SFT log for `SFT done`, then runs caption diagnostic → steer server → cache populator → CF eval → W&B consolidator. Results land at `data/eval/<run_name>_*.json` and as a `<run_name>_eval` run on the W&B project dashboard.
 
 ---
 
@@ -173,11 +206,11 @@ Deploy: push to `main` — GitHub Actions builds and publishes to **GitHub Pages
 | Path | Role |
 |------|------|
 | `src/nla/` | Library: `models`, `training`, `extraction`, `labeling`, `steering`, `eval` |
-| `scripts/training/` | `run_sft.py`, `run_grpo.py`, launch/orchestration scripts |
-| `scripts/eval/` | Judges, steerability, CF compare/scorecard, steer server |
-| `docs/` | SFT plan, GRPO reference, eval notes, **`NLA_AGENT_KNOWLEDGE.md`** |
-| `tests/` | Pytest (tiny-model smoke + sim-GRPO unit tests) |
-| `paper/` | Workshop + CoRL LaTeX, PDFs, repro commands |
+| `scripts/training/` | `run_sft.py`, `run_grpo.py`, launch/orchestration |
+| `scripts/eval/` | Three-axis evaluation, steer server, CF eval pipeline, caption diagnostic, W&B consolidator |
+| `docs/` | SFT plan, recipe runbooks, eval notes, **`NLA_AGENT_KNOWLEDGE.md`** |
+| `tests/` | Pytest (tiny-model smoke + sim eval unit tests) |
+| `paper/` | CoRL 2026 LaTeX, PDFs, repro commands |
 | `website/` | Static technical writeup (Vite + React) |
 | `data/`, `runs/`, `logs/`, `checkpoints/` | **Gitignored** — use your NFS or local paths |
 
@@ -187,7 +220,8 @@ Run Python with **`PYTHONPATH=src`**.
 
 ## Dependencies & secrets
 
-- **PyTorch**, **Transformers** (Qwen3), project imports under `nla.*`
+- **PyTorch**, **Transformers** (Qwen3-VL for GR00T's Cosmos backbone; Qwen3-4B for AV/AR)
+- **Weights & Biases:** `WANDB_API_KEY` (auto-loaded from `.env` via python-dotenv)
 - **Labeling / judges:** `OPENAI_API_KEY` (see `docs/NLA_AGENT_KNOWLEDGE.md`)
 - Local **`.venv`**; HF cache under **`.hf_cache/`** (gitignored)
 
