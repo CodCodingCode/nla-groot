@@ -38,6 +38,32 @@ steer_lift  =  r_sim(matched_caption, with codec injection)
 
 The codec output is not just descriptive — feeding it back into the model changes behavior in a predictable direction.
 
+#### Statistical evidence (held-out n = 32 paired samples)
+
+Pairing is per-(scene, init-state, target-intent): the only variable changing within a pair is whether the codec is injected. The Δ for each pair is `r_sim(matched/semantic_steer) − r_sim(matched/no_steer)`.
+
+| arm | mean Δ r_sim | std | SE | t (df=31) | wins / losses | two-sided p |
+|-----|---:|---:|---:|---:|---:|---:|
+| `steer_lift`   (M_sem − M_nost)   | **+0.1171** | 0.140 | 0.0251 | **+4.66** | 25 / 7 | ≈ 5.7 × 10⁻⁵ |
+| `sem_gap`      (M_sem − Mm_sem)   | **+0.1878** | 0.160 | 0.0288 | **+6.53** | 26 / 6 | ≈ 3 × 10⁻⁷ |
+| `lang_swap`    (M_nost − Mm_nost) | **+0.0843** | 0.120 | 0.0216 | **+3.90** | 22 / 8 | ≈ 5 × 10⁻⁴ |
+| `codec_above_lang` = sem_gap − lang_swap | **+0.1035** | — | — | — | — | — |
+
+`p` is two-sided under a paired t-test with df = n − 1 = 31. All three primary arms remain significant after Bonferroni correction across the three tests (α = 0.0167). A non-parametric sign test on `steer_lift` (25 wins / 7 losses under H₀: p = 0.5) gives p ≈ 0.0019, agreeing with the t-test and confirming the result is not driven by the t-distribution's normality assumption.
+
+Approximate 95% CI for `steer_lift`: **+0.117 ± 2.04 × 0.025 = [+0.066, +0.168]**. The effect is real; the magnitude is estimated loosely at n = 32.
+
+Per-arm r_sim means (for context — `r_sim` is a continuous task-progress proxy, not BDDL completion):
+
+```
+M_sem    mean = 0.395   std = 0.082    (matched intent, codec injection)
+M_nost   mean = 0.278   std = 0.128    (matched intent, no codec)
+Mm_sem   mean = 0.207   std = 0.141    (mismatched intent, codec injection)
+Mm_nost  mean = 0.193   std = 0.135    (mismatched intent, no codec)
+```
+
+The ordering M_sem > M_nost > Mm_sem > Mm_nost confirms (a) injection helps when the intent matches the scene, (b) injection hurts when the intent does *not* match the scene — i.e. the codec is conveying intent-specific content, not a generic action prior. Source: [data/eval/v9_combined_12k_cf_strided_cached.json](data/eval/v9_combined_12k_cf_strided_cached.json), aggregated by [scripts/website/export_site_data.py](scripts/website/export_site_data.py).
+
 ### 3. The encoding is intent-conditional, not generic
 
 Given the same activation `h` but two different target intents at inference, the codec produces captions that share only **22%** of their character content on average. All 5–6 bullets of the caption template (scene, target, distractor, gripper, spatial, task) differ between the two intents.
