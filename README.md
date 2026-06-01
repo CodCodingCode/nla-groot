@@ -3,7 +3,6 @@
 **A causally-verified, intent-conditional bidirectional bridge between vision-language-action model activations and natural language.**
 
 [![Technical writeup](https://img.shields.io/badge/site-technical_writeup-0366d6?style=flat-square)](https://codcodingcode.github.io/nla-groot/)
-[![CoRL 2026 draft](https://img.shields.io/badge/paper-CoRL_2026_draft-555?style=flat-square)](paper/main_corl.pdf)
 
 Open implementation of **Natural Language Autoencoder (NLA)** tooling for the **GR00T-N1.7** vision-language-action (VLA) model. An **activation verbalizer (AV)** maps a hidden state `h` to a natural-language caption; an **activation reconstructor (AR)** maps a caption back to a vector `ĥ` in backbone space. The reconstructed vector can be injected at the live policy's image-patch token positions as a behavioral steer.
 
@@ -252,7 +251,7 @@ Polls the SFT log for `SFT done`, then runs caption diagnostic → steer server 
 | `scripts/eval/` | Three-axis evaluation, steer server, CF eval pipeline, caption diagnostic, W&B consolidator |
 | `docs/` | SFT plan, recipe runbooks, eval notes, **`NLA_AGENT_KNOWLEDGE.md`** |
 | `tests/` | Pytest (tiny-model smoke + sim eval unit tests) |
-| `paper/` | CoRL 2026 LaTeX, PDFs, repro commands |
+| `paper/` | LaTeX, PDFs, repro commands |
 | `website/` | Static technical writeup (Vite + React) |
 | `data/`, `runs/`, `logs/`, `checkpoints/` | **Gitignored** — use your NFS or local paths |
 
@@ -281,4 +280,4 @@ Smoke tests use a tiny random Qwen config so CI does not need the full 4B checkp
 
 ## Citation
 
-If you use this code or protocol, please cite the CoRL 2026 draft (BibTeX in `paper/main_corl.tex`) and the original NLA work (Fraser-Taliente et al., 2026).
+If you use this code or protocol, please cite the original NLA work (Fraser-Taliente et al., 2026).
