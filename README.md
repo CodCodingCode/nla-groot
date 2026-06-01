@@ -64,6 +64,22 @@ The ordering M_sem > M_nost > Mm_sem > Mm_nost confirms (a) injection helps when
 
 **Magnitude honesty.** An earlier n = 32 run gave `steer_lift = +0.117` with a 95% CI of `[+0.066, +0.168]`. That CI did **not** overlap the n = 100 one above; the n = 32 sample landed favorably and the magnitudes were overstated by a factor of ~2–3×. The signs and statistical significance of all four arms held under the larger sample, but the central estimates moved. The n = 100 numbers in the table above are the current best estimates; treat any prior figures as superseded. Source: [data/eval/v9_combined_12k_n100_cf_strided_cached.json](data/eval/v9_combined_12k_n100_cf_strided_cached.json), aggregated by [scripts/website/export_site_data.py](scripts/website/export_site_data.py).
 
+**Per-config rollout noise.** Because GR00T's action head is a flow-matching diffusion model with `torch.randn` initial noise ([gr00t_n1d7.py:335](third_party/Isaac-GR00T/gr00t/model/gr00t_n1d7/gr00t_n1d7.py#L335)), a single rollout per (sample, arm) cell folds sim-side stochasticity into the 0.099 between-config std. To check how much of that 0.099 was rollout luck vs real config-to-config signal, we ran [scripts/eval/per_config_noise_probe.py](scripts/eval/per_config_noise_probe.py): pick 3 configs spanning the M_sem r_sim range, run 10 rollouts each on the matched/semantic arm varying only the LIBERO seed, and pool the within-config stds:
+
+| config | mean r_sim | within-config std | range |
+|---|---:|---:|:---|
+| goal__traj000162_step000038 (wine bottle on rack) | 0.266 | 0.024 | [0.217, 0.294] |
+| goal__traj000398_step000006 (turn on stove) | 0.352 | 0.013 | [0.339, 0.376] |
+| goal__traj000310_step000036 (drawer + bowl) | 0.486 | 0.031 | [0.441, 0.525] |
+
+```
+pooled within-config std (rollout noise)   = 0.024
+between-config std (n = 100 eval, M_sem)   = 0.099
+variance share of rollout noise            = 0.024² / 0.099²  =  5.85 %
+```
+
+Rollout noise contributes ~6 % of the observed between-config variance; ~94 % is real config-to-config signal. The headline `steer_lift = +0.043` is ~1.8× the within-config rollout noise, so individual-sample wins/losses can flip under reseeding, but the aggregate over n = 100 paired samples is dominated by genuine config-to-config structure. Averaging multiple rollouts per arm would tighten the per-sample estimates by a small amount; it is not load-bearing for the aggregate sign or significance. Source: [data/eval/v9_combined_12k_noise_probe.json](data/eval/v9_combined_12k_noise_probe.json).
+
 ### 3. The encoding is intent-conditional, not generic
 
 Given the same activation `h` but two different target intents at inference, the codec produces captions that share only **22%** of their character content on average. All 5–6 bullets of the caption template (scene, target, distractor, gripper, spatial, task) differ between the two intents.
