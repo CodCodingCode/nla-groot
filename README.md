@@ -38,31 +38,31 @@ steer_lift  =  r_sim(matched_caption, with codec injection)
 
 The codec output is not just descriptive — feeding it back into the model changes behavior in a predictable direction.
 
-#### Statistical evidence (held-out n = 32 paired samples)
+#### Statistical evidence (held-out n = 100 paired samples)
 
 Pairing is per-(scene, init-state, target-intent): the only variable changing within a pair is whether the codec is injected. The Δ for each pair is `r_sim(matched/semantic_steer) − r_sim(matched/no_steer)`.
 
-| arm | mean Δ r_sim | std | SE | t (df=31) | wins / losses | two-sided p |
-|-----|---:|---:|---:|---:|---:|---:|
-| `steer_lift`   (M_sem − M_nost)   | **+0.1171** | 0.140 | 0.0251 | **+4.66** | 25 / 7 | ≈ 5.7 × 10⁻⁵ |
-| `sem_gap`      (M_sem − Mm_sem)   | **+0.1878** | 0.160 | 0.0288 | **+6.53** | 26 / 6 | ≈ 3 × 10⁻⁷ |
-| `lang_swap`    (M_nost − Mm_nost) | **+0.0843** | 0.120 | 0.0216 | **+3.90** | 22 / 8 | ≈ 5 × 10⁻⁴ |
-| `codec_above_lang` = sem_gap − lang_swap | **+0.1035** | — | — | — | — | — |
+| arm | mean Δ r_sim | std | SE | t (df=99) | wins / losses | 95% CI | two-sided p |
+|-----|---:|---:|---:|---:|---:|:---:|---:|
+| `steer_lift`   (M_sem − M_nost)         | **+0.0431** | 0.1050 | 0.0105 | **+4.11** | 62 / 38 | [+0.022, +0.064] | ≈ 8 × 10⁻⁵ |
+| `sem_gap`      (M_sem − Mm_sem)         | **+0.1490** | 0.1645 | 0.0165 | **+9.05** | 77 / 23 | [+0.116, +0.182] | ≈ 10⁻¹⁴ |
+| `lang_swap`    (M_nost − Mm_nost)       | **+0.1114** | 0.1578 | 0.0158 | **+7.06** | 74 / 24 | [+0.080, +0.143] | ≈ 2 × 10⁻¹⁰ |
+| `codec_above_lang` (paired, sem_gap − lang_swap) | **+0.0376** | 0.1177 | 0.0118 | **+3.20** | 63 / 37 | [+0.014, +0.061] | ≈ 0.002 |
 
-`p` is two-sided under a paired t-test with df = n − 1 = 31. All three primary arms remain significant after Bonferroni correction across the three tests (α = 0.0167). A non-parametric sign test on `steer_lift` (25 wins / 7 losses under H₀: p = 0.5) gives p ≈ 0.0019, agreeing with the t-test and confirming the result is not driven by the t-distribution's normality assumption.
-
-Approximate 95% CI for `steer_lift`: **+0.117 ± 2.04 × 0.025 = [+0.066, +0.168]**. The effect is real; the magnitude is estimated loosely at n = 32.
+`p` is two-sided under a paired t-test with df = n − 1 = 99. All four arms remain significant after Bonferroni correction for four tests (α = 0.0125). A non-parametric sign test on `steer_lift` (62 wins / 38 losses under H₀: p = 0.5) gives p ≈ 0.020, agreeing in sign with the t-test.
 
 Per-arm r_sim means (for context — `r_sim` is a continuous task-progress proxy, not BDDL completion):
 
 ```
-M_sem    mean = 0.395   std = 0.082    (matched intent, codec injection)
-M_nost   mean = 0.278   std = 0.128    (matched intent, no codec)
-Mm_sem   mean = 0.207   std = 0.141    (mismatched intent, codec injection)
-Mm_nost  mean = 0.193   std = 0.135    (mismatched intent, no codec)
+M_sem    mean = 0.388   std = 0.099    (matched intent, codec injection)
+M_nost   mean = 0.345   std = 0.118    (matched intent, no codec)
+Mm_sem   mean = 0.239   std = 0.146    (mismatched intent, codec injection)
+Mm_nost  mean = 0.234   std = 0.147    (mismatched intent, no codec)
 ```
 
-The ordering M_sem > M_nost > Mm_sem > Mm_nost confirms (a) injection helps when the intent matches the scene, (b) injection hurts when the intent does *not* match the scene — i.e. the codec is conveying intent-specific content, not a generic action prior. Source: [data/eval/v9_combined_12k_cf_strided_cached.json](data/eval/v9_combined_12k_cf_strided_cached.json), aggregated by [scripts/website/export_site_data.py](scripts/website/export_site_data.py).
+The ordering M_sem > M_nost > Mm_sem > Mm_nost confirms (a) injection helps when the intent matches the scene, (b) injection hurts when the intent does *not* match the scene — the codec is conveying intent-specific content, not a generic action prior.
+
+**Magnitude honesty.** An earlier n = 32 run gave `steer_lift = +0.117` with a 95% CI of `[+0.066, +0.168]`. That CI did **not** overlap the n = 100 one above; the n = 32 sample landed favorably and the magnitudes were overstated by a factor of ~2–3×. The signs and statistical significance of all four arms held under the larger sample, but the central estimates moved. The n = 100 numbers in the table above are the current best estimates; treat any prior figures as superseded. Source: [data/eval/v9_combined_12k_n100_cf_strided_cached.json](data/eval/v9_combined_12k_n100_cf_strided_cached.json), aggregated by [scripts/website/export_site_data.py](scripts/website/export_site_data.py).
 
 ### 3. The encoding is intent-conditional, not generic
 
