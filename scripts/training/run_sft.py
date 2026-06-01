@@ -308,6 +308,19 @@ def _build_parser() -> argparse.ArgumentParser:
              "--av-num-image-slots=1 callers.",
     )
     p.add_argument(
+        "--warm-start-av-from", type=str, default=None,
+        help="Path to a prior SFT checkpoint dir (e.g. "
+             "data/sft/v9_combined_12k/best_av) to warm-start AV from "
+             "instead of a fresh LoRA. Pairs with --av-weight 0 + "
+             "--ar-av-mix-max 1 for an AR-only refinement pass.",
+    )
+    p.add_argument(
+        "--warm-start-ar-from", type=str, default=None,
+        help="Path to a prior SFT checkpoint dir (e.g. "
+             "data/sft/v9_combined_12k/best_ar) to warm-start AR from "
+             "instead of a fresh LoRA.",
+    )
+    p.add_argument(
         "--no-save-best", action="store_true",
         help="Disable the parallel best-checkpoint snapshot. Default ON: a "
              "separate best_av/ + best_ar/ is saved every time the val "
@@ -585,6 +598,8 @@ def main(argv: list[str] | None = None) -> int:
         ar_cfg=ar_cfg,
         seed=args.seed,
         device=args.device,
+        warm_start_av_dir=args.warm_start_av_from,
+        warm_start_ar_dir=args.warm_start_ar_from,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,

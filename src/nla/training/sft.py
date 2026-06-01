@@ -63,6 +63,13 @@ class SFTConfig:
     seed: int = 0
     device: str = "cuda"
 
+    # Warm-start: load AV / AR weights from a prior SFT checkpoint
+    # directory (the dirs written under ``output_dir/{av,ar,best_av,best_ar}``)
+    # instead of starting from a fresh LoRA. ``None`` keeps the from-scratch
+    # behaviour. Used for second-pass refinement runs (e.g. AR-only).
+    warm_start_av_dir: str | None = None
+    warm_start_ar_dir: str | None = None
+
     held_out_fraction: float = 0.05
     batch_size: int = 4
     grad_accum_steps: int = 1
@@ -719,6 +726,19 @@ def _build_models(cfg: SFTConfig):
     logger.info("Building AR (%s, %d layers)", cfg.ar_cfg.base_model, cfg.ar_cfg.truncate_to_n_layers)
     # Share tokenizer with AV so we don't add the slot token to a second one.
     ar = ActivationReconstructor(cfg.ar_cfg, tokenizer=av.tokenizer).to(cfg.device)
+
+    # Warm-start AV / AR from a prior checkpoint. We swap weights in place
+    # so the train loop's optimizer is built against the warm-started
+    # parameters; PeftModel.from_pretrained with is_trainable=True keeps
+    # the LoRA adapters trainable.
+    if cfg.warm_start_av_dir or cfg.warm_start_ar_dir:
+        from nla.training.checkpoint import load_av_from_sft, load_ar_from_sft
+        if cfg.warm_start_av_dir:
+            logger.info("Warm-starting AV from %s", cfg.warm_start_av_dir)
+            av = load_av_from_sft(cfg.warm_start_av_dir, device=cfg.device, freeze=False)
+        if cfg.warm_start_ar_dir:
+            logger.info("Warm-starting AR from %s", cfg.warm_start_ar_dir)
+            ar = load_ar_from_sft(cfg.warm_start_ar_dir, device=cfg.device, freeze=False)
     if cfg.gradient_checkpointing:
         for module in (av.base, ar.base):
             for fn in ("gradient_checkpointing_enable", "enable_input_require_grads"):
