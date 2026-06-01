@@ -6,6 +6,13 @@
 
 Open implementation of **Natural Language Autoencoder (NLA)** tooling for the **GR00T-N1.7** vision-language-action (VLA) model. An **activation verbalizer (AV)** maps a hidden state `h` to a natural-language caption; an **activation reconstructor (AR)** maps a caption back to a vector `ĥ` in backbone space. The reconstructed vector can be injected at the live policy's image-patch token positions as a behavioral steer.
 
+**Two distinct models — keep them separate:**
+
+| Role | Model | What we do with it |
+|------|-------|--------------------|
+| **Policy** (read/write target) | **GR00T-N1.7** → **Cosmos-Reason2-2B** backbone (= ungated `Qwen/Qwen3-VL-2B-Instruct`), layer 16, hidden 2048 | The robot policy whose activations `h` we read out and inject into. One frame = **129 activation slots** (128 image-patch tokens + 1 last-text token). |
+| **Codec** (AV + AR) | **`Qwen/Qwen3-4B-Instruct`** (LoRA fine-tune) | The bidirectional translator: AV does `h → caption`, AR does `caption → ĥ`. *Not* the policy. |
+
 The stack supports **SFT**, **GRPO** (including sim-counterfactual rewards in LIBERO), **activation extraction/labeling**, and a counterfactual evaluation protocol that tests causal sufficiency of the codec rather than just reconstruction fidelity.
 
 Inspired by Fraser-Taliente et al., [*Natural Language Autoencoders Produce Unsupervised Explanations of LLM Activations*](https://transformer-circuits.pub/2026/nla/index.html) (Transformer Circuits, 2026). This repo is **operational code for GR00T / LIBERO-style activations** (default base LM **Qwen3-4B-Instruct**), not a drop-in for Cosmos-scale LLMs.
@@ -16,14 +23,17 @@ Inspired by Fraser-Taliente et al., [*Natural Language Autoencoders Produce Unsu
 
 The five claims below are stated in absolute terms — they describe properties of the trained codec on held-out evaluation, independent of any other approach.
 
-### 1. VLA activations admit a structured natural-language encoding
+### 1. VLA activations admit a structured natural-language encoding (but reconstruction is *not* high-fidelity — and that's the point)
 
 ```
-closed_greedy/cosine  =  0.85         (angular fidelity: 32° from ground truth)
+closed_greedy/cosine  =  0.85         (angular: 32° from ground truth)
 closed_greedy/mse     =  5.6          (1.2% relative magnitude error per vector)
+closed_greedy/fve     = -0.18         (variance explained: BELOW the per-dim mean baseline)
 ```
 
-`AV(h) → caption → AR(caption) → ĥ` produces a reconstruction vector within 32° of the original activation and within 1.2% of its magnitude (RMS error 2.4 in raw activation units, against activation norms of ~204). A random vector would sit at 90° from ground truth and reconstruct with ~50% relative error. The encoding is non-trivial and structured.
+`AV(h) → caption → AR(caption) → ĥ` is **not** a high-fidelity codec, and we do not claim it is. On fraction-of-variance-explained it is slightly *worse* than the trivial "always predict the per-dimension mean" baseline (`fve = -0.18`). The high cosine (0.85) and tight magnitude (1.2%) come largely from activations sharing a dominant mean direction — matching that mean is easy; the scene-distinguishing variance around it is where the codec does not win.
+
+We surface this number first on purpose: the contribution below is **not** "we reconstruct activations well." It is that *even a codec this weak on reconstruction* causally steers behavior in an intent-specific way (Claims 2–4). The interesting signal lives in the causal channel, not the MSE.
 
 ### 2. The encoding is causally effective
 
@@ -108,7 +118,7 @@ A single codec architecture covers the full range of activation types in the VLA
 
 ## What this proves, written for a paper
 
-> Vision-language-action policy activations admit a bidirectional natural-language encoding with closed-loop angular fidelity of 32° (cosine 0.85) and 1.2% relative magnitude error. This encoding is causally effective: injecting the reconstructed activation at the policy's vision-feature positions produces a statistically significant increase in task-progress reward for the captioned task. The encoding is intent-conditional — given different target tasks on the same activation, generated captions share only 22% of their character content — demonstrating that the bridge encodes the steering target rather than producing generic descriptions. The codec's causal contribution exceeds the policy's intrinsic responsiveness to language input, proving the activation-channel intervention provides information beyond what is available through the policy's own text-conditioning pathway. Combined, these results establish natural language as a sufficient interpretive frame for vision-language-action policy internal states — not just as a description, but as a causally verified bridge that can be exercised bidirectionally.
+> A bidirectional natural-language codec for vision-language-action policy activations need not reconstruct those activations well to causally control the policy. Our codec sits *below* the per-dimension-mean baseline on variance explained (`fve = -0.18`), yet injecting its reconstruction at the policy's vision-feature positions produces a statistically significant, intent-specific increase in task-progress reward for the captioned task. The intervention is specific, not generic: a *mismatched* injected intent drops reward below no injection at all, and given different target tasks on the same activation the generated captions share only 22% of their character content. The codec's causal contribution further exceeds the policy's intrinsic responsiveness to language input, showing the activation-channel intervention carries information beyond the policy's own text-conditioning pathway. Combined, these results establish natural language as a *causally sufficient* interpretive frame for vision-language-action policy internal states — exercised bidirectionally — and decouple that causal sufficiency from reconstruction fidelity, which is the property prior read-only interpretability work optimizes.
 
 ---
 
