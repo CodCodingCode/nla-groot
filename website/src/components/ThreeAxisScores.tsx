@@ -80,34 +80,34 @@ export default function ThreeAxisScores() {
       viewBox={`0 0 ${W} ${H}`}
       style={svgStyle}
       role="img"
-      aria-label="Three-axis evaluation: reconstruction cosine 0.85, intent specificity 78% distinct captions, and causal steering where matched intent (0.39) beats no-steer (0.35) beats mismatched (0.24)."
+      aria-label="Three axis evaluation: reconstruction cosine 0.85, intent specificity 78 percent distinct captions, and causal steering where matched intent (0.39) beats no steer (0.35) beats mismatched (0.24)."
     >
       {/* baselines */}
       <line x1={20} y1={BASE} x2={230} y2={BASE} stroke="#1a1a1a" strokeWidth={1} />
       <line x1={250} y1={BASE} x2={470} y2={BASE} stroke="#1a1a1a" strokeWidth={1} />
       <line x1={490} y1={BASE} x2={700} y2={BASE} stroke="#1a1a1a" strokeWidth={1} />
 
-      {/* Axis 1 — reconstruction */}
+      {/* Axis 1:reconstruction */}
       <PanelTitle cx={p1} n="AXIS 1" title="Reconstruction" />
       <Bar x={p1 - 45} w={90} frac={0.85} value="0.85" emphasis />
       <text x={p1} y={272} textAnchor="middle" fontSize={11} fill="#5a5a5a">
         cosine similarity
       </text>
 
-      {/* Axis 2 — intent specificity */}
+      {/* Axis 2:intent specificity */}
       <PanelTitle cx={p2} n="AXIS 2" title="Intent specificity" />
       <Bar x={p2 - 45} w={90} frac={0.78} value="78%" emphasis />
       <text x={p2} y={272} textAnchor="middle" fontSize={11} fill="#5a5a5a">
         distinct captions (22% overlap)
       </text>
 
-      {/* Axis 3 — causal steering */}
+      {/* Axis 3:causal steering */}
       <PanelTitle cx={p3} n="AXIS 3" title="Causal steering" />
       <Bar x={p3 - 75} w={42} frac={0.388 / 0.5} value="0.39" emphasis />
       <Bar x={p3 - 21} w={42} frac={0.345 / 0.5} value="0.35" />
       <Bar x={p3 + 33} w={42} frac={0.239 / 0.5} value="0.24" />
       <text x={p3 - 54} y={266} textAnchor="middle" fontSize={9.5} fill="#5a5a5a">match</text>
-      <text x={p3} y={266} textAnchor="middle" fontSize={9.5} fill="#5a5a5a">no-steer</text>
+      <text x={p3} y={266} textAnchor="middle" fontSize={9.5} fill="#5a5a5a">no steer</text>
       <text x={p3 + 54} y={266} textAnchor="middle" fontSize={9.5} fill="#5a5a5a">mismatch</text>
       <text x={p3} y={284} textAnchor="middle" fontSize={11} fill="#5a5a5a">
         r_sim (task progress)
