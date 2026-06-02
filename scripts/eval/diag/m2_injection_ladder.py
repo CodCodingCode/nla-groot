@@ -69,11 +69,15 @@ def main() -> int:
     ap.add_argument("--policy-host", default="localhost")
     ap.add_argument("--policy-port", type=int, default=5556)
     ap.add_argument("--n-workers", type=int, default=4)
-    ap.add_argument("--sim-batch-size", type=int, default=1)
+    ap.add_argument("--sim-batch-size", type=int, default=4)  # >=2 routes to
+    # batched_rollout.py, the ONLY path that supports image_patch_strided.
     ap.add_argument("--sim-max-steps", type=int, default=100)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--blend", type=float, default=1.0)
     ap.add_argument("--strided-k", type=int, default=128)
+    ap.add_argument("--rollout-python", default=None,
+                    help="LIBERO venv python (has gr00t+libero). Defaults to the "
+                         "libero_uv venv, matching compare_cf_steer_checkpoints.py.")
     ap.add_argument("--cache-path", default="data/eval/sim_rollout_cache.jsonl")
     ap.add_argument("--baseline-results",
                     default="data/eval/v9_combined_12k_n100_cf_strided_cached.json")
@@ -127,11 +131,15 @@ def main() -> int:
             ))
             meta.append({"sid": s.sid, "arm": arm, "target_task": s.target_task})
 
+    libero_py = args.rollout_python or str(
+        ROOT / "third_party/Isaac-GR00T/gr00t/eval/sim/LIBERO/libero_uv/.venv/bin/python"
+    )
     worker = SimRewardWorker(
         policy_host=args.policy_host,
         policy_port=args.policy_port,
         n_workers=args.n_workers,
         sim_batch_size=args.sim_batch_size,
+        rollout_python=libero_py,
         cache_path=(ROOT / args.cache_path) if not Path(args.cache_path).is_absolute()
         else args.cache_path,
     )
