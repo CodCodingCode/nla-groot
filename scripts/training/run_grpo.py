@@ -377,6 +377,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--log-level", default="INFO")
+    p.add_argument(
+        "--wandb-project", default=None,
+        help="If set, mirror filtered train/val/final metrics to this W&B "
+             "project. Only signal metrics (losses, rewards, GPU memory, "
+             "val cosine/mse/fve) are sent; system noise stays muted. "
+             "Headline summaries pinned via define_metric.",
+    )
+    p.add_argument(
+        "--wandb-run-name", default=None,
+        help="W&B run name; defaults to the output_dir basename.",
+    )
     return p
 
 
@@ -506,6 +517,8 @@ def main(argv: list[str] | None = None) -> int:
         clip_eps_high=args.clip_eps_high,
         disable_kl_anchor=args.disable_kl_anchor,
         rollout_temperature_high=args.rollout_temperature_high,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
     )
     summary = run_grpo(cfg)
     logging.info("GRPO done. %s", summary)

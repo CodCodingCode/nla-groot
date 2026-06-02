@@ -301,10 +301,116 @@ class GRPOConfig:
     # ``rollout_temperature``. We can layer a curriculum on top later.
     rollout_temperature_high: float | None = None
 
+    # W&B (optional). When ``wandb_project`` is set we mirror the SFT
+    # convention from CLAUDE.md: only the metrics that answer "is the run
+    # converging" get sent to W&B, system noise (network / temp / power)
+    # is disabled, and ``define_metric`` pins headline summaries.
+    wandb_project: str | None = None
+    wandb_run_name: str | None = None
+
 
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
+
+
+# Per CLAUDE.md: only meaningful training metrics belong in W&B. The whitelist
+# below is the answer to "would I open this chart at 3am to decide whether to
+# let this run finish?" Everything else stays in metrics.jsonl for forensic
+# debugging but doesn't crowd the dashboard.
+_WANDB_TRAIN_KEYS = (
+    "loss", "pg_loss", "kl_loss", "ar_mse",
+    "reward_mean", "reward_best",
+    "sim_reward_mean", "sim_reward_best",
+    "sim_active_frac", "sim_predicate_pos_frac", "sim_success_any_frac",
+    "advantage_abs_mean", "kl_token_mean", "gen_len_mean",
+    "dynamic_sampling_drop_frac",
+)
+
+
+def _maybe_init_wandb_grpo(cfg: "GRPOConfig", out_dir: Path):
+    """Initialize a W&B run for GRPO if ``cfg.wandb_project`` is set.
+
+    Mirrors the SFT pattern: loads ``WANDB_API_KEY`` from a repo-root .env,
+    disables W&B's auto system stats (we log GPU memory explicitly), and
+    pins headline metrics via ``define_metric``.
+    """
+    if not cfg.wandb_project:
+        return None
+    try:
+        try:
+            from dotenv import load_dotenv  # type: ignore
+            load_dotenv()
+        except Exception:
+            pass
+        import os
+        if not os.environ.get("WANDB_API_KEY"):
+            logger.warning(
+                "[wandb] WANDB_API_KEY not set after dotenv load; "
+                "wandb.init() will likely prompt or fall back to anonymous"
+            )
+        import wandb
+        run_name = cfg.wandb_run_name or out_dir.name
+        run = wandb.init(
+            project=cfg.wandb_project,
+            name=run_name,
+            config=_serialize_config(cfg),
+            dir=str(out_dir),
+            resume="allow",
+            settings=wandb.Settings(_disable_stats=True),
+        )
+        try:
+            # Losses (lower = better → summary=last for the live reduction;
+            # an early-overfit signal shows in the chart, not the summary).
+            wandb.define_metric("train/loss", summary="last")
+            wandb.define_metric("train/pg_loss", summary="last")
+            wandb.define_metric("train/kl_loss", summary="last")
+            wandb.define_metric("train/ar_mse", summary="min")
+            # Rewards (higher = better).
+            wandb.define_metric("train/reward_mean", summary="max")
+            wandb.define_metric("train/sim_reward_mean", summary="max")
+            wandb.define_metric("train/sim_predicate_pos_frac", summary="max")
+            wandb.define_metric("train/sim_success_any_frac", summary="max")
+            # GPU memory: load-bearing for OOM watch.
+            wandb.define_metric("train/gpu_memory_gb", summary="max")
+            wandb.define_metric("train/gpu_memory_reserved_gb", summary="max")
+            # Val metrics — these are the codec quality signal the same way
+            # SFT logs them. Use closed_greedy as the headline.
+            wandb.define_metric("val/mse", summary="min")
+            wandb.define_metric("val/cosine", summary="max")
+            wandb.define_metric("val/fve", summary="max")
+            wandb.define_metric("val/closed_greedy/mse", summary="min")
+            wandb.define_metric("val/closed_greedy/cosine", summary="max")
+            wandb.define_metric("val/closed_greedy/fve", summary="max")
+        except Exception as e:
+            logger.warning("[wandb] define_metric failed (non-fatal): %s", e)
+        logger.info(
+            "[wandb] initialized run %s (project=%s) -> %s",
+            run.id, cfg.wandb_project, run.url,
+        )
+        return run
+    except Exception as e:
+        logger.warning("[wandb] init failed: %s; continuing without wandb", e)
+        return None
+
+
+def _wandb_log(run, payload: dict, step: int | None = None) -> None:
+    """Mirror a metrics dict to W&B if ``run`` is live; otherwise no-op."""
+    if run is None:
+        return
+    try:
+        clean = {
+            k: v for k, v in payload.items()
+            if isinstance(v, (int, float, bool))
+        }
+        if not clean:
+            return
+        if step is not None:
+            run.log(clean, step=int(step))
+        else:
+            run.log(clean)
+    except Exception as e:
+        logger.warning("[wandb] log failed: %s", e)
 
 
 def _serialize_config(cfg: GRPOConfig) -> dict[str, Any]:
@@ -1690,6 +1796,7 @@ def run_grpo(cfg: GRPOConfig) -> dict:
     paths = _setup_outputs(out_dir)
     paths["config"].write_text(json.dumps(_serialize_config(cfg), indent=2))
     torch.manual_seed(cfg.seed)
+    wandb_run = _maybe_init_wandb_grpo(cfg, out_dir)
 
     train_loader, val_loader, train_ds, _ = _build_dataloaders(cfg)
     if len(train_ds) == 0:
@@ -1986,6 +2093,21 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                     for k, v in out["diagnostics"].items():
                         tb.add_scalar(f"train/{k}", v, step)
                     tb.add_scalar("train/lr", row["lr"], step)
+                if wandb_run is not None:
+                    payload = {
+                        f"train/{k}": row[k] for k in _WANDB_TRAIN_KEYS if k in row
+                    }
+                    # GPU memory (load-bearing for OOM watch).
+                    try:
+                        payload["train/gpu_memory_gb"] = (
+                            torch.cuda.memory_allocated() / 1024 ** 3
+                        )
+                        payload["train/gpu_memory_reserved_gb"] = (
+                            torch.cuda.memory_reserved() / 1024 ** 3
+                        )
+                    except Exception:
+                        pass
+                    _wandb_log(wandb_run, payload, step=step)
 
             if step > 0 and step % cfg.eval_every == 0:
                 eval_metrics = _evaluate_fve(
@@ -2013,6 +2135,12 @@ def run_grpo(cfg: GRPOConfig) -> dict:
                     if tb is not None:
                         for k, v in eval_metrics.items():
                             tb.add_scalar(f"val/{k}", v, step)
+                    if wandb_run is not None:
+                        _wandb_log(
+                            wandb_run,
+                            {f"val/{k}": v for k, v in eval_metrics.items()},
+                            step=step,
+                        )
                     final_metrics = eval_metrics
 
             if step > 0 and step % cfg.save_every == 0:
@@ -2047,6 +2175,12 @@ def run_grpo(cfg: GRPOConfig) -> dict:
         row = {"step": step, "phase": "final", **eval_metrics, "elapsed_s": time.time() - start}
         _write_jsonl_row(paths["metrics"], row)
         logger.info("[final] val %s", "  ".join(f"{k}={v:.4f}" for k, v in eval_metrics.items()))
+        if wandb_run is not None:
+            _wandb_log(
+                wandb_run,
+                {f"final/{k}": v for k, v in eval_metrics.items()},
+                step=step,
+            )
         final_metrics = eval_metrics
 
     policy_av.save(str(paths["av"]))
@@ -2063,4 +2197,9 @@ def run_grpo(cfg: GRPOConfig) -> dict:
             ar.save(str(ar_snap))
     if tb is not None:
         tb.close()
+    if wandb_run is not None:
+        try:
+            wandb_run.finish()
+        except Exception:
+            pass
     return {"steps": step, "metrics": final_metrics, "out_dir": str(out_dir)}
