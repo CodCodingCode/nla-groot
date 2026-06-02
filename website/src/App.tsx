@@ -28,8 +28,8 @@ export default function App() {
 
       <p>
         VLA systems can drive robot policies to perform a range of actions, but they remain
-        less interpretable than we'd like. Previous interpretability work — like linear probes
-        and SAEs — can decode layers, but can't write activations back to prove the findings
+        less interpretable than we'd like. Previous interpretability work, like linear probes
+        and SAEs, can decode layers, but can't write activations back to prove the findings
         are right. GR00T-NLA changes this by using{" "}
         <a href={NLA_PAPER} target="_blank" rel="noreferrer">
           natural language autoencoders
@@ -69,15 +69,15 @@ export default function App() {
       </p>
       <ul style={ul}>
         <li>
-          <strong>Reconstruction quality</strong> — if we run the round trip, how does ĥ
+          <strong>Reconstruction quality</strong>: if we run the round trip, how does ĥ
           compare to h?
         </li>
         <li>
-          <strong>Intent specificity</strong> — how different are the generated captions for
+          <strong>Intent specificity</strong>: how different are the generated captions for
           intent A versus intent B?
         </li>
         <li>
-          <strong>Causal steering</strong> — if we inject an activation into the policy
+          <strong>Causal steering</strong>: if we inject an activation into the policy
           mid-rollout, does its behavior change to complete the steered task?
         </li>
       </ul>
