@@ -129,6 +129,7 @@ def main() -> int:
     av = load_av_from_sft(sft_dir / "av", device=args.device, freeze=True)
 
     labels = [s.target_task for s in samples]
+    src_labels = [s.source_task or "?" for s in samples]
     real_h = np.stack([s.h_grid.mean(axis=0) for s in samples])  # [N,H] pooled real
     hhat, captions = [], []
     t0 = time.time()
@@ -153,7 +154,12 @@ def main() -> int:
         "sft_dir": str(sft_dir),
         "n_samples": len(samples),
         "n_tasks": len(set(labels)),
-        "real_h_separation": _within_between(cos_real, labels),
+        # real h is the SOURCE scene's activation -> group by source_task (its real
+        # label). Grouping it by target_task is apples-to-oranges (the target is a
+        # counterfactual the source activation has no reason to encode).
+        "real_h_separation_by_source": _within_between(cos_real, src_labels),
+        "real_h_separation_by_target": _within_between(cos_real, labels),
+        # codec hhat encodes the TARGET intent -> group by target_task.
         "codec_hhat_separation": _within_between(cos_hhat, labels),
         "caption_text_separation": _token_jaccard_separation(captions, labels),
     }
@@ -162,20 +168,24 @@ def main() -> int:
     _maybe_plots(out, "codec_hhat", hhat, labels, cos_hhat)
 
     print("\n=== Diagnostic 3: intent separation (within - between, centered cosine) ===")
-    for k in ("real_h_separation", "codec_hhat_separation", "caption_text_separation"):
+    for k in ("caption_text_separation", "codec_hhat_separation",
+              "real_h_separation_by_source", "real_h_separation_by_target"):
         d = summary[k]
-        print(f"  {k:26s} within={d['within']:+.3f} between={d['between']:+.3f} "
+        print(f"  {k:30s} within={d['within']:+.3f} between={d['between']:+.3f} "
               f"sep={d['separation']:+.3f}")
-    rs = summary["real_h_separation"]["separation"]
+    rs = summary["real_h_separation_by_source"]["separation"]
     hs = summary["codec_hhat_separation"]["separation"]
     cs = summary["caption_text_separation"]["separation"]
     print("\ninterpretation hint:")
     if cs < 0.05:
         print("  -> captions barely task-specific: suspect AV")
+    if hs > 0.1:
+        print("  -> codec ĥ separates by target intent: AR is NOT collapsing intents")
     if rs > 0.05 and hs < rs * 0.5:
-        print("  -> real h separates but ĥ collapses: suspect AR")
+        print("  -> real h (by source) separates but ĥ collapses: suspect AR")
     if rs < 0.05:
-        print("  -> real h itself barely separates: upstream/α, not the codec")
+        print("  -> real h (by source) barely separates: pooled activation lacks "
+              "task structure (or upstream/α)")
     print(f"\nWrote {out}/summary.json (+ heatmaps/pca if matplotlib present)")
     return 0
 

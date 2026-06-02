@@ -60,6 +60,13 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--max-new-tokens", type=int, default=160)
+    ap.add_argument("--labels-jsonl",
+                    default="data/labels/libero_4suite_v4_combined/labels.jsonl",
+                    help="Gold-caption source. NOTE: only v4 labels cover the CF "
+                         "eval positions; v6 labeled different steps (0/100 join). "
+                         "The v9 AR trained on v6, so teacher-forced here is OOD and "
+                         "exaggerated -- read the real AR ceiling from training "
+                         "val fve vs closed_greedy/fve instead. closed_loop is valid.")
     ap.add_argument("--out-json", required=True)
     args = ap.parse_args()
 
@@ -67,9 +74,9 @@ def main() -> int:
     if not sft_dir.is_absolute():
         sft_dir = ROOT / sft_dir
 
-    samples = load_samples(limit=args.limit, load_tensors=True)
+    samples = load_samples(limit=args.limit, load_tensors=True, labels=args.labels_jsonl)
     samples = [s for s in samples if s.gold_caption]  # need gold for teacher-forced
-    print(f"[m1] {len(samples)} samples with gold captions")
+    print(f"[m1] {len(samples)} samples with gold captions from {args.labels_jsonl}")
 
     ar = load_ar_from_sft(sft_dir / "ar", device=args.device, freeze=True)
     av = load_av_from_sft(sft_dir / "av", device=args.device, freeze=True)
