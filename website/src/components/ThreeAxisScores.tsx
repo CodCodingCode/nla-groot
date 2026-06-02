@@ -91,7 +91,7 @@ export default function ThreeAxisScores() {
       <PanelTitle cx={p1} n="AXIS 1" title="Reconstruction" />
       <Bar x={p1 - 45} w={90} frac={0.85} value="0.85" emphasis />
       <text x={p1} y={272} textAnchor="middle" fontSize={11} fill="#5a5a5a">
-        cosine, no RL · FVE −0.18
+        cosine similarity
       </text>
 
       {/* Axis 2 — intent specificity */}
