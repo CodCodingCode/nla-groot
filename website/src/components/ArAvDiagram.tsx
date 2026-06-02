@@ -11,7 +11,9 @@
 import { CSSProperties } from "react";
 
 const W = 720;
-const H = 720;
+const H = 600;
+const CX = W / 2;
+const BW = 300;
 
 const svgStyle: CSSProperties = {
   width: "100%",
@@ -21,23 +23,23 @@ const svgStyle: CSSProperties = {
   margin: "0 auto",
 };
 
-interface BoxProps {
-  x: number;
+interface Node {
   y: number;
-  w: number;
   h: number;
   label: string;
-  sub?: string;
+  subs: string[];
   emphasis?: boolean;
 }
 
-function Box({ x, y, w, h, label, sub, emphasis }: BoxProps) {
+function Box({ y, h, label, subs, emphasis }: Node) {
+  const x = CX - BW / 2;
+  const labelY = emphasis ? y + 32 : y + 28;
   return (
     <g>
       <rect
         x={x}
         y={y}
-        width={w}
+        width={BW}
         height={h}
         rx={8}
         ry={8}
@@ -46,26 +48,27 @@ function Box({ x, y, w, h, label, sub, emphasis }: BoxProps) {
         strokeWidth={1.4}
       />
       <text
-        x={x + w / 2}
-        y={sub ? y + h / 2 - 5 : y + h / 2 + 6}
+        x={CX}
+        y={labelY}
         textAnchor="middle"
-        fontSize={emphasis ? 22 : 17}
+        fontSize={emphasis ? 23 : 17}
         fontWeight={700}
         fill="#1a1a1a"
       >
         {label}
       </text>
-      {sub && (
+      {subs.map((s, i) => (
         <text
-          x={x + w / 2}
-          y={y + h / 2 + 16}
+          key={i}
+          x={CX}
+          y={labelY + 20 + i * 15}
           textAnchor="middle"
-          fontSize={12}
+          fontSize={11.5}
           fill="#5a5a5a"
         >
-          {sub}
+          {s}
         </text>
-      )}
+      ))}
     </g>
   );
 }
@@ -73,7 +76,7 @@ function Box({ x, y, w, h, label, sub, emphasis }: BoxProps) {
 interface EdgeProps {
   d: string;
   dashed?: boolean;
-  op: string; // "AV" / "AR" / "read" / "inject"
+  op: string;
   caption: string;
   lx: number;
   ly: number;
@@ -100,15 +103,36 @@ function Edge({ d, dashed, op, caption, lx, ly }: EdgeProps) {
   );
 }
 
+const POLICY: Node = { y: 20, h: 60, label: "GR00T policy", subs: ["VLA backbone · frozen"] };
+const H_NODE: Node = {
+  y: 160,
+  h: 88,
+  label: "h",
+  subs: ["activation · backbone layer 16", "129 slots: 128 image-patch + 1 last-text"],
+  emphasis: true,
+};
+const CAP: Node = {
+  y: 328,
+  h: 88,
+  label: "caption",
+  subs: ["plain English (the bottleneck)", "scene · target · gripper · plan"],
+};
+const HHAT: Node = {
+  y: 496,
+  h: 88,
+  label: "ĥ",
+  subs: ["reconstruction", "128-patch grid · steerable channel"],
+  emphasis: true,
+};
+
 export default function ArAvDiagram() {
-  const cx = W / 2;
-  const bw = 260;
+  const left = CX - BW / 2;
   return (
     <svg
-      viewBox={`0 0 ${W} ${H}`}
+      viewBox={`0 0 ${W} ${H + 8}`}
       style={svgStyle}
       role="img"
-      aria-label="Bidirectional natural-language codec: AV maps an activation to a caption, AR maps it back to a reconstructed vector that is injected into the policy."
+      aria-label="Bidirectional natural-language codec: AV maps a GR00T activation to an English caption; AR maps the caption back to a reconstructed vector that is injected into the policy's image-patch tokens to steer behavior."
     >
       <defs>
         <marker
@@ -124,25 +148,24 @@ export default function ArAvDiagram() {
         </marker>
       </defs>
 
-      {/* nodes */}
-      <Box x={cx - bw / 2} y={20} w={bw} h={62} label="GR00T policy" sub="VLA backbone · frozen" />
-      <Box x={cx - bw / 2} y={170} w={bw} h={70} label="h" sub="activation · layer 16 · [128 × 2048]" emphasis />
-      <Box x={cx - bw / 2} y={330} w={bw} h={70} label="caption" sub="English: scene · target · gripper · plan" />
-      <Box x={cx - bw / 2} y={490} w={bw} h={70} label="ĥ" sub="reconstruction · [128 × 2048]" emphasis />
+      <Box {...POLICY} />
+      <Box {...H_NODE} />
+      <Box {...CAP} />
+      <Box {...HHAT} />
 
       {/* read: policy -> h */}
-      <Edge d={`M ${cx} 82 L ${cx} 170`} op="read" caption="extract hidden state" lx={cx + 96} ly={120} />
+      <Edge d={`M ${CX} 80 L ${CX} 160`} op="read" caption="extract hidden state" lx={CX + 110} ly={112} />
       {/* AV: h -> caption */}
-      <Edge d={`M ${cx} 240 L ${cx} 330`} op="AV" caption="activation → English" lx={cx + 96} ly={278} />
+      <Edge d={`M ${CX} 248 L ${CX} 328`} op="AV" caption="activation → English" lx={CX + 110} ly={280} />
       {/* AR: caption -> hhat */}
-      <Edge d={`M ${cx} 400 L ${cx} 490`} op="AR" caption="English → activation" lx={cx + 96} ly={438} />
-      {/* inject: hhat -> policy (loop back, dashed) */}
+      <Edge d={`M ${CX} 416 L ${CX} 496`} op="AR" caption="English → activation" lx={CX + 110} ly={448} />
+      {/* inject: hhat -> policy (loop back on the left, dashed) */}
       <Edge
-        d={`M ${cx - bw / 2} 525 Q 70 525 70 51 Q 70 51 ${cx - bw / 2} 51`}
+        d={`M ${left} 540 Q 60 540 60 50 Q 60 50 ${left} 50`}
         dashed
         op="inject"
         caption="write into image-patch tokens → steer"
-        lx={150}
+        lx={155}
         ly={300}
       />
     </svg>
