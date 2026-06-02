@@ -546,7 +546,7 @@ class ActivationVerbalizer(nn.Module):
             prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
             slot_positions = self._row_slot_positions(
                 prompt_ids, num_slots,
-                include_last_text=(pos_type == "combined"),
+                include_last_text=(position_types[b] == "combined"),
             )
             row_labels = [-100] * len(prompt_ids)
 
@@ -792,7 +792,7 @@ class ActivationVerbalizer(nn.Module):
             prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
             slot_positions = self._row_slot_positions(
                 prompt_ids, num_slots,
-                include_last_text=(pos_type == "combined"),
+                include_last_text=(position_types[b] == "combined"),
             )
             gen_len = int(gen_attention_mask[b].sum().item())
             gen_real = gen_token_ids[b, :gen_len].tolist() if gen_len > 0 else []

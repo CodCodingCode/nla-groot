@@ -906,7 +906,11 @@ def grpo_step(
     # term. Otherwise AR is in eval mode and the forward is no-grad.
     if ar_train_weight > 0.0:
         ar.train()
-        pred_scaled = ar(rollout_texts, device=device)                   # (B*K, H_act)  WITH grad
+        pred_scaled = ar(rollout_texts, device=device)                   # (B*K, H_act) or (B*K, K_spatial, H_act)
+        # K=128 spatial AR head returns (B*K, K_spatial, H); collapse to
+        # (B*K, H) so reward shape matches the single-position target.
+        if pred_scaled.dim() == 3:
+            pred_scaled = pred_scaled.mean(dim=1)
         target_scaled = (acts_rep / ar.cfg.alpha).to(pred_scaled.dtype)
         rewards = -((pred_scaled.detach() - target_scaled.detach()) ** 2).mean(dim=-1).float()
         ar_mse = ((pred_scaled - target_scaled) ** 2).mean()             # scalar, with grad
@@ -914,6 +918,8 @@ def grpo_step(
         ar.eval()
         with torch.no_grad():
             pred_scaled = ar(rollout_texts, device=device)
+            if pred_scaled.dim() == 3:
+                pred_scaled = pred_scaled.mean(dim=1)
             target_scaled = (acts_rep / ar.cfg.alpha).to(pred_scaled.dtype)
             rewards = -((pred_scaled - target_scaled) ** 2).mean(dim=-1).float()
         ar_mse = torch.zeros((), device=device)
@@ -1019,6 +1025,12 @@ def grpo_step(
         )
         with torch.no_grad():
             steer_vecs = encode_texts_with_ar(ar, rollout_texts, device=device)
+            # K=128 spatial AR head returns (N, K_spatial, H); collapse for
+            # the single-vec sim placements (image_patch / last_text /
+            # image_patch_all). The downstream assemble_jobs/Worker path
+            # accepts (N, H).
+            if steer_vecs.dim() == 3:
+                steer_vecs = steer_vecs.mean(dim=1)
 
         # Build per-row policy-language overrides for the matched arm so
         # train sees the same channel as ``eval_protocol=language_swap``
@@ -1509,6 +1521,8 @@ def _evaluate_fve(
                 return_logprobs=False,
             )
             pred_scaled = ar(rollout["text"], device=device)
+            if pred_scaled.dim() == 3:
+                pred_scaled = pred_scaled.mean(dim=1)
             pred_unscaled = pred_scaled.float() * ar.cfg.alpha
             fve_acc.update(acts.float(), pred_unscaled, ptypes)
             seen += acts.shape[0]
