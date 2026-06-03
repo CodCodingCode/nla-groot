@@ -83,7 +83,7 @@ from nla.labeling.prompts import (  # noqa: E402  (sys.path manipulation above)
 
 logger = logging.getLogger("agent2.audit")
 
-REPO_ROOT = Path("/home/ubuntu/nla-groot")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 V3_BASE = REPO_ROOT / "data/labels/libero_4suite_stride2"
 V3_SUITES = ("goal", "spatial", "object", "10")
 V2_DROID_PATH_LIVE    = REPO_ROOT / "data/labels/droid_100ep/labels.jsonl"

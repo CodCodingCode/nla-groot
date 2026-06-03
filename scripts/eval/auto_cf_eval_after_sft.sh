@@ -57,7 +57,7 @@ if [[ -z "$SFT_LOG" || -z "$SFT_DIR" || -z "$RUN_NAME" ]]; then
     usage
 fi
 
-cd /lambda/nfs/Natha/nla-groot
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 OUT_LOG="data/eval/${RUN_NAME}_auto_eval.log"
 OUT_JSON="data/eval/${RUN_NAME}_cf_strided_cached.json"

@@ -15,7 +15,7 @@
 #   PYTHON_BIN       Python executable (default: .venv/bin/python)
 
 set -euo pipefail
-cd /home/ubuntu/nla-groot
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 WAIT_PID="${WAIT_PID:-523222}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-60}"

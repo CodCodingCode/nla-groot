@@ -81,6 +81,20 @@ hf_cache/
 # --- Third-party vendored code (cloned separately) ---
 third_party/
 
+# --- LaTeX build artifacts (paper/ — keep .tex/.bib/.pdf, ignore generated) ---
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+paper/main.out
+paper/main.docx
+
+# --- Claude Code runtime (local state, not source) ---
+.claude/*.lock
+.claude/scheduled_tasks.lock
+
 # --- Misc ---
 *.log
 *.tmp

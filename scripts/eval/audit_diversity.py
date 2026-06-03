@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 
-REPO = Path("/home/ubuntu/nla-groot")
+REPO = Path(__file__).resolve().parents[2]
 LIBERO_BASE = REPO / "data/labels/libero_4suite_stride2"
 # DROID is the legacy V2 baseline. After the DROID archive (see
 # scripts/migration/archive_droid.sh) labels live under

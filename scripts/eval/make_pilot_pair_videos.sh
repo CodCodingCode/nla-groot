@@ -3,7 +3,7 @@
 # and a vertical 3-up stack. Output goes under data/sim_rollouts/libero_goal_pilot/.
 set -euo pipefail
 
-ROOT=/home/ubuntu/nla-groot
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ROLL_DIR="$ROOT/data/sim_rollouts/libero_goal_pilot"
 OUT_DIR="$ROLL_DIR"
 FONT=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf

@@ -19,7 +19,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
 
-REPO = Path("/home/ubuntu/nla-groot")
+REPO = Path(__file__).resolve().parents[2]
 V3_PATH = REPO / "data/eval/libero_v3_quality_judge.jsonl"
 V4_COMBINED_PATH = REPO / "data/eval/libero_v4_quality_judge_combined.jsonl"
 V4_ONLY_PATH = REPO / "data/eval/libero_v4_quality_judge_v4only.jsonl"

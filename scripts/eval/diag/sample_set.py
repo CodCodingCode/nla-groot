@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[3]  # repo root /lambda/nfs/Natha/nla-groot
+ROOT = Path(__file__).resolve().parents[3]  # repo root
 
 DEFAULT_RESULTS = "data/eval/v9_combined_12k_n100_cf_strided_cached.json"
 DEFAULT_PAIRS = "data/grpo/libero_goal_counterfactual_pairs_cfonly.jsonl"

@@ -291,3 +291,9 @@ Smoke tests use a tiny random Qwen config so CI does not need the full 4B checkp
 ## Citation
 
 If you use this code or protocol, please cite the original NLA work (Fraser-Taliente et al., 2026).
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).

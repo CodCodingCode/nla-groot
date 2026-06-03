@@ -5,7 +5,7 @@
 #   2. m2 injection ladder (sim, ~1-2h each) for both -> touch DONE_ALL
 # Launch DETACHED (setsid nohup). Robust to SSH/session death.
 set -u
-cd /lambda/nfs/Natha/nla-groot
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 export PYTHONPATH=src
 PY=.venv/bin/python
 D=data/eval/diag
